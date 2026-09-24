@@ -218,6 +218,20 @@
   @media (max-width: 900px) { .tocsum { grid-template-columns: 1fr; } .toc .tochead, .toc .tocrow { grid-template-columns: 30px 1fr; } .toc .status { grid-column: 2; } }
   .warnbox { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 12px 0 0; padding: 12px 14px; border-radius: var(--radius);
              border: 1px solid color-mix(in srgb, var(--warn) 50%, var(--line)); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); }
+  .rdlg { border: 1px solid var(--line); border-radius: 12px; padding: 0; width: min(920px, 94vw); background: var(--panel); color: var(--ink); box-shadow: 0 20px 60px rgb(0 0 0 / .25); }
+  .rdlg::backdrop { background: rgb(15 18 24 / .45); }
+  .rdlg form { padding: 18px 20px; display: grid; gap: 14px; }
+  .rdlg h2 { margin: 0; }
+  .rgrid { display: grid; grid-template-columns: 300px 1fr; gap: 16px; }
+  @media (max-width: 760px) { .rgrid { grid-template-columns: 1fr; } }
+  .rdlg fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin: 0; display: grid; gap: 2px; align-content: start; }
+  .rdlg legend { font-size: 12px; font-weight: 700; color: var(--muted); padding: 0 4px; text-transform: uppercase; letter-spacing: .04em; }
+  .rdlg .custom { display: none; gap: 6px; margin-top: 6px; padding-top: 8px; border-top: 1px dashed var(--line); }
+  .rdlg .custom.on { display: grid; }
+  .rdlg .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .rdlg .chips .chip { cursor: pointer; } .rdlg .chips input { margin: 0; }
+  .rdlg select[multiple] { width: 100%; }
+  .rfoot { display: flex; gap: 10px; align-items: center; border-top: 1px solid var(--line); padding-top: 12px; }
   .rnav { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
   .badge.mode { background: var(--soft); color: var(--muted); border: 1px solid var(--line); font-size: 10px; vertical-align: middle; }
   .modesw button { padding: 8px 16px; font-weight: 600; }
@@ -534,9 +548,10 @@ async function viewRun(id, qs) {
   app.innerHTML = head + `
       <div class="ractions">
         <a class="btn primary" href="${base}index.html" target="_blank" rel="noopener">Side-by-side viewer ↗</a>
-        <a class="btn" href="${base}report.pdf?download=${encodeURIComponent('parity-report-' + id + '.pdf')}">⬇ PDF report</a>
+        <button class="btn" data-report title="Choose what goes into the PDF report">⬇ PDF report…</button>
         <details class="more"><summary class="btn" aria-label="More downloads">⋯</summary><div class="menu">
-          <a href="${base}report.pdf" target="_blank" rel="noopener">View PDF report ↗</a>
+          <a href="${base}report.pdf?download=${encodeURIComponent('parity-report-' + id + '-full.pdf')}">⬇ Full PDF report (everything)</a>
+          <a href="${base}report.pdf" target="_blank" rel="noopener">View full PDF report ↗</a>
           <a href="${base}results.json?download=results.json">results.json</a>
           <a href="${base}junit.xml?download=junit.xml">junit.xml</a></div></details>
       </div></div>
@@ -560,6 +575,7 @@ async function viewRun(id, qs) {
     </div>
     <div id="tab"></div>`;
   app.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { R.tab = b.dataset.tab; writeState(); renderTab(); });
+  app.querySelector('[data-report]').onclick = openReportDialog;
   app.querySelectorAll('[data-kpi]').forEach(b => b.onclick = () => {
     const k = b.dataset.kpi;
     Object.assign(R, { tab: 'issues', types: new Set(), sevs: new Set(), section: '', q: '', shown: 60, open: new Set(), sel: 0,
@@ -938,6 +954,98 @@ function onKeys(e) {
   } else if (e.key === 'o') {
     const { f, s } = current[R.sel]; window.open(viewerLink(f, s), '_blank', 'noopener');
   }
+}
+
+// ---------------- PDF report with chosen options
+const REPORT_PARTS = [['summary', 'Summary (result, content %, issues by category)'], ['critical', 'Critical issues table'],
+  ['sections', 'Sections table'], ['toc', 'TOC comparison (prod vs candidate)'], ['stylemap', 'Global style map (CSS)'],
+  ['issues', 'Issue details'], ['screenshots', 'Prod / candidate screenshots with each issue']];
+
+function openReportDialog() {
+  const d = R.data, all = allIssues();
+  const hasFilters = R.cat !== 'all' || R.types.size || R.sevs.size || R.critOnly || R.section || R.q;
+  const dlg = document.createElement('dialog');
+  dlg.className = 'rdlg';
+  dlg.innerHTML = `<form method="dialog">
+    <h2>Download PDF report</h2>
+    <div class="rgrid">
+      <fieldset><legend>Include</legend>
+        ${REPORT_PARTS.map(([k, l]) => `<label class="chk"><input type="checkbox" name="inc" value="${k}" ${k !== 'stylemap' || d.style_map.length ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+      </fieldset>
+      <fieldset><legend>Issues in the report</legend>
+        <label class="chk"><input type="radio" name="scope" value="all" ${hasFilters ? '' : 'checked'}><span>All issues</span><span class="n">${all.length}</span></label>
+        <label class="chk"><input type="radio" name="scope" value="current" ${hasFilters ? 'checked' : ''} ${hasFilters ? '' : 'disabled'}><span>Current filters from the Issues tab</span><span class="n">${all.filter(x => matches(x)).length}</span></label>
+        <label class="chk"><input type="radio" name="scope" value="custom"><span>Choose…</span></label>
+        <div class="custom">
+          <div class="sh">Category</div>
+          <div class="chips">${CATS.map(([c, l]) => `<label class="chip opt"><input type="checkbox" name="cat" value="${c}"> ${l} <b>${all.filter(x => x.f.category === c).length}</b></label>`).join('')}</div>
+          <div class="sh">Severity</div>
+          <div class="chips">${SEVS.map(v => `<label class="chip opt"><input type="checkbox" name="sev" value="${v}"> ${v} <b>${all.filter(x => x.f.severity === v).length}</b></label>`).join('')}
+            <label class="chip opt"><input type="checkbox" name="crit"> critical only <b>${all.filter(x => x.f.critical).length}</b></label></div>
+          <div class="sh">Types <span class="muted small">(optional)</span></div>
+          <div class="chips" id="rtypes"></div>
+          <div class="sh">Sections</div>
+          <select name="secs" multiple size="6" aria-label="Sections (none selected = all)">${d.sections.map(s => `<option value="${s.id}">${esc(s.title)} (${s.findings.length})</option>`).join('')}</select>
+          <div class="small muted">None selected = all sections · Cmd/Ctrl-click to pick several</div>
+        </div>
+      </fieldset>
+    </div>
+    <div class="rfoot"><span id="rcount" class="muted"></span><span class="spacer"></span><span id="rstatus" class="small muted"></span>
+      <button class="btn" value="cancel">Cancel</button><button class="btn primary" id="rgo" value="default">⬇ Download PDF</button></div>
+  </form>`;
+  document.body.appendChild(dlg);
+  const f = dlg.querySelector('form');
+  const vals = n => [...f.querySelectorAll(`[name="${n}"]:checked`)].map(x => x.value);
+  const filter = () => {
+    const scope = f.scope.value;
+    if (scope === 'all') return {};
+    if (scope === 'current') return { categories: R.cat !== 'all' ? [R.cat] : [], types: [...R.types], severities: [...R.sevs],
+                                      critical_only: R.critOnly, sections: R.section ? [R.section] : [], q: R.q };
+    return { categories: vals('cat'), types: vals('type'), severities: vals('sev'), critical_only: f.crit.checked,
+             sections: [...f.secs.selectedOptions].map(o => o.value) };
+  };
+  const count = flt => all.filter(({ f: x, s }) => (!flt.categories?.length || flt.categories.includes(x.category))
+    && (!flt.types?.length || x.types.some(t => flt.types.includes(t))) && (!flt.severities?.length || flt.severities.includes(x.severity))
+    && (!flt.critical_only || x.critical) && (!flt.sections?.length || flt.sections.includes(s.id))
+    && (!flt.q || x.message.toLowerCase().includes(flt.q.toLowerCase()) || s.title.toLowerCase().includes(flt.q.toLowerCase()))).length;
+  const refresh = () => {
+    f.querySelector('.custom').classList.toggle('on', f.scope.value === 'custom');
+    // type chips for the chosen categories
+    const cats = vals('cat'), keep = new Set(vals('type')), tc = {};
+    all.filter(x => !cats.length || cats.includes(x.f.category)).forEach(x => x.f.types.forEach(t => tc[t] = (tc[t] || 0) + 1));
+    $('#rtypes').innerHTML = Object.entries(tc).sort((a, b) => b[1] - a[1]).slice(0, 40)
+      .map(([t, n]) => `<label class="chip opt"><input type="checkbox" name="type" value="${esc(t)}" ${keep.has(t) ? 'checked' : ''}> ${esc(t)} <b>${n}</b></label>`).join('');
+    const inc = vals('inc');
+    const n = inc.includes('issues') ? count(filter()) : 0;
+    $('#rcount').textContent = inc.includes('issues') ? `${n} issue(s) will be included` + (inc.includes('screenshots') ? ' with screenshots' : '') : 'No issue details';
+    f.querySelector('[value="screenshots"]').disabled = !inc.includes('issues');
+    $('#rgo').disabled = !inc.length;
+  };
+  f.onchange = e => { if (e.target.name !== 'type') refresh(); else refresh(); };
+  refresh();
+  dlg.addEventListener('close', () => dlg.remove());
+  f.onsubmit = async e => {
+    if (e.submitter?.value === 'cancel') return;
+    e.preventDefault();
+    const include = Object.fromEntries(REPORT_PARTS.map(([k]) => [k, vals('inc').includes(k)]));
+    const flt = filter();
+    const label = f.scope.value === 'all' ? 'all' : [...(flt.categories || []), ...(flt.severities || []), flt.critical_only ? 'critical' : ''].filter(Boolean).join('-') || 'filtered';
+    $('#rgo').disabled = true; $('#rstatus').textContent = 'Building the report…';
+    try {
+      const res = await fetch(`/api/runs/${R.job.id}/report`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                                  body: JSON.stringify({ include, filter: flt, label }) });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+      const blob = await res.blob();
+      const name = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'parity-report.pdf';
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      dlg.close();
+    } catch (err) {
+      $('#rstatus').textContent = 'Failed: ' + err.message; $('#rgo').disabled = false;
+    }
+  };
+  dlg.showModal();
 }
 
 const kindNote = k => k === 'aligned' ? ' · not present — aligned position' : k === 'section' ? ' · not present — section start' : '';

@@ -240,6 +240,8 @@ def make_handler(jobs: Jobs, root: Path):
                     return self._json({"path": str(dest), "name": name, "size": len(data)})
                 if m := re.fullmatch(r"/api/runs/([\w-]+)/rerun", p.path):
                     return self._rerun(m[1])
+                if m := re.fullmatch(r"/api/runs/([\w-]+)/report", p.path):
+                    return self._custom_report(m[1], json.loads(self._body() or b"{}"))
                 if p.path == "/api/runs":
                     req = json.loads(self._body() or b"{}")
                     job = jobs.create(req.get("baseline", ""), req.get("candidate", ""), req.get("name", ""),
@@ -250,6 +252,20 @@ def make_handler(jobs: Jobs, root: Path):
                 return self._json({"error": str(e)}, 400)
             except (KeyError, FileNotFoundError):
                 return self._json({"error": "run not found"}, 404)
+
+        def _custom_report(self, jid: str, opts: dict):
+            """Build a PDF report with the chosen parts and issue filter, send it, delete it."""
+            from ..report import pdf_report
+            run_dir = jobs.path(jid)
+            result = json.loads((run_dir / "results.json").read_text())
+            name = f"_custom_{uuid.uuid4().hex[:8]}.pdf"
+            path = pdf_report.build(result, run_dir, options={"include": opts.get("include") or {},
+                                                              "filter": opts.get("filter") or {}}, filename=name)
+            try:
+                label = re.sub(r"[^\w.-]+", "-", opts.get("label") or "custom").strip("-")[:40] or "custom"
+                return self._file(path, download=f"parity-report-{jid}-{label}.pdf")
+            finally:
+                path.unlink(missing_ok=True)
 
         def _rerun(self, jid: str):
             old = jobs.get(jid)

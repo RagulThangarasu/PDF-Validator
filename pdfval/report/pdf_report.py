@@ -42,9 +42,15 @@ def _pct_status(c: dict) -> str:
     return "pass" if c["match_pct"] >= c["pass_pct"] else "warn" if c["match_pct"] >= c["warn_pct"] else "fail"
 
 
-def _summary_html(result: dict) -> list[str]:
+INCLUDE_ALL = {"summary": True, "critical": True, "sections": True, "toc": True, "stylemap": True,
+               "issues": True, "screenshots": True}
+
+
+def _summary_html(result: dict, include: dict | None = None, note: str = "", n_issues: int | None = None) -> list[str]:
     """HTML blocks for the front pages; each block starts on a new page (MuPDF's Story
-    can loop forever when a long table starts part-way down a page after another table)."""
+    can loop forever when a long table starts part-way down a page after another table).
+    include: which parts to render (INCLUDE_ALL keys); note: the filters applied."""
+    inc = {**INCLUDE_ALL, **(include or {})}
     sm, meta = result["summary"], result["meta"]
     doc_row = lambda label, m: (f"<tr><th>{label}</th><td>{escape(m['url'])} (web page, rendered and read from its DOM)</td></tr>"
                                 if m.get("url") else
@@ -68,16 +74,22 @@ def _summary_html(result: dict) -> list[str]:
         f"<tr><th>CSS / layout</th><td>{sm['css']['issues']} issues (style {sm['css']['style']}, layout {sm['css']['layout']}) "
         "— reported separately, not part of the content %</td></tr>",
         "<tr><th>All findings</th><td>" + " · ".join(f"<b style='color:{CHECK_COLOR[k]}'>{k}</b> {v}"
-                                                    for k, v in sm["by_check"].items()) + "</td></tr></table>",
+                                                    for k, v in sm["by_check"].items()) + "</td></tr>"
+        + (f"<tr><th>This report</th><td>{escape(note)}</td></tr>" if note else "") + "</table>",
     ]
-    html.append("<h2>Issues by category and type</h2><table class='grid'><tr><th>Category</th><th>Total</th><th>Types</th></tr>")
-    for c, label in CATS:
-        bc = sm["by_category"][c]
-        html.append(f"<tr><td><b style='color:{CAT_COLOR[c]}'>{label}</b></td><td class='n'>{bc['total']}</td><td>"
-                    + (" · ".join(f"{escape(t)} {n}" for t, n in bc["types"].items()) or "—") + "</td></tr>")
-    html.append("</table>")
+    if not inc["summary"]:  # keep only the title, the documents and the filter note
+        html = html[:3] + [doc_row("Prod (baseline)", meta["baseline"]),
+                           doc_row("Web page (candidate)" if meta.get("mode") == "html" else "Stage (candidate)", meta["candidate"]),
+                           (f"<tr><th>This report</th><td>{escape(note)}</td></tr>" if note else "") + "</table>"]
+    else:
+        html.append("<h2>Issues by category and type</h2><table class='grid'><tr><th>Category</th><th>Total</th><th>Types</th></tr>")
+        for c, label in CATS:
+            bc = sm["by_category"][c]
+            html.append(f"<tr><td><b style='color:{CAT_COLOR[c]}'>{label}</b></td><td class='n'>{bc['total']}</td><td>"
+                        + (" · ".join(f"{escape(t)} {n}" for t, n in bc["types"].items()) or "—") + "</td></tr>")
+        html.append("</table>")
     crit = [(s, f) for s in result["sections"] for f in s["findings"] if f.get("critical")]
-    if crit:
+    if crit and inc["critical"]:
         html.append("<h2 style='color:#b42318'>Critical issues</h2><table class='grid'><tr><th>#</th><th>Section</th>"
                     "<th>Check</th><th>Issue</th><th>Prod p.</th><th>Stage p.</th></tr>")
         for s, f in crit:
@@ -85,13 +97,14 @@ def _summary_html(result: dict) -> list[str]:
                         f"<td>{f['baseline'][0]['page'] + 1 if f['baseline'] else '—'}</td>"
                         f"<td>{f['candidate'][0]['page'] + 1 if f['candidate'] else '—'}</td></tr>")
         html.append("</table>")
-    html.append("\f")  # block break
-    html += [
+    if inc["sections"]:
+        html.append("\f")  # block break
+    html += [] if not inc["sections"] else [
         "<h2>Sections</h2><table class='grid'><tr><th>#</th><th>Section</th><th>Prod p.</th><th>Stage p.</th>"
         "<th>Status</th><th>Content %</th><th>Missing / extra</th><th>Critical</th>"
         + "".join(f"<th>{label}</th>" for _, label in CATS) + "</tr>",
     ]
-    for n, s in enumerate(result["sections"], 1):
+    for n, s in enumerate(result["sections"] if inc["sections"] else [], 1):
         html.append(
             f"<tr><td>{n}</td><td>{escape(s['title'])}</td><td>{s['baseline']['start']['page'] + 1}</td>"
             f"<td>{s['candidate']['start']['page'] + 1}</td>"
@@ -100,9 +113,10 @@ def _summary_html(result: dict) -> list[str]:
             f"<td class='n'>{s['content']['missing_words']} / {s['content']['extra_words']}</td>"
             f"<td class='n'>{'<b style=\'color:#b42318\'>' + str(s['critical']) + '</b>' if s['critical'] else ''}</td>"
             + "".join(f"<td class='n'>{s.get('categories', {}).get(c, 0) or ''}</td>" for c, _ in CATS) + "</tr>")
-    html.append("</table>")
+    if inc["sections"]:
+        html.append("</table>")
     t = result.get("toc")
-    if t and t["rows"]:
+    if t and t["rows"] and inc["toc"]:
         html.append("\f")
         ts = t["summary"]
         tone = {"match": "#16a34a", "level differs": "#b45309", "title differs": "#b45309",
@@ -126,7 +140,7 @@ def _summary_html(result: dict) -> list[str]:
             html.append(f"<tr><td>{r['pos']['baseline'] or '—'}</td>{cell(a)}<td><b style='color:{tone[r['status']]}'>{r['status']}</b></td>"
                         f"<td>{r['pos']['candidate'] or '—'}</td>{cell(b)}</tr>")
         html.append("</table>")
-    if result["style_map"]:
+    if result["style_map"] and inc["stylemap"]:
         html.append("\f")
         html.append("<h2>Global style map (prod → stage)</h2><p class='muted'>Every font / size / colour mismatch "
                     "across the document, grouped by role — each row is one CSS rule to fix in stage.</p>"
@@ -207,20 +221,64 @@ def _section_header(c: _Canvas, s: dict, cont: bool = False):
     c.y += 4
 
 
+def select_issues(result: dict, flt: dict | None = None, severities: set[str] | None = None) -> list[tuple]:
+    """(section, finding) pairs matching the report filter:
+    categories / types / severities (lists; empty = all), critical_only, sections (section ids)."""
+    flt = flt or {}
+    cats, types = set(flt.get("categories") or []), set(flt.get("types") or [])
+    sev = set(flt.get("severities") or []) or severities or {"error", "warning", "info"}
+    secs = set(flt.get("sections") or [])
+    q = (flt.get("q") or "").lower()
+    out = []
+    for s in result["sections"]:
+        if secs and s["id"] not in secs:
+            continue
+        for f in sorted(s["findings"], key=lambda f: (not f.get("critical"), CAT_ORDER.get(f.get("category"), 9))):
+            if f["severity"] not in sev or (cats and f.get("category") not in cats) \
+                    or (types and not set(f.get("types") or []) & types) or (flt.get("critical_only") and not f.get("critical")) \
+                    or (q and q not in f["message"].lower() and q not in s["title"].lower()):
+                continue
+            out.append((s, f))
+    return out
+
+
+def describe(flt: dict | None, n: int) -> str:
+    """Human-readable filter note for the report's first page."""
+    flt = flt or {}
+    parts = []
+    if flt.get("categories"):
+        parts.append("categories: " + ", ".join(CAT_LABEL.get(c, c) for c in flt["categories"]))
+    if flt.get("types"):
+        parts.append("types: " + ", ".join(flt["types"]))
+    if flt.get("severities"):
+        parts.append("severity: " + ", ".join(flt["severities"]))
+    if flt.get("critical_only"):
+        parts.append("critical only")
+    if flt.get("sections"):
+        parts.append(f"{len(flt['sections'])} section(s)")
+    if flt.get("q"):
+        parts.append(f"search “{flt['q']}”")
+    return f"{n} issue(s) · " + ("; ".join(parts) if parts else "all issues")
+
+
 def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = None,
-          progress: Callable[[float, str], None] | None = None) -> Path:
+          progress: Callable[[float, str], None] | None = None, options: dict | None = None,
+          filename: str = "report.pdf") -> Path:
+    """options = {"include": {summary, critical, sections, toc, stylemap, issues, screenshots: bool},
+                  "filter": {categories, types, severities, critical_only, sections, q}}"""
     out = Path(out_dir)
-    sev = severities or {"error", "warning", "info"}
-    issues = [(s, f) for s in result["sections"]
-              for f in sorted(s["findings"], key=lambda f: (not f.get("critical"), CAT_ORDER.get(f.get("category"), 9)))
-              if f["severity"] in sev]
+    opts = options or {}
+    inc = {**INCLUDE_ALL, **(opts.get("include") or {})}
+    issues = select_issues(result, opts.get("filter"), severities) if inc["issues"] else []
+    note = describe(opts.get("filter"), len(issues)) if options else ""
 
     # --- summary, sections table, style map: HTML flow (Story)
     buf = io.BytesIO()
     writer = pymupdf.DocumentWriter(buf)
     page_rect = pymupdf.paper_rect("a4-l")
-    blocks = _summary_html(result)
-    blocks[-1] += f"<h2>Issues ({len(issues)}) follow on the next pages</h2>"
+    blocks = _summary_html(result, inc, note)
+    if inc["issues"]:
+        blocks[-1] += f"<h2>Issues ({len(issues)}) follow on the next pages</h2>"
     for block in blocks:  # each block on fresh pages; a page cap guards against a layout loop
         story = pymupdf.Story(block, user_css=CSS)
         more, pages = 1, 0
@@ -240,7 +298,7 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
     for k, (s, f) in enumerate(issues):
         if progress and k % 50 == 0:
             progress(k / max(len(issues), 1), f"PDF report: issue {k}/{len(issues)}")
-        shots = f.get("shots", {})
+        shots = f.get("shots", {}) if inc["screenshots"] else {}
         imgs = {side: _jpeg_bytes(out / shots[side]) if shots.get(side) else None for side in ("baseline", "candidate")}
         img_h = max((min(col_w * im[1], max_h) for im in imgs.values() if im), default=0)
         msg_lines = c.wrap(re.sub(r"\.{4,}", " … ", f["message"]), 9)
@@ -295,6 +353,6 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
                   font=footer, fontsize=7)
         tw.write_text(page, color=(0.55, 0.58, 0.63))
     doc.subset_fonts()
-    path = out / "report.pdf"
+    path = out / filename
     doc.save(path, garbage=4, deflate=True)
     return path
