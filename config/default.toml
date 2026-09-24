@@ -1,0 +1,120 @@
+# pdfval default configuration. Override any key with --config my.toml
+# (files are deep-merged over this one).
+
+[extract]
+use_trimbox = true            # drop printer slugs / crop marks outside the trim box
+strip_repeating = true        # drop running headers/footers/page numbers
+repeat_threshold = 0.3        # ...when the same line sits at the same y on >=30% of pages
+ignore_patterns = [           # regexes; matching lines are ignored entirely
+  '\.indb\b',
+  '^\d{4}/\d{1,2}/\d{1,2}\s',
+]
+
+[sections]
+source = "auto"               # outline | headings | auto (outline when the PDF has bookmarks)
+locate_threshold = 0.8        # fuzzy score to find a bookmark's heading text on its page
+title_match_threshold = 0.85  # fuzzy score to pair baseline and candidate headings
+front_matter = true           # validate content before the first section (cover, TOC)
+skip = []                     # regexes on normalised titles to exclude, e.g. ['^table of contents?$']
+missing_severity = "error"
+extra_severity = "warning"
+level_severity = "warning"
+outline_only_severity = "warning"   # heading text exists on both sides, only the PDF bookmark differs
+
+[sections.aliases]            # baseline title = candidate title (renamed headings)
+# "table of contents" = "table of content"
+
+[content]
+# Content = the text itself: words, case, punctuation (. , : ; quotes, dashes) and the spacing
+# between words on a line. Font weight/colour/size are CSS ([style]); line wrapping is layout
+# (text present but wrapped to the next line elsewhere is reported by [layout] as line-wrap).
+# The section verdict is a PERCENTAGE of prod words present in stage (CSS does not affect it):
+pass_pct = 98.0               # content match % >= pass_pct            -> content PASS
+warn_pct = 90.0               # warn_pct <= content match % < pass_pct -> content WARN, below -> FAIL
+critical_missing_words = 8    # a missing block of >= N prod words is flagged CRITICAL
+case_sensitive = true
+normalize_typography = false  # true = treat ‘ ’ “ ” – — as ' " - (ignore typographic quote/dash changes)
+check_spacing = true          # double / missing spaces between words on the same line
+dehyphenate = true            # a word split by a hyphen at a line break is one word (line breaks are layout)
+ignore_toc_page_numbers = true  # "Title ...... 17": page numbers shift whenever the layout differs
+ignore_tokens = ["•", "●", "■", "▪", "◦"]   # bullet glyphs are list styling
+min_diff_words = 1
+severity = "warning"          # individual text diffs (they are counted in the %)
+spacing_severity = "warning"
+reorder_severity = "info"     # identical text that only moved (e.g. table reading order)
+
+[tables]
+enabled = true
+row_match_ratio = 0.5         # a prod table row is MISSING (critical) when < 50 % of its words are found in stage
+missing_row_severity = "error"
+extra_row_severity = "warning"
+
+[integrity]
+glyphs = true                 # broken glyphs in stage (U+FFFD, private-use, NUL) -> critical
+offpage = true                # text drawn outside the page -> critical
+links = true                  # broken link targets -> critical; prod links missing in stage -> error
+missing_link_severity = "error"
+
+[toc]
+# The printed table of contents is compared on its own: entries, levels (from indentation) and
+# page numbers. Its text is excluded from the content check.
+min_entries = 4               # a page is a TOC page when it has >= N "Title ...... 12" lines
+max_front_fraction = 0.25     # ... and sits in the first 25 % of the document
+title_match_threshold = 0.8   # fuzzy score to pair prod and stage entries
+
+[toc.severity]
+"level differs" = "warning"
+"title differs" = "warning"
+"missing entry" = "error"
+"order differs" = "error"
+"extra entry" = "warning"
+"wrong page" = "error"
+
+[style]
+properties = ["family", "weight", "italic", "size", "color"]
+size_tolerance = 0.5          # pt
+color_tolerance = 24          # euclidean RGB distance (0-441)
+min_words = 1
+
+[style.severity]              # per CSS property
+font-family = "error"
+font-size = "error"
+font-weight = "error"
+font-style = "error"
+color = "warning"
+
+[layout]
+indent_tolerance = 4.0        # pt, relative to each document's content-box left edge
+align_tolerance = 6.0         # pt, for left/center/right classification
+line_height_tolerance_em = 0.3
+heading_space_tolerance_em = 0.8
+min_lines = 1
+check_placement = true        # graphics: inline vs own line, and which word they follow (via text alignment)
+check_wrap = true             # same text wrapping to the next line at a different word -> layout (not content)
+
+[layout.severity]
+text-align = "error"
+indent = "warning"
+line-height = "warning"
+space-above = "warning"
+placement = "warning"
+line-wrap = "warning"
+
+[assets]
+aspect_tolerance = 0.05       # 5 %
+width_tolerance = 0.10        # 10 % of content width
+count_severity = "error"
+geometry_severity = "warning"
+icon_max_width = 0.08         # images narrower than this share of the content width are icons
+icons = "ignore"              # small icons (< icon_max_width): ignore | info | warning. Note/tip/LED icons are
+                              # often raster in one PDF and vector in the other, so they are ignored by default
+match_window_words = 80       # how far (in aligned words) an image may drift and still pair
+visual_match_threshold = 0.25 # max difference-hash distance (0-1) for "same picture"
+same_spot_words = 12          # a different picture this close to the expected spot = replaced image
+changed_severity = "warning"
+raster_vs_vector_severity = "info"  # same artwork, bitmap on one side and vector paths on the other
+artwork_match_score = 0.6      # min cross-correlation when searching the other page for the same artwork
+
+[report]
+max_locs = 40                 # highlight boxes per finding
+max_findings_per_check = 60   # per section

@@ -1,0 +1,4 @@
+pymupdf>=1.24      # PDF parsing: text spans with font/size/colour/bbox, outline, images
+pymupdf-fonts      # Noto fonts for the PDF report (unicode arrows, quotes)
+playwright>=1.45   # e2e walker: drives the viewer, scrolls to each section, screenshots
+pytest>=8          # CI suite: one test case per section

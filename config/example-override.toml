@@ -1,0 +1,14 @@
+# Example project overrides: python -m pdfval compare ... --config config/example-override.toml
+# Prod (InDesign) and stage (AEM Guides) use slightly different near-black text; accept it.
+
+[style]
+color_tolerance = 60
+
+[sections]
+skip = ['^table of contents?$']
+
+[sections.aliases]
+"Table of contents" = "Table of content"
+
+[layout]
+indent_tolerance = 6.0

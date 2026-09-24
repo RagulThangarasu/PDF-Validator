@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF Parity Report</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --ink: #1d2330; --muted: #6a7282; --line: #e3e6eb;
+    --fail: #d92d20; --warn: #dc8a00; --pass: #16a34a; --info: #64748b;
+    --c-content: #e11d48; --c-style: #7c3aed; --c-layout: #ea580c; --c-assets: #0d9488; --c-structure: #2563eb; --c-tables: #0284c7; --c-integrity: #b91c1c;
+    --accent: #0f766e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink); background: var(--bg);
+         display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; }
+  .badge { padding: 2px 10px; border-radius: 999px; font-weight: 600; font-size: 12px; color: #fff; text-transform: uppercase; }
+  .badge.fail { background: var(--fail); } .badge.pass { background: var(--pass); } .badge.warn { background: var(--warn); }
+  .stats { display: flex; gap: 14px; color: var(--muted); }
+  .stats b { color: var(--ink); }
+  .toggles { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 3px 10px; cursor: pointer; font: inherit; display: inline-flex; align-items: center; gap: 6px; }
+  .chip[aria-pressed="false"] { opacity: .45; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+  main { display: grid; grid-template-columns: 290px 1fr 1fr 360px; min-height: 0; }
+  aside, section.pane-wrap, #side { min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--panel); }
+  .toolbar { padding: 8px 10px; border-bottom: 1px solid var(--line); display: flex; gap: 6px; align-items: center; }
+  .toolbar input { flex: 1; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  .toolbar select { font: inherit; padding: 4px; border: 1px solid var(--line); border-radius: 6px; }
+  #sections { overflow: auto; flex: 1; }
+  .sec { display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: center; padding: 6px 10px; cursor: pointer; border-bottom: 1px solid #f0f1f4; }
+  .sec:hover { background: #f7f8fa; }
+  .sec.active { background: #e7f5f3; box-shadow: inset 3px 0 0 var(--accent); }
+  .sec .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sec .t small { color: var(--muted); display: block; font-size: 11px; }
+  .sec .n { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 11px; text-align: right; }
+  .lvl2 .t { padding-left: 10px; } .lvl3 .t { padding-left: 20px; } .lvl4 .t { padding-left: 30px; }
+  .st-fail { background: var(--fail); } .st-warn { background: var(--warn); } .st-pass { background: var(--pass); }
+  .pane-head { padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 8px; }
+  .pane-head span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pane-head .cur { color: var(--accent); font-weight: 600; flex: 1; text-align: center; }
+  .pane-wrap { position: relative; }
+  .guide { position: absolute; left: 0; width: 10px; height: 0; border-top: 7px solid transparent; border-bottom: 7px solid transparent;
+           border-left: 9px solid var(--accent); opacity: .55; pointer-events: none; transform: translateY(-7px); z-index: 4; display: none; }
+  body.synced .guide { display: block; }
+  .chip.sync[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .pane { overscroll-behavior: contain; }
+  .pane { position: relative; overflow: auto; flex: 1; background: #d9dce1; padding: 12px 16px; }
+  .page { position: relative; margin: 0 auto 12px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+  .page canvas { position: absolute; inset: 0; }
+  .page .pno { position: absolute; right: -2px; top: -2px; transform: translate(100%, 0); font-size: 10px; color: #555; padding-left: 3px; }
+  .hl { position: absolute; border: 1.5px solid; border-radius: 2px; pointer-events: auto; cursor: pointer; z-index: 2; }
+  .hl.content { border-color: var(--c-content); background: rgb(225 29 72 / .12); }
+  .hl.style { border-color: var(--c-style); background: rgb(124 58 237 / .10); }
+  .hl.layout { border-color: var(--c-layout); background: rgb(234 88 12 / .10); border-style: dashed; }
+  .hl.assets { border-color: var(--c-assets); background: rgb(13 148 136 / .08); }
+  .hl.tables { border-color: var(--c-tables); background: rgb(2 132 199 / .10); }
+  .hl.integrity { border-color: var(--c-integrity); background: rgb(185 28 28 / .10); }
+  .crit { background: #b42318; color: #fff; border-radius: 999px; font-size: 9px; font-weight: 700; padding: 0 6px; text-transform: uppercase; }
+  .hl.structure { border-color: var(--c-structure); background: rgb(37 99 235 / .10); }
+  .hl.at { border-width: 0; border-top: 3px dashed; background: none; height: 0 !important; }
+  .hl.focus { outline: 3px solid #facc15; outline-offset: 2px; animation: pulse 1s ease 2; z-index: 3; }
+  @keyframes pulse { 50% { outline-color: transparent; } }
+  .sec-marker { position: absolute; left: -10px; right: -10px; border-top: 2px solid var(--accent); z-index: 1; pointer-events: none; }
+  .sec-marker span { position: absolute; left: 0; top: -18px; background: var(--accent); color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 3px 3px 0 0; white-space: nowrap; }
+  .sec-end { position: absolute; left: -10px; right: -10px; border-top: 2px dashed var(--accent); opacity: .5; z-index: 1; pointer-events: none; }
+  #side .tabs { display: flex; border-bottom: 1px solid var(--line); }
+  #side .tabs button { flex: 1; padding: 9px; border: 0; background: none; font: inherit; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
+  #side .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  #tab-body { overflow: auto; flex: 1; padding: 10px 12px; }
+  .sechead h2 { font-size: 14px; margin: 0 0 4px; }
+  .sechead .meta { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .checks { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-bottom: 10px; }
+  .checks div { border: 1px solid var(--line); border-radius: 6px; padding: 4px; text-align: center; font-size: 11px; color: var(--muted); }
+  .checks b { display: block; font-size: 14px; color: var(--ink); }
+  .finding { border: 1px solid var(--line); border-left: 4px solid; border-radius: 6px; padding: 7px 9px; margin-bottom: 6px; cursor: pointer; }
+  .finding:hover { background: #fafbfc; }
+  .finding.active { background: #fffbe6; }
+  .finding .top { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .finding .sev { font-weight: 700; text-transform: uppercase; font-size: 10px; }
+  .sev.error { color: var(--fail); } .sev.warning { color: var(--warn); } .sev.info { color: var(--info); }
+  .finding .msg { word-break: break-word; }
+  .finding.content { border-left-color: var(--c-content); } .finding.style { border-left-color: var(--c-style); }
+  .finding.layout { border-left-color: var(--c-layout); } .finding.assets { border-left-color: var(--c-assets); }
+  .finding.structure { border-left-color: var(--c-structure); }
+  .finding.tables { border-left-color: var(--c-tables); } .finding.integrity { border-left-color: var(--c-integrity); }
+  table.map { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.map th, table.map td { text-align: left; padding: 5px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.map td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); padding: 20px 0; text-align: center; }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; background: rgb(245 246 248 / .85); z-index: 10; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PDF Parity Report</h1>
+  <span id="result" class="badge"></span>
+  <div class="stats" id="stats"></div>
+  <button class="chip sync" id="sync" aria-pressed="true" title="Scroll both PDFs together, aligned by matching text (s)">⇅ Sync scroll</button>
+  <div class="toggles" id="check-toggles"></div>
+</header>
+<main>
+  <aside>
+    <div class="toolbar">
+      <input id="q" placeholder="Filter sections…" aria-label="Filter sections">
+      <select id="status-filter" aria-label="Status filter">
+        <option value="all">All</option><option value="fail">Fail</option><option value="warn">Warn</option><option value="pass">Pass</option>
+      </select>
+    </div>
+    <div id="sections" role="list"></div>
+    <div class="toolbar" style="border-top:1px solid var(--line);border-bottom:0;color:var(--muted);font-size:11px"><kbd>j</kbd>/<kbd>k</kbd> next/prev section · <kbd>n</kbd> next finding · <kbd>s</kbd> sync scroll</div>
+  </aside>
+  <section class="pane-wrap"><div class="pane-head"><b>Baseline (prod)</b><span class="cur" id="cur-a"></span><span id="name-a"></span></div><div class="pane" id="pane-a"></div><div class="guide" aria-hidden="true"></div></section>
+  <section class="pane-wrap"><div class="pane-head"><b>Candidate (stage)</b><span class="cur" id="cur-b"></span><span id="name-b"></span></div><div class="pane" id="pane-b"></div><div class="guide" aria-hidden="true"></div></section>
+  <div id="side">
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-tab="findings">Section findings</button>
+      <button role="tab" aria-selected="false" data-tab="stylemap">Global style map</button>
+    </div>
+    <div id="tab-body"></div>
+  </div>
+</main>
+<div id="loading">Loading PDFs…</div>
+<script id="pdfval-data" type="application/json">/*__DATA__*/</script>
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const DATA = JSON.parse($('#pdfval-data').textContent);
+const CHECKS = ['structure', 'content', 'tables', 'assets', 'integrity', 'style', 'layout'];
+const CATS = [['content', 'Content'], ['images', 'Images'], ['tables', 'Tables'], ['toc', 'TOC'], ['structure', 'Structure'],
+              ['links', 'Links & rendering'], ['css', 'CSS / layout']];
+const CAT_COLOR = { toc: '#9333ea', content: '#e11d48', images: '#0d9488', tables: '#0284c7', structure: '#2563eb', links: '#b91c1c', css: '#7c3aed' };
+const byId = Object.fromEntries(DATA.sections.map(s => [s.id, s]));
+const state = { status: 'all', q: '', cats: new Set(CATS.map(c => c[0])), current: null, finding: -1, tab: 'findings' };
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+class Pane {
+  constructor(el, url) { this.el = el; this.url = url; this.pages = []; }
+  async load() {
+    this.pdf = await pdfjsLib.getDocument({ url: this.url }).promise;
+    const width = this.el.clientWidth - 40;
+    const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting && this.render(+e.target.dataset.index)),
+                                        { root: this.el, rootMargin: '900px 0px' });
+    for (let i = 0; i < this.pdf.numPages; i++) {
+      const p = await this.pdf.getPage(i + 1);
+      const vp = p.getViewport({ scale: 1 });
+      const scale = width / vp.width;
+      const div = document.createElement('div');
+      div.className = 'page'; div.dataset.index = i;
+      div.style.width = vp.width * scale + 'px'; div.style.height = vp.height * scale + 'px';
+      div.innerHTML = `<span class="pno">${i + 1}</span>`;
+      this.el.appendChild(div);
+      this.pages.push({ p, scale, div, rendered: null });
+      io.observe(div);
+    }
+  }
+  render(i) {
+    const pg = this.pages[i];
+    if (!pg) return Promise.resolve();
+    if (!pg.rendered) pg.rendered = (async () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const vp = pg.p.getViewport({ scale: pg.scale * dpr });
+      const c = document.createElement('canvas');
+      c.width = vp.width; c.height = vp.height; c.style.width = '100%'; c.style.height = '100%';
+      pg.div.prepend(c);
+      await pg.p.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+      pg.div.classList.add('rendered');
+    })();
+    return pg.rendered;
+  }
+  clear() { this.el.querySelectorAll('.hl,.sec-marker,.sec-end').forEach(n => n.remove()); }
+  box(loc, cls, fi, title) {
+    const pg = this.pages[loc.page]; if (!pg) return;
+    const s = pg.scale, b = loc.bbox, pad = 2, d = document.createElement('div');
+    d.className = 'hl ' + cls; d.dataset.f = fi; d.title = title;
+    Object.assign(d.style, { left: b[0] * s - pad + 'px', top: b[1] * s - pad + 'px',
+      width: (b[2] - b[0]) * s + 2 * pad + 'px', height: (b[3] - b[1]) * s + 2 * pad + 'px' });
+    d.onclick = () => focusFinding(fi);
+    pg.div.appendChild(d);
+  }
+  marker(pos, label, cls = 'sec-marker') {
+    const pg = this.pages[pos.page]; if (!pg) return null;
+    const d = document.createElement('div');
+    d.className = cls; d.style.top = pos.y * pg.scale - 4 + 'px';
+    if (label) d.innerHTML = `<span>${esc(label)}</span>`;
+    pg.div.appendChild(d); return d;
+  }
+  async scrollTo(page, y, smooth = false) {
+    const pg = this.pages[page]; if (!pg) return;
+    SYNC.paused++;  // a jump to a section/issue positions both panes itself
+    this.el.scrollTo({ top: pg.div.offsetTop + y * pg.scale - 60, behavior: smooth ? 'smooth' : 'auto' });
+    await Promise.all([this.render(page), this.render(page + 1)]);
+    await new Promise(r => setTimeout(r, smooth ? 450 : 80));
+    SYNC.paused--;
+  }
+  pos(page, y) {  // document position (page, y in pt) -> scroll offset in px
+    const pg = this.pages[page];
+    return pg ? pg.div.offsetTop + y * pg.scale : 0;
+  }
+  visible(node) {
+    if (!node) return false;
+    const r = node.getBoundingClientRect(), p = this.el.getBoundingClientRect();
+    return r.top >= p.top - 2 && r.top <= p.bottom;
+  }
+}
+
+const A = new Pane($('#pane-a'), 'baseline.pdf');
+const B = new Pane($('#pane-b'), 'candidate.pdf');
+
+// ---- synchronised scrolling ------------------------------------------------
+// DATA.sync = [[prod page, y, stage page, y], ...]: line starts whose text matched
+// on both sides, increasing on both sides. Converted to pixel offsets per pane, the
+// pane being scrolled maps its focus line (FOCUS of its height) through this
+// piecewise-linear map and the other pane follows – content-aligned, not page-aligned.
+const FOCUS = 0.35;
+const SYNC = { on: true, paused: 0, xa: [], xb: [], raf: 0 };
+
+function buildSync() {
+  const xa = [], xb = [];
+  for (const [pa, ya, pb, yb] of DATA.sync || []) {
+    const a = A.pos(pa, ya), b = B.pos(pb, yb);
+    if (!xa.length || (a > xa[xa.length - 1] && b > xb[xb.length - 1])) { xa.push(a); xb.push(b); }
+  }
+  SYNC.xa = xa; SYNC.xb = xb;
+  document.querySelectorAll('.guide').forEach(g => {
+    const pane = g.previousElementSibling;
+    g.style.top = pane.offsetTop + pane.clientHeight * FOCUS + 'px';
+  });
+}
+
+function mapPos(x, from, to) {
+  const n = from.length;
+  if (n < 2) return x;
+  if (x <= from[0]) return to[0] + (x - from[0]);
+  if (x >= from[n - 1]) return to[n - 1] + (x - from[n - 1]);
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; from[mid] <= x ? lo = mid : hi = mid; }
+  const t = (x - from[lo]) / (from[hi] - from[lo]);
+  return to[lo] + t * (to[hi] - to[lo]);
+}
+
+function follow(src) {
+  const dst = src === A ? B : A;
+  const [from, to] = src === A ? [SYNC.xa, SYNC.xb] : [SYNC.xb, SYNC.xa];
+  const fx = src.el.scrollTop + src.el.clientHeight * FOCUS;
+  const max = dst.el.scrollHeight - dst.el.clientHeight;
+  const target = Math.round(Math.min(max, Math.max(0, mapPos(fx, from, to) - dst.el.clientHeight * FOCUS)));
+  if (Math.abs(dst.el.scrollTop - target) < 1) return;
+  dst.expect = target;  // mark our own write so its scroll event is not treated as the user's
+  dst.el.scrollTop = target;
+}
+
+// section under the prod focus line -> highlighted in the list, labelled on both panes
+let spyTimer = 0;
+function spy() {
+  const fx = A.el.scrollTop + A.el.clientHeight * FOCUS;
+  let cur = null;
+  for (const s of DATA.sections) if (A.pos(s.baseline.start.page, s.baseline.start.y) <= fx) cur = s;
+  cur = cur || DATA.sections[0];
+  if (state.current && cur.id === state.current.id) return;
+  clearTimeout(spyTimer);
+  spyTimer = setTimeout(() => goto(cur.id, { keepScroll: true, fromScroll: true }), 120);
+}
+
+[A, B].forEach(P => P.el.addEventListener('scroll', () => {
+  if (P.expect != null && Math.abs(P.el.scrollTop - P.expect) <= 2) { P.expect = null; return; }
+  P.expect = null;
+  if (SYNC.paused) return;
+  cancelAnimationFrame(SYNC.raf);
+  SYNC.raf = requestAnimationFrame(() => {
+    if (SYNC.on) follow(P);
+    spy();
+  });
+}, { passive: true }));
+
+function setSync(on) {
+  SYNC.on = on;
+  $('#sync').setAttribute('aria-pressed', on);
+  document.body.classList.toggle('synced', on);
+  if (on) follow(A);
+}
+$('#sync').onclick = () => setSync(!SYNC.on);
+
+function header() {
+  const s = DATA.summary;
+  $('#result').textContent = s.result; $('#result').className = 'badge ' + s.result;
+  $('#stats').innerHTML = `<span><b>${s.sections}</b> sections</span><span style="color:var(--fail)"><b>${s.fail}</b> fail</span>
+    <span style="color:var(--warn)"><b>${s.warn}</b> warn</span><span style="color:var(--pass)"><b>${s.pass}</b> pass</span>
+    <span>baseline <b>${DATA.meta.baseline.pages}</b>p · candidate <b>${DATA.meta.candidate.pages}</b>p</span>`;
+  $('#check-toggles').innerHTML = CATS.map(([c, l]) =>
+    `<button class="chip" aria-pressed="true" data-check="${c}"><span class="dot" style="background:${CAT_COLOR[c]}"></span>${l} ${s.by_category[c].total}</button>`).join('');
+  $('#check-toggles').onclick = e => {
+    const b = e.target.closest('[data-check]'); if (!b) return;
+    const c = b.dataset.check, on = !state.cats.has(c);
+    on ? state.cats.add(c) : state.cats.delete(c);
+    b.setAttribute('aria-pressed', on);
+    if (state.current) goto(state.current.id, { keepScroll: true });
+  };
+  $('#name-a').textContent = DATA.meta.baseline.path.split('/').pop();
+  $('#name-b').textContent = DATA.meta.mode === 'html' ? DATA.meta.candidate.url : DATA.meta.candidate.path.split('/').pop();
+  if (DATA.meta.mode === 'html') document.querySelectorAll('.pane-head b')[1].textContent = 'Web page (HTML)';
+}
+
+function visibleSections() {
+  const q = state.q.toLowerCase();
+  return DATA.sections.filter(s => (state.status === 'all' || s.status === state.status) && (!q || s.title.toLowerCase().includes(q)));
+}
+
+function renderList() {
+  $('#sections').innerHTML = visibleSections().map(s => {
+    const n = s.findings.filter(f => state.cats.has(f.category)).length;
+    return `<div class="sec lvl${s.level} ${state.current && state.current.id === s.id ? 'active' : ''}" role="listitem" data-id="${s.id}">
+      <span class="dot st-${s.status}" title="${s.status}"></span>
+      <span class="t">${esc(s.title)}<small>p.${s.baseline.start.page + 1} ↔ p.${s.candidate.start.page + 1} · content ${s.content.match_pct.toFixed(1)}%${s.critical ? ` · <span class="crit">${s.critical} critical</span>` : ''}</small></span>
+      <span class="n">${n}</span></div>`;
+  }).join('') || '<div class="empty">No sections match.</div>';
+}
+
+function renderSide() {
+  const body = $('#tab-body');
+  if (state.tab === 'stylemap') {
+    body.innerHTML = `<p style="color:var(--muted);margin-top:0">Every style mismatch across the document, grouped by role. Each row is one CSS rule to fix in the stage stylesheet.</p>
+      <table class="map"><thead><tr><th>Role</th><th>Baseline → Candidate</th><th>Words</th><th>Sections</th></tr></thead><tbody>` +
+      DATA.style_map.map(m => `<tr><td>${esc(m.role)}</td><td>${esc(m.baseline)}<br>→ <b>${esc(m.candidate)}</b></td><td class="num">${m.words}</td><td class="num">${m.sections}</td></tr>`).join('') +
+      '</tbody></table>';
+    return;
+  }
+  const s = state.current;
+  if (!s) { body.innerHTML = '<div class="empty">Select a section.</div>'; return; }
+  const fs = s.findings.map((f, i) => [f, i]).filter(([f]) => state.cats.has(f.category));
+  body.innerHTML = `<div class="sechead"><h2>${esc(s.title)}</h2>
+    <div class="meta">Baseline p.${s.baseline.start.page + 1}–${s.baseline.end.page + 1} · Candidate p.${s.candidate.start.page + 1}–${s.candidate.end.page + 1} · content match <b>${s.content.match_pct.toFixed(2)}%</b> (${s.content.status}) · ${s.content.missing_words} missing / ${s.content.extra_words} extra words · CSS issues ${s.css.issues}${s.critical ? ` · <span class="crit">${s.critical} critical</span>` : ''}</div></div>
+    <div class="checks" style="grid-template-columns:repeat(7,1fr)">${CATS.map(([c, l]) => `<div style="border-top:3px solid ${CAT_COLOR[c]}"><b>${s.categories?.[c] ?? 0}</b>${l}</div>`).join('')}</div>` +
+    (fs.map(([f, i]) => {
+      const pa = f.baseline[0] ? 'p.' + (f.baseline[0].page + 1) : '—', pb = f.candidate[0] ? 'p.' + (f.candidate[0].page + 1) : '—';
+      return `<div class="finding ${f.check} ${i === state.finding ? 'active' : ''}" data-f="${i}">
+        <div class="top">${f.critical ? '<span class="crit">critical</span>' : ''}<span class="sev ${f.severity}">${f.severity}</span><span>${f.category} · ${esc((f.types || []).join(', '))}</span><span style="margin-left:auto">${pa} ↔ ${pb}</span></div>
+        <div class="msg">${esc(f.message)}</div></div>`;
+    }).join('') || '<div class="empty">No findings for the selected checks. ✓</div>');
+}
+
+async function goto(id, opts = {}) {
+  const s = byId[id]; if (!s) throw new Error('unknown section ' + id);
+  state.current = s; state.finding = -1;
+  history.replaceState(null, '', '#' + id);
+  renderList(); renderSide();
+  $(`.sec[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
+  $('#cur-a').textContent = '§ ' + s.title;
+  $('#cur-b').textContent = '§ ' + s.candidate_title;
+  A.clear(); B.clear();
+  s.findings.forEach((f, i) => {
+    if (!state.cats.has(f.category)) return;
+    f.baseline.forEach(l => A.box(l, f.check, i, f.message));
+    f.candidate.forEach(l => B.box(l, f.check, i, f.message));
+    if (!f.baseline.length && f.baseline_at) A.box(f.baseline_at, f.check + ' at', i, 'Not in baseline — aligned position');
+    if (!f.candidate.length && f.candidate_at) B.box(f.candidate_at, f.check + ' at', i, 'Not in candidate — aligned position');
+  });
+  const ma = A.marker(s.baseline.start, s.title), mb = B.marker(s.candidate.start, s.candidate_title);
+  A.marker(s.baseline.end, '', 'sec-end'); B.marker(s.candidate.end, '', 'sec-end');
+  if (!opts.keepScroll)
+    await Promise.all([A.scrollTo(s.baseline.start.page, s.baseline.start.y), B.scrollTo(s.candidate.start.page, s.candidate.start.y)]);
+  document.body.dataset.section = id;
+  return { id, baselineVisible: A.visible(ma), candidateVisible: B.visible(mb), status: s.status, findings: s.findings.length };
+}
+
+async function focusFinding(i) {
+  const s = state.current, f = s && s.findings[i]; if (!f) return;
+  state.finding = i; renderSide();
+  $(`.finding[data-f="${i}"]`)?.scrollIntoView({ block: 'nearest' });
+  document.querySelectorAll('.hl.focus').forEach(n => n.classList.remove('focus'));
+  document.querySelectorAll(`.hl[data-f="${i}"]`).forEach(n => n.classList.add('focus'));
+  const la = f.baseline[0] || f.baseline_at, lb = f.candidate[0] || f.candidate_at;
+  await Promise.all([
+    la ? A.scrollTo(la.page, la.bbox[1], true) : A.scrollTo(s.baseline.start.page, s.baseline.start.y, true),
+    lb ? B.scrollTo(lb.page, lb.bbox[1], true) : B.scrollTo(s.candidate.start.page, s.candidate.start.y, true),
+  ]);
+}
+
+function step(d) {
+  const list = visibleSections(); if (!list.length) return;
+  const k = state.current ? list.findIndex(s => s.id === state.current.id) : -1;
+  goto(list[Math.max(0, Math.min(list.length - 1, k + d))].id);
+}
+
+$('#sections').onclick = e => { const r = e.target.closest('.sec'); if (r) goto(r.dataset.id); };
+$('#tab-body').onclick = e => { const r = e.target.closest('.finding'); if (r) focusFinding(+r.dataset.f); };
+$('#q').oninput = e => { state.q = e.target.value; renderList(); };
+$('#status-filter').onchange = e => { state.status = e.target.value; renderList(); };
+document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => {
+  state.tab = b.dataset.tab;
+  document.querySelectorAll('[data-tab]').forEach(x => x.setAttribute('aria-selected', x === b));
+  renderSide();
+});
+document.addEventListener('keydown', e => {
+  if (e.target.matches('input,select')) return;
+  if (e.key === 's') setSync(!SYNC.on);
+  if (e.key === 'j') step(1);
+  if (e.key === 'k') step(-1);
+  if (e.key === 'n' && state.current) {
+    const idx = state.current.findings.map((f, i) => i).filter(i => state.cats.has(state.current.findings[i].category));
+    if (idx.length) focusFinding(idx[(idx.indexOf(state.finding) + 1) % idx.length]);
+  }
+});
+
+// Public API used by the Playwright walker (e2e/walk_sections.py)
+window.pdfval = { ready: false, data: DATA, sections: () => DATA.sections.map(s => ({ id: s.id, title: s.title, status: s.status })), goto, focusFinding,
+                  sync: () => ({ on: SYNC.on, points: SYNC.xa.length }), panes: { A, B } };
+
+(async () => {
+  header(); renderList(); renderSide();
+  try {
+    await Promise.all([A.load(), B.load()]);
+  } catch (err) {
+    $('#loading').innerHTML = `Could not load PDFs (${esc(err.message)}).<br>Open this report through <code>python -m pdfval serve &lt;report-dir&gt;</code>, not file://`;
+    return;
+  }
+  $('#loading').remove();
+  buildSync();
+  setSync(true);
+  addEventListener('resize', () => buildSync());
+  // deep links: #<section id> or #<section id>:<finding index> (from the web UI's "open in viewer")
+  const [start, fi] = decodeURIComponent(location.hash.slice(1)).split(':');
+  await goto(byId[start] ? start : (DATA.sections.find(s => s.status === 'fail') || DATA.sections[0]).id);
+  if (byId[start] && fi !== undefined && byId[start].findings[+fi]) await focusFinding(+fi);
+  window.pdfval.ready = true;
+})();
+</script>
+</body>
+</html>

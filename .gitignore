@@ -1,0 +1,21 @@
+# documents and images (never committed)
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.bmp
+*.tif
+*.tiff
+
+# generated output
+runs/
+reports/
+
+# python / tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

@@ -1,0 +1,969 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF Parity</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #fff; --ink: #1b2130; --muted: #667085; --line: #e4e7ec; --soft: #f9fafb;
+    --accent: #0f766e; --accent-ink: #fff; --accent-soft: #e6f4f2;
+    --fail: #d92d20; --warn: #b54708; --pass: #067647; --info: #475467;
+    --c-structure: #2563eb; --c-content: #e11d48; --c-style: #7c3aed; --c-layout: #ea580c; --c-assets: #0d9488; --c-tables: #0284c7; --c-integrity: #b91c1c; --k-content: #e11d48; --k-images: #0d9488; --k-tables: #0284c7; --k-structure: #2563eb; --k-links: #b91c1c; --k-css: #7c3aed; --k-toc: #9333ea; --crit: #b42318;
+    --radius: 10px; --shadow: 0 1px 2px rgb(16 24 40 / .06), 0 1px 3px rgb(16 24 40 / .08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1218; --panel: #171b23; --ink: #e6e8ec; --muted: #98a2b3; --line: #2a303b; --soft: #1d222c;
+            --accent: #2dd4bf; --accent-ink: #042f2e; --accent-soft: #11302d; --fail: #f97066; --warn: #fdb022; --pass: #47cd89; --info: #98a2b3;
+            --shadow: none; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  header.top { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 24px; padding: 0 24px; height: 56px;
+               background: var(--panel); border-bottom: 1px solid var(--line); }
+  .brand { font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .brand .logo { width: 26px; height: 26px; border-radius: 7px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-size: 13px; }
+  nav a { color: var(--muted); padding: 17px 2px; margin-right: 18px; border-bottom: 2px solid transparent; }
+  nav a.on { color: var(--ink); border-bottom-color: var(--accent); text-decoration: none; }
+  main { max-width: 1320px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 22px; margin: 0 0 4px; } h2 { font-size: 16px; margin: 0 0 12px; }
+  .muted { color: var(--muted); } .small { font-size: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } main { padding: 16px; } }
+  .btn { border: 1px solid var(--line); background: var(--panel); padding: 8px 14px; border-radius: 8px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .btn:hover { background: var(--soft); text-decoration: none; }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  .btn.primary:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.danger { color: var(--fail); }
+  .btn.sm { padding: 4px 10px; font-size: 13px; }
+  .drop { border: 2px dashed var(--line); border-radius: var(--radius); padding: 22px; text-align: center; cursor: pointer; transition: .15s; background: var(--soft); }
+  .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  .drop b { display: block; margin-bottom: 2px; }
+  .picked { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--accent); background: var(--accent-soft); border-radius: var(--radius); }
+  .picked .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .or { text-align: center; color: var(--muted); font-size: 12px; margin: 10px 0; }
+  select, input[type=text], input[type=number], textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  label.f { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; margin-top: 14px; }
+  details summary { cursor: pointer; color: var(--muted); }
+  .role { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
+  .bar { height: 8px; background: var(--soft); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); transition: width .4s; }
+  table.t { width: 100%; border-collapse: collapse; }
+  table.t th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  table.t td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  table.t tr.click { cursor: pointer; } table.t tr.click:hover td { background: var(--soft); }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+  .b-fail, .b-error { background: color-mix(in srgb, var(--fail) 14%, transparent); color: var(--fail); }
+  .b-warn, .b-warning { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+  .b-pass, .b-done { background: color-mix(in srgb, var(--pass) 14%, transparent); color: var(--pass); }
+  .b-info, .b-queued, .b-running { background: color-mix(in srgb, var(--info) 14%, transparent); color: var(--info); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 16px 0; }
+  .stat .k { font-size: 12px; color: var(--muted); } .stat .v { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .sub { font-size: 12px; color: var(--muted); }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 20px 0 14px; }
+  .tabs button { border: 0; background: none; padding: 10px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tabs button.on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+  .filters input[type=text] { width: 240px; } .filters select { width: auto; max-width: 280px; }
+  .chip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 11px; cursor: pointer; font-size: 13px; display: inline-flex; gap: 6px; align-items: center; }
+  .chip[aria-pressed=false] { opacity: .45; }
+  .chip.opt[aria-pressed=false] { opacity: 1; }
+  .chip.opt[aria-pressed=true] { border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+  .cats { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); margin-bottom: 12px; flex-wrap: wrap; }
+  .cats button { border: 0; border-right: 1px solid var(--line); background: none; padding: 9px 14px; cursor: pointer; display: flex; gap: 8px; align-items: center; }
+  .cats button:last-child { border-right: 0; }
+  .cats button[aria-selected=true] { background: var(--accent-soft); font-weight: 700; box-shadow: inset 0 -3px 0 var(--accent); }
+  .cats .n { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .types { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
+  .types .lbl { font-size: 12px; color: var(--muted); margin-right: 4px; }
+  .crit { background: var(--crit); color: #fff; }
+  .issue.is-crit { box-shadow: 0 0 0 2px color-mix(in srgb, var(--crit) 55%, transparent), var(--shadow); }
+  .pct { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pct.pass { color: var(--pass); } .pct.warn { color: var(--warn); } .pct.fail { color: var(--fail); }
+  .meter { height: 6px; border-radius: 999px; background: var(--soft); border: 1px solid var(--line); overflow: hidden; margin-top: 6px; }
+  .meter i { display: block; height: 100%; }
+  .stat.crit-card { border-color: color-mix(in srgb, var(--crit) 45%, var(--line)); }
+  .issue { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: var(--radius); padding: 14px; margin-bottom: 12px; box-shadow: var(--shadow); }
+  .issue .meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); }
+  .issue .meta .sp { margin-left: auto; }
+  .issue .msg { margin: 6px 0 10px; font-weight: 500; word-break: break-word; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 800px) { .pair { grid-template-columns: 1fr; } .filters input[type=text] { width: 100%; } }
+  figure { margin: 0; }
+  figcaption { font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; }
+  .shot { width: 100%; border: 1px solid var(--line); border-radius: 6px; cursor: zoom-in; background: #fff; display: block; min-height: 60px; }
+  .lightbox { position: fixed; inset: 0; background: rgb(10 12 16 / .96); z-index: 20; display: flex; flex-direction: column; padding: 18px; gap: 12px; }
+  .lightbox .lb-head { color: #fff; display: flex; gap: 12px; align-items: center; }
+  .lightbox .lb-head .msg { flex: 1; }
+  .lightbox .btn { color: var(--ink); }
+  .lightbox .lb-body { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; min-height: 0; }
+  .lightbox figure { overflow: auto; background: #fff; border-radius: 8px; padding: 8px; }
+  .lightbox figure img { width: 100%; }
+  .lightbox figcaption { color: #333; }
+  .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+  .err { color: var(--fail); }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .spacer { flex: 1; }
+
+  body.wide main { max-width: none; padding: 18px 24px; }
+  .rhead { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
+  .rtitle { flex: 1; min-width: 280px; } .rtitle h1 { margin: 2px 0; }
+  .ractions { display: flex; gap: 8px; align-items: center; }
+  details.more { position: relative; } details.more summary { list-style: none; }
+  details.more summary::-webkit-details-marker { display: none; }
+  details.more .menu { position: absolute; right: 0; top: 110%; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); z-index: 6; min-width: 180px; padding: 6px; }
+  details.more .menu a { display: block; padding: 7px 10px; border-radius: 6px; color: var(--ink); }
+  details.more .menu a:hover { background: var(--soft); text-decoration: none; }
+  .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0 4px; }
+  @media (max-width: 900px) { .kpis { grid-template-columns: 1fr 1fr; } }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px; display: grid; gap: 2px; text-align: left; font: inherit; color: inherit; }
+  button.kpi { cursor: pointer; } button.kpi:hover { border-color: var(--accent); }
+  .kpi.is-crit { border-color: color-mix(in srgb, var(--crit) 45%, var(--line)); }
+  .kpi .k { font-size: 12px; color: var(--muted); } .kpi .pct, .kpi .big { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .kpi .sub { font-size: 12px; color: var(--muted); } .kpi .badge { justify-self: start; font-size: 14px; }
+  .workspace { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .workspace { grid-template-columns: 1fr; } .side { position: static !important; max-height: none !important; } }
+  .side { position: sticky; top: 70px; max-height: calc(100vh - 86px); overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; display: grid; gap: 12px; align-content: start; }
+  .side input[type=search] { width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  .sgroup { display: grid; gap: 2px; }
+  .sh { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 2px 0 4px; display: flex; justify-content: space-between; }
+  .sh a { text-transform: none; letter-spacing: 0; font-weight: 500; }
+  .nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; border: 0; background: none; padding: 6px 8px; border-radius: 7px; cursor: pointer; text-align: left; font: inherit; color: inherit; }
+  .nav:hover { background: var(--soft); } .nav.on { background: var(--accent-soft); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
+  .nav .n, .chk .n { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .nav.sec { font-size: 13px; } .nav.sec .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nav.sec .pct { font-size: 11px; }
+  .seclist { max-height: 300px; overflow: auto; margin-top: 4px; }
+  .chk { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+  .chk:hover { background: var(--soft); } .chk span:nth-child(2) { flex: 1; }
+  .rbar { position: sticky; top: 56px; z-index: 3; background: var(--bg); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 0 10px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+  .rbar select { width: auto; padding: 4px 6px; }
+  .pill { border: 1px solid var(--accent); background: var(--accent-soft); color: var(--ink); border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; background: var(--panel); padding: 5px 12px; cursor: pointer; font: inherit; color: var(--muted); }
+  .seg button[aria-pressed=true] { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+  @media (max-width: 1100px) { .keys { display: none; } }
+  .ghead { display: flex; gap: 10px; align-items: center; padding: 14px 6px 6px; border-bottom: 1px solid var(--line); position: sticky; top: 104px; background: var(--bg); z-index: 2; }
+  .issue-row { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--kc); border-radius: 8px; margin: 6px 0; cursor: pointer; }
+  .issue-row:hover { border-color: color-mix(in srgb, var(--kc) 50%, var(--line)); }
+  .issue-row.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .issue-row.is-crit { background: color-mix(in srgb, var(--crit) 5%, var(--panel)); }
+  .issue-row .line { display: flex; align-items: center; gap: 8px; padding: 8px 12px; min-width: 0; }
+  .issue-row .chev { color: var(--muted); width: 12px; }
+  .issue-row .m { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .issue-row.open .m { white-space: normal; }
+  .issue-row .where { color: var(--muted); font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .issue-row .pages { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  @media (max-width: 1100px) { .issue-row .where { display: none; } }
+  .issue-row .detail { padding: 4px 12px 12px; cursor: default; }
+  .dactions { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .st-fail { background: var(--fail); } .st-warn { background: var(--warn); } .st-pass { background: var(--pass); }
+  .tocsum { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .toc .tochead, .toc .tocrow { display: grid; grid-template-columns: 52px minmax(0, 1fr) 190px minmax(0, 1fr) 52px; gap: 10px; align-items: center; padding: 7px 12px; }
+  .tocbanner { display: grid; grid-template-columns: repeat(6, auto); gap: 18px; align-items: center; justify-content: start; background: var(--panel);
+               border: 1px solid var(--line); border-left: 5px solid var(--line); border-radius: var(--radius); padding: 12px 16px; margin-bottom: 12px; }
+  .tocbanner.ts-pass { border-left-color: var(--pass); } .tocbanner.ts-warn { border-left-color: var(--warn); } .tocbanner.ts-fail { border-left-color: var(--fail); }
+  .tocbanner > div { display: grid; gap: 3px; } .tocbanner .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
+  .tocbanner .ok { color: var(--pass); } .tocbanner .bad { color: var(--fail); }
+  @media (max-width: 1100px) { .tocbanner { grid-template-columns: repeat(3, auto); } }
+  .legend { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); margin: -4px 0 10px; flex-wrap: wrap; }
+  .legend .lg { width: 14px; height: 10px; border: 2px solid; border-radius: 2px; display: inline-block; margin-left: 8px; }
+  .tocsel { display: none; gap: 12px; align-items: center; flex-wrap: wrap; padding: 8px 12px; margin-bottom: 10px; background: var(--accent-soft);
+            border: 1px solid var(--accent); border-radius: 8px; position: sticky; top: 60px; z-index: 4; }
+  .tocsel.on { display: flex; } .tocsel .arrow { color: var(--muted); }
+  .tpages { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .tpages { grid-template-columns: 1fr; } }
+  .tcol { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .tcolhead { padding: 8px 12px; font-weight: 700; border-bottom: 1px solid var(--line); }
+  .tscroll { height: calc(100vh - 170px); min-height: 420px; overflow: auto; background: #d9dce1; padding: 12px; position: relative; }
+  .tpage { position: relative; margin: 0 auto 12px; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .2); }
+  .tpage img { width: 100%; display: block; }
+  .tpno { position: absolute; right: 6px; top: 4px; font-size: 11px; color: #555; background: rgb(255 255 255 / .8); padding: 0 4px; border-radius: 3px; }
+  .tbox { position: absolute; border: 2px solid; border-radius: 3px; cursor: pointer; }
+  .tbox .tpos { position: absolute; left: -24px; top: 50%; transform: translateY(-50%); font-size: 10px; font-weight: 700; color: #fff;
+                border-radius: 3px; padding: 0 3px; background: inherit; opacity: .9; }
+  .tbox.dim { opacity: .15; }
+  .toutline { background: #fff; border-radius: 6px; padding: 12px 12px 12px 4px; }
+  .toutline .lvl.l1 { background: #1e3a8a; } .toutline .lvl.l2 { background: #2563eb; } .toutline .lvl.l3 { background: #60a5fa; } .toutline .lvl.l4 { background: #93c5fd; }
+  .tbox.sel { outline: 3px solid #facc15; outline-offset: 2px; z-index: 2; }
+  .ts-pass.tbox, .lg.ts-pass { border-color: #16a34a; background: rgb(22 163 74 / .10); } .tbox.ts-pass .tpos { background: #16a34a; }
+  .ts-warn.tbox, .lg.ts-warn { border-color: #d97706; background: rgb(217 119 6 / .16); } .tbox.ts-warn .tpos { background: #d97706; }
+  .ts-fail.tbox, .lg.ts-fail { border-color: #dc2626; background: rgb(220 38 38 / .16); } .tbox.ts-fail .tpos { background: #dc2626; }
+  .ts-info.tbox, .lg.ts-info { border-color: #64748b; background: rgb(100 116 139 / .14); } .tbox.ts-info .tpos { background: #64748b; }
+  .tbox.wrongpg, .lg.wrongpg { border-style: dashed; border-color: #dc2626; }
+  .toc .tochead { font-size: 12px; font-weight: 700; color: var(--muted); border-bottom: 1px solid var(--line); position: sticky; top: 56px; background: var(--panel); z-index: 2; }
+  .toc .tocrow { border-bottom: 1px solid var(--line); cursor: pointer; border-left: 4px solid transparent; }
+  .toc .tocrow:hover { background: var(--soft); }
+  .toc .tocrow.ts-pass { border-left-color: color-mix(in srgb, var(--pass) 60%, transparent); }
+  .toc .tocrow.ts-warn { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 5%, transparent); }
+  .toc .tocrow.ts-fail { border-left-color: var(--fail); background: color-mix(in srgb, var(--fail) 6%, transparent); }
+  .toc .tocrow.ts-fail .no, .toc .tocrow.ts-fail .tt { font-weight: 600; }
+  .toc .tocrow.ts-info { border-left-color: var(--info); background: color-mix(in srgb, var(--info) 5%, transparent); }
+  .toc .tocrow .detail { grid-column: 1 / -1; cursor: default; }
+  .toc .tside { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .toc .tt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toc .lvl { font-size: 10px; font-weight: 700; border-radius: 4px; padding: 1px 5px; color: #fff; flex: none; }
+  .toc .lvl.l1 { background: #1e3a8a; } .toc .lvl.l2 { background: #2563eb; } .toc .lvl.l3 { background: #60a5fa; } .toc .lvl.l4 { background: #93c5fd; color: #1e3a8a; }
+  .toc .pg { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; } .toc .bad { color: var(--fail); font-weight: 700; }
+  .toc .status { display: grid; gap: 2px; justify-items: start; } .toc .status small { font-size: 11px; color: var(--muted); }
+  .toc .no { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; } .toc .none { color: var(--muted); }
+  @media (max-width: 900px) { .tocsum { grid-template-columns: 1fr; } .toc .tochead, .toc .tocrow { grid-template-columns: 30px 1fr; } .toc .status { grid-column: 2; } }
+  .warnbox { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 12px 0 0; padding: 12px 14px; border-radius: var(--radius);
+             border: 1px solid color-mix(in srgb, var(--warn) 50%, var(--line)); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); }
+  .rnav { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+  .badge.mode { background: var(--soft); color: var(--muted); border: 1px solid var(--line); font-size: 10px; vertical-align: middle; }
+  .modesw button { padding: 8px 16px; font-weight: 600; }
+  input[type=url] { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font: inherit; }
+  .sevdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .sevdot.error { background: var(--fail); } .sevdot.warning { background: var(--warn); } .sevdot.info { background: var(--info); }
+  .cat { font-size: 12px; font-weight: 700; color: var(--kc); white-space: nowrap; }
+  .type { font-size: 11px; background: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/new" title="Home – new comparison" style="color:inherit;text-decoration:none"><span class="logo">⇆</span>PDF Parity</a>
+  <nav><a href="#/new" data-nav="new">New comparison</a><a href="#/runs" data-nav="runs">Runs</a></nav>
+</header>
+<main id="app"></main>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const CHECKS = ['structure', 'content', 'tables', 'assets', 'integrity', 'style', 'layout'];
+const CATS = [['content', 'Content'], ['images', 'Images'], ['tables', 'Tables'], ['toc', 'TOC'], ['structure', 'Structure'],
+              ['links', 'Links & rendering'], ['css', 'CSS / layout']];
+const CAT_LABEL = Object.fromEntries(CATS);
+const SEVS = ['error', 'warning', 'info'];
+const app = $('#app');
+const api = async (url, opts) => {
+  const r = await fetch(url, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+};
+const fmtSize = b => b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : Math.round(b / 1e3) + ' KB';
+const fmtDate = s => new Date(s).toLocaleString();
+let poll = null;
+
+// ---------------- router
+async function route() {
+  clearTimeout(poll);
+  document.body.classList.remove('wide');
+  document.onkeydown = null;
+  const [path, qs] = location.hash.split('?');
+  const [, view, id] = path.split('/');
+  document.querySelectorAll('[data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === (view || 'new') || (view === 'run' && a.dataset.nav === 'runs')));
+  if (view === 'runs') return viewRuns();
+  if (view === 'run' && id) return viewRun(id, qs);
+  return viewNew(qs);
+}
+addEventListener('hashchange', route);
+
+// ---------------- new comparison (landing page)
+const pick = { baseline: null, candidate: null };  // {path?, file?, name, size}
+let MODE = 'pdf';  // 'pdf' = PDF ⇄ PDF, 'html' = PDF ⇄ web page (URL)
+let newToken = 0;  // a newer render of the form cancels an older one still awaiting data
+
+async function viewNew(qs) {
+  const token = ++newToken;
+  const from = new URLSearchParams(qs || '').get('from');
+  let prev = null;
+  if (from) { try { prev = await api('/api/runs/' + from); } catch (e) { /* ignore */ } }
+  if (token !== newToken) return;
+  if (prev) {
+    MODE = prev.mode || prev.options?.mode || 'pdf';
+    pick.baseline = { path: prev.baseline, name: prev.baseline.split('/').pop() };
+    pick.candidate = MODE === 'pdf' ? { path: prev.candidate, name: prev.candidate.split('/').pop() } : null;
+  }
+  const o = prev?.options || {};
+  app.innerHTML = `
+    <h1>${prev ? 'Edit &amp; rerun' : 'New comparison'}</h1>
+    <p class="muted">Prod is the reference baseline. The candidate is validated against it section by section, driven by the table of contents:
+      content (text, punctuation, spacing), TOC, tables, images, links${MODE === 'pdf' ? ', CSS and alignment' : ''}.</p>
+    <div class="seg modesw" role="tablist" aria-label="Comparison type" style="margin:14px 0 4px">
+      <button data-mode="pdf" aria-pressed="${MODE === 'pdf'}">PDF ⇄ PDF</button>
+      <button data-mode="html" aria-pressed="${MODE === 'html'}">PDF ⇄ Web page (URL)</button>
+    </div>
+    <div class="grid2" style="margin-top:14px">
+      <div class="card" id="card-baseline">
+        <div class="role">Prod · reference baseline</div><h2 style="margin-top:4px">Production PDF</h2><div class="slot"></div>
+      </div>
+      <div class="card" id="card-candidate">
+        ${MODE === 'pdf' ? `<div class="role">Stage · candidate</div><h2 style="margin-top:4px">Stage PDF</h2><div class="slot"></div>` : `
+        <div class="role">Web page · candidate</div><h2 style="margin-top:4px">HTML page URL</h2>
+        <input type="url" id="url" placeholder="https://docs.example.com/manual/sl04" value="${esc(prev?.mode === 'html' ? prev.candidate : '')}" aria-label="Web page URL">
+        <p class="small muted" style="margin:8px 0 0">The page is opened in a headless browser and read from its structure (headings, text, tables, images, links).
+          Its headings are matched to the PDF's table of contents and every section is validated.</p>
+        <details style="margin-top:10px" ${o.html_root || o.html_exclude ? 'open' : ''}><summary>Web page options</summary>
+          <div class="opts">
+            <div><label class="f">Content area (CSS selector)</label><input type="text" id="o-html_root" value="${esc(o.html_root || '')}" placeholder="auto: main / article / body"></div>
+            <div><label class="f">Viewport width (px)</label><input type="number" id="o-html_width" value="${esc(o.html_width || 1280)}" min="320" max="2560"></div>
+            <div><label class="f">Wait after load (ms)</label><input type="number" id="o-html_wait" value="${esc(o.html_wait || 1500)}" min="0" step="250"></div>
+          </div>
+          <div style="margin-top:10px"><label class="f">Exclude (CSS selectors – site navigation, headers, footers…)</label>
+            <input type="text" id="o-html_exclude" value="${esc(o.html_exclude || '')}" placeholder="nav, header, footer, aside, [role=navigation] (default)"></div>
+        </details>`}
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="row">
+        <div style="flex:1;min-width:240px"><label class="f" for="run-name">Run name (optional)</label>
+          <input type="text" id="run-name" placeholder="e.g. SL04 manual – release 1.2" value="${esc(prev?.name || '')}"></div>
+        <button class="btn primary" id="go" disabled>Run comparison</button>
+      </div>
+      <details style="margin-top:14px"><summary>Options</summary>
+        <div class="opts">
+          <div><label class="f">Screenshots for</label><select id="o-screenshots">
+            <option value="all">All issues</option><option value="warnings">Errors + warnings</option>
+            <option value="errors">Errors only</option><option value="none">None</option></select></div>
+          <div><label class="f">Content pass ≥ (%)</label><input type="number" id="o-pass_pct" value="98" step="0.5" min="0" max="100"></div>
+          <div><label class="f">Content warn ≥ (%) — below fails</label><input type="number" id="o-warn_pct" value="90" step="0.5" min="0" max="100"></div>
+          <div><label class="f">Critical: missing block ≥ (words)</label><input type="number" id="o-critical_missing_words" value="8" min="1"></div>
+          <div><label class="f">Colour tolerance (RGB distance)</label><input type="number" id="o-color_tolerance" value="24" min="0" max="441"></div>
+          <div><label class="f">Font-size tolerance (pt)</label><input type="number" id="o-size_tolerance" value="0.5" step="0.1" min="0"></div>
+          <div><label class="f">Indent tolerance (pt)</label><input type="number" id="o-indent_tolerance" value="4" step="0.5" min="0"></div>
+          <div><label class="f">Colour mismatch severity</label><select id="o-sev_color"><option>warning</option><option>error</option><option>info</option></select></div>
+          <div><label class="f">Font-size mismatch severity</label><select id="o-sev_font-size"><option>error</option><option>warning</option><option>info</option></select></div>
+          <div><label class="f">&nbsp;</label><label><input type="checkbox" id="o-case_sensitive" checked> Case-sensitive text</label><br>
+               <label><input type="checkbox" id="o-check_spacing" checked> Check spacing</label><br>
+               <label><input type="checkbox" id="o-normalize_typography"> Ignore quote/dash style (’ vs ')</label><br>
+               <label><input type="checkbox" id="o-front_matter" checked> Validate cover (PDF ⇄ PDF)</label></div>
+        </div>
+        <div class="grid2" style="margin-top:14px">
+          <div><label class="f">Skip sections (regex per line, on title)</label><textarea id="o-skip" rows="3" placeholder="^table of contents?$"></textarea></div>
+          <div><label class="f">Ignore lines (regex per line)</label><textarea id="o-ignore" rows="3" placeholder="Confidential|Draft"></textarea></div>
+        </div>
+      </details>
+      <div id="go-status" class="small muted" style="margin-top:10px"></div>
+    </div>`;
+  // restore the previous run's general options
+  Object.entries(o).forEach(([k, v]) => {
+    const el = document.getElementById('o-' + k);
+    if (!el || k.startsWith('html_')) return;
+    el.type === 'checkbox' ? (el.checked = !!v) : (el.value = v);
+  });
+  app.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => {
+    if (MODE === b.dataset.mode) return;
+    MODE = b.dataset.mode; pick.candidate = null;
+    viewNew(from ? 'from=' + from : '');
+  });
+  let files = [];
+  try { files = await api('/api/files'); } catch (e) { /* listing is optional */ }
+  if (token !== newToken) return;
+  renderSlot('baseline', files);
+  if (MODE === 'pdf') renderSlot('candidate', files);
+  else $('#url').oninput = updateGo;
+  $('#go').onclick = start;
+  updateGo();
+}
+
+function renderSlot(side, files) {
+  const slot = $(`#card-${side} .slot`);
+  if (!slot) return;
+  const p = pick[side];
+  if (p) {
+    slot.innerHTML = `<div class="picked"><span>📄</span><span class="name" title="${esc(p.path || p.name)}">${esc(p.name)}</span>
+      <span class="muted small">${p.size ? fmtSize(p.size) : ''}</span><button class="btn sm" data-clear>Change</button></div>
+      ${p.path ? `<div class="small muted" style="margin-top:6px;word-break:break-all">${esc(p.path)}</div>` : '<div class="small muted" style="margin-top:6px">Will be uploaded when the run starts</div>'}`;
+    slot.querySelector('[data-clear]').onclick = () => { pick[side] = null; renderSlot(side, files); updateGo(); };
+  } else {
+    const guess = files.find(f => new RegExp(side === 'baseline' ? 'prod' : 'stag', 'i').test(f.folder + '/' + f.name));
+    slot.innerHTML = `<div class="drop" tabindex="0"><b>Drop a PDF here</b><span class="muted small">or click to browse</span>
+        <input type="file" accept="application/pdf,.pdf" hidden></div>
+      ${files.length ? `<div class="or">or choose an existing file</div>
+        <select><option value="">— select from ${files.length} PDF(s) on disk —</option>
+        ${files.map(f => `<option value="${esc(f.path)}" ${guess === f ? 'data-guess' : ''}>${esc(f.folder)}/${esc(f.name)} (${fmtSize(f.size)})</option>`).join('')}</select>
+        ${guess ? `<div class="small" style="margin-top:6px">Suggestion: <a href="#" data-guess>${esc(guess.folder)}/${esc(guess.name)}</a></div>` : ''}` : ''}`;
+    const drop = slot.querySelector('.drop'), input = drop.querySelector('input');
+    const take = f => { if (f) { pick[side] = { file: f, name: f.name, size: f.size }; renderSlot(side, files); updateGo(); } };
+    drop.onclick = () => input.click();
+    drop.onkeydown = e => (e.key === 'Enter' || e.key === ' ') && input.click();
+    input.onchange = () => take(input.files[0]);
+    drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+    drop.ondragleave = () => drop.classList.remove('over');
+    drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); take(e.dataTransfer.files[0]); };
+    const sel = slot.querySelector('select');
+    const choose = path => { const f = files.find(x => x.path === path); if (f) { pick[side] = { path: f.path, name: f.name, size: f.size }; renderSlot(side, files); updateGo(); } };
+    if (sel) sel.onchange = () => choose(sel.value);
+    slot.querySelector('a[data-guess]')?.addEventListener('click', e => { e.preventDefault(); choose(guess.path); });
+  }
+}
+
+function updateGo() {
+  const url = $('#url')?.value.trim() || '';
+  $('#go').disabled = !(pick.baseline && (MODE === 'pdf' ? pick.candidate : /^https?:\/\/\S+$/.test(url)));
+}
+
+function upload(file, label) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', '/api/upload?name=' + encodeURIComponent(file.name));
+    x.upload.onprogress = e => $('#go-status').textContent = `Uploading ${label}… ${Math.round(100 * e.loaded / e.total)}%`;
+    x.onload = () => x.status < 300 ? resolve(JSON.parse(x.responseText).path) : reject(new Error(JSON.parse(x.responseText).error));
+    x.onerror = () => reject(new Error('upload failed'));
+    x.send(file);
+  });
+}
+
+async function start() {
+  const go = $('#go'), st = $('#go-status');
+  go.disabled = true; st.classList.remove('err');
+  try {
+    const paths = {};
+    paths.baseline = pick.baseline.path || await upload(pick.baseline.file, 'prod');
+    paths.candidate = MODE === 'html' ? $('#url').value.trim() : (pick.candidate.path || await upload(pick.candidate.file, 'stage'));
+    const options = { mode: MODE };
+    document.querySelectorAll('[id^="o-"]').forEach(el => options[el.id.slice(2)] = el.type === 'checkbox' ? el.checked : el.value);
+    const job = await api('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...paths, name: $('#run-name').value.trim(), options }) });
+    pick.baseline = pick.candidate = null;
+    location.hash = '#/run/' + job.id;
+  } catch (e) {
+    st.textContent = e.message; st.classList.add('err'); go.disabled = false;
+  }
+}
+
+// ---------------- runs list
+async function viewRuns() {
+  const runs = await api('/api/runs');
+  app.innerHTML = `<div class="row"><h1>Runs</h1><span class="spacer"></span><a class="btn primary" href="#/new">New comparison</a></div>
+    <div class="card" style="margin-top:14px;padding:0;overflow-x:auto">
+    ${runs.length ? `<table class="t"><thead><tr><th>Run</th><th>Created</th><th>Status</th><th>Result</th>
+      <th class="n">Content</th><th class="n">Critical</th><th class="n">CSS issues</th><th class="n">Sections fail / warn / pass</th><th></th></tr></thead><tbody>
+      ${runs.map(r => {
+        const s = r.summary;
+        return `<tr class="click" data-id="${r.id}">
+          <td><b>${esc(r.name)}</b> ${r.warning ? '<span class="badge b-warn" title="' + esc(r.warning) + '">same file</span> ' : ''}<span class="badge mode">${(r.mode || r.options?.mode) === 'html' ? 'PDF ⇄ Web' : 'PDF ⇄ PDF'}</span>
+            <div class="small muted">${esc(r.baseline.split('/').pop())} ⇆ ${esc((r.mode || r.options?.mode) === 'html' ? r.candidate : r.candidate.split('/').pop())}</div></td>
+          <td class="small">${fmtDate(r.created)}</td>
+          <td>${r.status === 'running' ? `<div class="bar" style="width:120px"><i style="width:${r.progress * 100}%"></i></div>` : `<span class="badge b-${r.status}">${r.status}</span>`}</td>
+          <td>${s ? `<span class="badge b-${s.result}">${s.result}</span>` : ''}</td>
+          <td class="n">${s?.content ? `<span class="pct ${pctStatus(s)}">${s.content.match_pct.toFixed(2)}%</span>` : ''}</td>
+          <td class="n">${s?.critical ? (s.critical.total ? `<span class="badge crit">${s.critical.total}</span>` : '0') : ''}</td>
+          <td class="n">${s?.css?.issues ?? ''}</td>
+          <td class="n">${s ? `${s.fail} / ${s.warn} / ${s.pass}` : ''}</td>
+          <td style="white-space:nowrap"><button class="btn sm" data-rerun="${r.id}" title="Run again with the same inputs">↻ Rerun</button>
+            <button class="btn sm danger" data-del="${r.id}" title="Delete run">Delete</button></td></tr>`;
+      }).join('')}</tbody></table>` : `<div class="empty">No runs yet. <a href="#/new">Start a comparison</a>.</div>`}</div>`;
+  app.onclick = async e => {
+    const rr = e.target.closest('[data-rerun]');
+    if (rr) { e.stopPropagation(); const j = await api(`/api/runs/${rr.dataset.rerun}/rerun`, { method: 'POST' }); location.hash = '#/run/' + j.id; return; }
+    const del = e.target.closest('[data-del]');
+    if (del) {
+      e.stopPropagation();
+      if (confirm('Delete this run and its report?')) { await api('/api/runs/' + del.dataset.del, { method: 'DELETE' }); viewRuns(); }
+      return;
+    }
+    const row = e.target.closest('tr[data-id]');
+    if (row) location.hash = '#/run/' + row.dataset.id;
+  };
+  if (runs.some(r => r.status === 'running' || r.status === 'queued')) poll = setTimeout(viewRuns, 1500);
+}
+
+const pctStatus = s => { const c = s.content; return c.match_pct >= c.pass_pct ? 'pass' : c.match_pct >= c.warn_pct ? 'warn' : 'fail'; };
+
+// ---------------- single run (report workspace)
+const R = { job: null, data: null, tab: 'issues', cat: 'all', types: new Set(), sevs: new Set(), section: '', q: '',
+            critOnly: false, view: 'list', group: 'none', shown: 60, open: new Set(), sel: 0 };
+
+function readState(qs) {
+  const p = new URLSearchParams(qs || '');
+  Object.assign(R, {
+    tab: p.get('tab') || 'issues', cat: p.get('cat') || 'all', section: p.get('sec') || '', q: p.get('q') || '',
+    types: new Set((p.get('types') || '').split('|').filter(Boolean)), sevs: new Set((p.get('sev') || '').split('|').filter(Boolean)),
+    critOnly: p.get('crit') === '1', view: p.get('view') || 'list', group: p.get('group') || 'none', shown: 60, open: new Set(), sel: 0,
+  });
+}
+
+function writeState() {  // keep filters in the URL (shareable, survives reload) without re-routing
+  const p = new URLSearchParams();
+  if (R.tab !== 'issues') p.set('tab', R.tab);
+  if (R.cat !== 'all') p.set('cat', R.cat);
+  if (R.types.size) p.set('types', [...R.types].join('|'));
+  if (R.sevs.size) p.set('sev', [...R.sevs].join('|'));
+  if (R.critOnly) p.set('crit', '1');
+  if (R.section) p.set('sec', R.section);
+  if (R.q) p.set('q', R.q);
+  if (R.view !== 'list') p.set('view', R.view);
+  if (R.group !== 'none') p.set('group', R.group);
+  const qs = p.toString();
+  history.replaceState(null, '', `#/run/${R.job.id}${qs ? '?' + qs : ''}`);
+}
+
+async function viewRun(id, qs) {
+  app.onclick = null;
+  let job;
+  try { job = await api('/api/runs/' + id); } catch (e) { app.innerHTML = `<div class="empty">Run not found. <a href="#/runs">Back to runs</a></div>`; return; }
+  const isWeb = (job.mode || job.options?.mode) === 'html';
+  const cand = isWeb ? `Web page <a href="${esc(job.candidate)}" target="_blank" rel="noopener"><b>${esc(job.candidate)}</b></a>` : `Stage <b>${esc(job.candidate.split('/').pop())}</b>`;
+  const nav = `<div class="rnav"><a class="btn sm" href="#/new">← Back</a><a class="small" href="#/runs">All runs</a>
+    <span class="spacer"></span><button class="btn sm" data-rerun-this title="Run again with the same inputs${isWeb ? ' (fetches the page again)' : ''}">↻ Rerun</button>
+    <a class="btn sm" href="#/new?from=${id}" title="Open the form with this run's inputs">Edit &amp; rerun</a></div>`;
+  const head = nav + `<div class="rhead"><div class="rtitle"><h1>${esc(job.name)} <span class="badge mode">${isWeb ? 'PDF ⇄ Web' : 'PDF ⇄ PDF'}</span></h1>
+    <div class="small muted">${fmtDate(job.created)} · Prod <b>${esc(job.baseline.split('/').pop())}</b> ⇆ ${cand}</div></div>`;
+  setTimeout(() => {
+    const b = document.querySelector('[data-rerun-this]');
+    if (b) b.onclick = async () => { b.disabled = true; const j = await api(`/api/runs/${id}/rerun`, { method: 'POST' }); location.hash = '#/run/' + j.id; };
+  });
+  if (job.status === 'queued' || job.status === 'running') {
+    app.innerHTML = head + `</div><div class="card" style="margin-top:18px"><div class="row"><b>${job.status === 'queued' ? 'Waiting for another run to finish…' : 'Validating…'}</b>
+      <span class="spacer"></span><span class="muted">${Math.round(job.progress * 100)}%</span></div>
+      <div class="bar" style="margin:10px 0"><i style="width:${job.progress * 100}%"></i></div><div class="small muted">${esc(job.message)}</div></div>`;
+    poll = setTimeout(() => viewRun(id, qs), 1000);
+    return;
+  }
+  if (job.status === 'error') {
+    app.innerHTML = head + `</div><div class="card err" style="margin-top:18px"><b>Run failed</b><div>${esc(job.message)}</div></div>`;
+    return;
+  }
+  if (!R.data || R.job?.id !== id) R.data = await api(`/runs/${id}/results.json`);
+  R.job = job;
+  readState(qs);
+  const d = R.data, s = d.summary, c = s.content, cst = pctStatus(s), crit = s.critical;
+  const base = `/runs/${id}/`;
+  document.body.classList.add('wide');
+  app.innerHTML = head + `
+      <div class="ractions">
+        <a class="btn primary" href="${base}index.html" target="_blank" rel="noopener">Side-by-side viewer ↗</a>
+        <a class="btn" href="${base}report.pdf?download=${encodeURIComponent('parity-report-' + id + '.pdf')}">⬇ PDF report</a>
+        <details class="more"><summary class="btn" aria-label="More downloads">⋯</summary><div class="menu">
+          <a href="${base}report.pdf" target="_blank" rel="noopener">View PDF report ↗</a>
+          <a href="${base}results.json?download=results.json">results.json</a>
+          <a href="${base}junit.xml?download=junit.xml">junit.xml</a></div></details>
+      </div></div>
+    ${job.warning ? `<div class="warnbox" role="alert"><b>⚠ Same file compared twice.</b> ${esc(job.warning)}
+       <a class="btn sm" href="#/new?from=${id}">Pick another candidate</a></div>` : ''}
+    <div class="kpis">
+      <div class="kpi"><span class="k">Result</span><span class="badge b-${s.result}">${s.result}</span>
+        <span class="sub"><span style="color:var(--fail)">${s.fail} fail</span> · <span style="color:var(--warn)">${s.warn} warn</span> · <span style="color:var(--pass)">${s.pass} pass</span></span></div>
+      <button class="kpi" data-kpi="content" title="Show content issues"><span class="k">Content match</span><span class="pct ${cst}">${c.match_pct.toFixed(2)}%</span>
+        <span class="sub">${c.missing_words} missing · ${c.extra_words} extra words</span></button>
+      <button class="kpi ${crit.total ? 'is-crit' : ''}" data-kpi="critical" title="Show critical issues"><span class="k">Critical</span>
+        <span class="big" style="color:${crit.total ? 'var(--crit)' : 'var(--pass)'}">${crit.total}</span>
+        <span class="sub">${Object.entries(crit.by_kind).map(([k, v]) => `${v} × ${esc(k)}`).join(' · ') || 'nothing breaking'}</span></button>
+      <button class="kpi" data-kpi="css" title="Show CSS / layout issues"><span class="k">CSS / layout</span><span class="big">${s.css.issues}</span>
+        <span class="sub">style ${s.css.style} · layout ${s.css.layout}</span></button>
+    </div>
+    <div class="tabs" role="tablist">
+      <button data-tab="issues">Issues</button>${d.toc ? `<button data-tab="toc">TOC (${d.toc.summary.baseline_entries} ⇆ ${d.toc.summary.candidate_entries})</button>` : ''}
+      <button data-tab="sections">Sections (${s.sections})</button>
+      <button data-tab="stylemap">Style map (${d.style_map.length})</button>
+    </div>
+    <div id="tab"></div>`;
+  app.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { R.tab = b.dataset.tab; writeState(); renderTab(); });
+  app.querySelectorAll('[data-kpi]').forEach(b => b.onclick = () => {
+    const k = b.dataset.kpi;
+    Object.assign(R, { tab: 'issues', types: new Set(), sevs: new Set(), section: '', q: '', shown: 60, open: new Set(), sel: 0,
+                       cat: k === 'critical' ? 'all' : k, critOnly: k === 'critical' });
+    writeState(); renderTab();
+  });
+  renderTab();
+}
+
+function allIssues() {
+  return R.data.sections.flatMap(s => s.findings.map(f => ({ f, s })));
+}
+
+function matches({ f, s }, skip = '') {
+  const q = R.q.toLowerCase();
+  return (skip === 'crit' || !R.critOnly || f.critical)
+    && (skip === 'cat' || R.cat === 'all' || f.category === R.cat)
+    && (skip === 'types' || skip === 'cat' || !R.types.size || f.types.some(t => R.types.has(t)))
+    && (skip === 'sev' || !R.sevs.size || R.sevs.has(f.severity))
+    && (skip === 'sec' || !R.section || s.id === R.section)
+    && (!q || f.message.toLowerCase().includes(q) || s.title.toLowerCase().includes(q) || f.types.join(' ').includes(q));
+}
+
+function filteredIssues() {
+  const list = allIssues().filter(x => matches(x));
+  if (R.group === 'type') list.sort((a, b) => a.f.types[0].localeCompare(b.f.types[0]));
+  return list;
+}
+
+function renderTab() {
+  app.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === R.tab));
+  const el = $('#tab'), d = R.data, base = `/runs/${R.job.id}/`;
+  document.onkeydown = null;
+  if (R.tab === 'sections') {
+    el.innerHTML = `<div class="card" style="padding:0;overflow-x:auto"><table class="t"><thead><tr><th>Section</th><th>Prod p.</th><th>Stage p.</th><th>Status</th>
+      <th class="n">Content %</th><th class="n">Missing / extra words</th><th class="n">Critical</th>
+      ${CATS.map(([c, l]) => `<th class="n"><span class="dot" style="background:var(--k-${c})"></span> ${l}</th>`).join('')}<th></th></tr></thead><tbody>
+      ${d.sections.map(s => `<tr class="click" data-sec="${s.id}"><td style="padding-left:${10 + 12 * Math.max(0, s.level - 1)}px">${esc(s.title)}</td>
+        <td>${s.baseline.start.page + 1}–${s.baseline.end.page + 1}</td><td>${s.candidate.start.page + 1}–${s.candidate.end.page + 1}</td>
+        <td><span class="badge b-${s.status}">${s.status}</span></td>
+        <td class="n"><span class="pct ${s.content.status}">${s.content.match_pct.toFixed(2)}%</span></td>
+        <td class="n">${s.content.missing_words} / ${s.content.extra_words}</td>
+        <td class="n">${s.critical ? `<span class="badge crit">${s.critical}</span>` : ''}</td>
+        ${CATS.map(([c]) => `<td class="n">${s.categories?.[c] ? `<a href="#" data-sec-cat="${c}">${s.categories[c]}</a>` : ''}</td>`).join('')}
+        <td><a href="${base}index.html#${s.id}" target="_blank" rel="noopener" class="small" data-stop>viewer ↗</a></td></tr>`).join('')}
+      </tbody></table></div>`;
+    el.onclick = e => {
+      if (e.target.closest('[data-stop]')) return;
+      const r = e.target.closest('[data-sec]');
+      if (!r) return;
+      e.preventDefault();
+      const c = e.target.closest('[data-sec-cat]');
+      Object.assign(R, { tab: 'issues', section: r.dataset.sec, cat: c ? c.dataset.secCat : 'all', types: new Set(), sevs: new Set(), critOnly: false, shown: 60 });
+      writeState(); renderTab();
+    };
+    return;
+  }
+  if (R.tab === 'toc') { renderToc(el); return; }
+  if (R.tab === 'stylemap') {
+    el.innerHTML = `<p class="muted">Every font / size / colour mismatch across the document, grouped by role. Each row is one CSS rule to fix in the stage stylesheet.</p>
+      <div class="card" style="padding:0;overflow-x:auto"><table class="t"><thead><tr><th>Role</th><th>Prod</th><th>Stage</th><th class="n">Words</th><th class="n">Sections</th></tr></thead><tbody>
+      ${d.style_map.map(m => `<tr><td>${esc(m.role)}</td><td><code>${esc(m.baseline)}</code></td><td><code><b>${esc(m.candidate)}</b></code></td>
+        <td class="n">${m.words}</td><td class="n">${m.sections}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">No style differences</td></tr>'}</tbody></table></div>`;
+    el.onclick = null;
+    return;
+  }
+  el.innerHTML = `<div class="workspace"><aside class="side" id="side"></aside><section class="results"><div class="rbar" id="rbar"></div><div id="ilist"></div></section></div>`;
+  renderSide();
+  renderIssues();
+  el.onclick = onWorkspaceClick;
+  el.oninput = e => {
+    if (e.target.id === 'iq') { R.q = e.target.value; R.shown = 60; writeState(); renderSide(true); renderIssues(); }
+    if (e.target.id === 'secq') renderSectionList(e.target.value);
+  };
+  el.onchange = e => {
+    if (e.target.id === 'group') { R.group = e.target.value; writeState(); renderIssues(); }
+  };
+  document.onkeydown = onKeys;
+}
+
+function renderSide(keepSearch) {
+  const all = allIssues();
+  const count = (pred, skip) => all.filter(x => matches(x, skip) && pred(x)).length;
+  const typeCounts = {};
+  all.filter(x => matches(x, 'types')).forEach(x => x.f.types.forEach(t => typeCounts[t] = (typeCounts[t] || 0) + 1));
+  const side = $('#side');
+  const q = keepSearch ? $('#iq')?.value : R.q;
+  const focused = document.activeElement?.id;
+  side.innerHTML = `
+    <input type="search" id="iq" placeholder="Search issues…" value="${esc(q ?? '')}" aria-label="Search issues">
+    <div class="sgroup"><div class="sh">Category</div>
+      <button class="nav ${R.cat === 'all' ? 'on' : ''}" data-cat="all"><span>All issues</span><span class="n">${count(() => true, 'cat')}</span></button>
+      ${CATS.map(([c, l]) => `<button class="nav ${R.cat === c ? 'on' : ''}" data-cat="${c}"><span><span class="dot" style="background:var(--k-${c})"></span> ${l}</span>
+        <span class="n">${count(x => x.f.category === c, 'cat')}</span></button>`).join('')}
+    </div>
+    ${R.cat !== 'all' ? `<div class="sgroup"><div class="sh">${CAT_LABEL[R.cat]} types ${R.types.size ? '<a href="#" data-clear-types>clear</a>' : ''}</div>
+      ${Object.entries(typeCounts).sort((a, b) => b[1] - a[1]).map(([t, n]) =>
+        `<label class="chk"><input type="checkbox" data-type="${esc(t)}" ${R.types.has(t) ? 'checked' : ''}><span>${esc(t)}</span><span class="n">${n}</span></label>`).join('') || '<div class="muted small">none</div>'}
+    </div>` : ''}
+    <div class="sgroup"><div class="sh">Severity</div>
+      <label class="chk"><input type="checkbox" data-crit ${R.critOnly ? 'checked' : ''}><span><span class="badge crit">critical</span> only</span><span class="n">${count(x => x.f.critical, 'crit')}</span></label>
+      ${SEVS.map(v => `<label class="chk"><input type="checkbox" data-sev="${v}" ${R.sevs.has(v) ? 'checked' : ''}><span><span class="badge b-${v}">${v}</span></span><span class="n">${count(x => x.f.severity === v, 'sev')}</span></label>`).join('')}
+    </div>
+    <div class="sgroup"><div class="sh">Section ${R.section ? '<a href="#" data-sec="">all</a>' : ''}</div>
+      <input type="search" id="secq" placeholder="Find section…" aria-label="Find section">
+      <div id="seclist" class="seclist"></div>
+    </div>
+    <button class="btn sm" data-reset style="width:100%">Reset filters</button>`;
+  renderSectionList('');
+  if (focused === 'iq') { const i = $('#iq'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+}
+
+function renderSectionList(filter) {
+  const all = allIssues();
+  const f = (filter || '').toLowerCase();
+  $('#seclist').innerHTML = R.data.sections.filter(s => !f || s.title.toLowerCase().includes(f)).map(s => {
+    const n = all.filter(x => x.s.id === s.id && matches(x, 'sec')).length;
+    return `<button class="nav sec ${R.section === s.id ? 'on' : ''}" data-sec="${s.id}" title="${esc(s.title)}">
+      <span class="dot st-${s.status}"></span><span class="t">${esc(s.title)}</span>
+      <span class="pct ${s.content.status}" title="content match">${s.content.match_pct.toFixed(0)}%</span><span class="n">${n || ''}</span></button>`;
+  }).join('');
+}
+
+function onWorkspaceClick(e) {
+  const t = e.target;
+  const set = patch => { Object.assign(R, { shown: 60, open: new Set(), sel: 0 }, patch); writeState(); renderSide(); renderIssues(); };
+  let el;
+  if ((el = t.closest('[data-cat]'))) return set({ cat: el.dataset.cat, types: new Set() });
+  if ((el = t.closest('input[data-type]'))) { const v = el.dataset.type; R.types.has(v) ? R.types.delete(v) : R.types.add(v); return set({}); }
+  if (t.closest('[data-clear-types]')) { e.preventDefault(); return set({ types: new Set() }); }
+  if (t.closest('input[data-crit]')) return set({ critOnly: !R.critOnly });
+  if ((el = t.closest('input[data-sev]'))) { const v = el.dataset.sev; R.sevs.has(v) ? R.sevs.delete(v) : R.sevs.add(v); return set({}); }
+  if ((el = t.closest('[data-sec]')) && !t.closest('.issue-row, .card-issue')) { e.preventDefault(); return set({ section: el.dataset.sec }); }
+  if (t.closest('[data-reset]')) return set({ cat: 'all', types: new Set(), sevs: new Set(), critOnly: false, section: '', q: '' });
+  if ((el = t.closest('[data-pill]'))) {
+    const [k, v] = el.dataset.pill.split(':');
+    if (k === 'cat') return set({ cat: 'all', types: new Set() });
+    if (k === 'type') { R.types.delete(v); return set({}); }
+    if (k === 'sev') { R.sevs.delete(v); return set({}); }
+    if (k === 'crit') return set({ critOnly: false });
+    if (k === 'sec') return set({ section: '' });
+    if (k === 'q') return set({ q: '' });
+  }
+  if ((el = t.closest('[data-view]'))) { R.view = el.dataset.view; writeState(); return renderIssues(); }
+  if (t.id === 'more') { R.shown += 60; return renderIssues(); }
+  if ((el = t.closest('.shot'))) return openLightbox(+el.dataset.idx);
+  if (t.closest('a, button, select, input')) return;
+  if ((el = t.closest('.issue-row'))) { toggleRow(+el.dataset.idx); }
+}
+
+function toggleRow(i) {
+  R.sel = i;
+  R.open.has(i) ? R.open.delete(i) : R.open.add(i);
+  renderIssues(true);
+}
+
+function viewerLink(f, s) {
+  return `/runs/${R.job.id}/index.html#${s.id}:${+f.id.split('-')[1]}`;
+}
+
+function shotsHtml(f, i) {
+  const base = `/runs/${R.job.id}/`, sh = f.shots || {};
+  if (!sh.baseline && !sh.candidate) return '<div class="small muted">No screenshot for this issue.</div>';
+  return `<div class="pair">
+    <figure><figcaption>Prod · p.${sh.baseline_page ?? '?'}${kindNote(sh.baseline_kind)}</figcaption>${sh.baseline ? `<img class="shot" loading="lazy" data-idx="${i}" src="${base}${sh.baseline}" alt="Prod screenshot for issue ${f.id}">` : ''}</figure>
+    <figure><figcaption>Stage · p.${sh.candidate_page ?? '?'}${kindNote(sh.candidate_kind)}</figcaption>${sh.candidate ? `<img class="shot" loading="lazy" data-idx="${i}" src="${base}${sh.candidate}" alt="Stage screenshot for issue ${f.id}">` : ''}</figure>
+  </div>`;
+}
+
+// ---------------- TOC: full prod TOC (left) vs stage TOC (right) – pages and entries
+const TOC_STATUS = { 'match': 'pass', 'level differs': 'warn', 'title differs': 'warn', 'order differs': 'fail',
+                     'missing in stage': 'fail', 'extra in stage': 'info' };
+const tocPass = r => R.tocFilter === 'all' || (R.tocFilter === 'diff' ? r.status !== 'match' || r.flags.length
+  : R.tocFilter === 'wrong page' ? r.flags.some(x => x.endsWith('page wrong')) : r.status === R.tocFilter);
+
+function renderToc(el) {
+  const t = R.data.toc, sm = t.summary;
+  R.tocFilter = R.tocFilter || 'all';
+  R.tocView = R.tocView || 'pages';
+  const chip = (k, label, n) => `<button class="chip opt" data-tocf="${k}" aria-pressed="${R.tocFilter === k}">${label} <b>${n}</b></button>`;
+  const headDiff = t.heading.baseline && t.heading.candidate && t.heading.baseline.trim().toLowerCase() !== t.heading.candidate.trim().toLowerCase();
+  const cl = R.data.meta.mode === 'html' ? 'web page' : 'stage';
+  el.innerHTML = `
+    <div class="tocbanner ts-${sm.status}">
+      <div><span class="k">TOC status</span><span class="badge b-${sm.status}" style="font-size:15px">${sm.status}</span></div>
+      <div><span class="k">Sequence</span><b class="${sm.sequence_ok ? 'ok' : 'bad'}">${sm.sequence_ok ? '✓ Same order' : `✗ ${sm['order differs']} out of order`}</b></div>
+      <div><span class="k">Levels matching</span><b>${sm.levels_match_pct}%</b></div>
+      <div><span class="k">Entries</span><b>${sm.baseline_entries} prod · ${sm.candidate_entries} ${cl}</b></div>
+      <div><span class="k">Levels</span><b>${t.levels.baseline} prod · ${t.levels.candidate} ${cl}</b></div>
+      <div><span class="k">TOC heading</span>${t.heading.candidate || t.source.candidate === 'printed'
+        ? `<b class="${headDiff ? 'bad' : ''}">“${esc(t.heading.baseline || '—')}” ${headDiff ? '≠' : '='} “${esc(t.heading.candidate || '—')}”</b>`
+        : `<b>“${esc(t.heading.baseline || '—')}” · ${cl}: ${t.source.candidate === 'bookmarks' ? 'heading outline (no printed TOC)' : 'none'}</b>`}</div>
+    </div>
+    <div class="types">${chip('all', 'All', t.rows.length)}${chip('diff', 'Only differences', t.rows.filter(r => r.status !== 'match' || r.flags.length).length)}
+      ${chip('match', '✓ Match', sm.match)}${chip('level differs', 'Level differs', sm['level differs'])}${chip('order differs', 'Order differs', sm['order differs'])}
+      ${chip('title differs', 'Title differs', sm['title differs'])}${chip('missing in stage', `Missing in ${cl}`, sm['missing in stage'])}
+      ${chip('extra in stage', `Extra in ${cl}`, sm['extra in stage'])}${chip('wrong page', 'Wrong page no.', sm['wrong page'])}
+      <span class="spacer"></span>
+      <div class="seg" role="group" aria-label="TOC view"><button data-tocv="pages" aria-pressed="${R.tocView === 'pages'}">Pages side by side</button><button data-tocv="table" aria-pressed="${R.tocView === 'table'}">Entry table</button></div>
+    </div>
+    <div class="legend"><span class="lg ts-pass"></span>match <span class="lg ts-warn"></span>level / title differs <span class="lg ts-fail"></span>order differs / missing
+      <span class="lg ts-info"></span>extra in stage <span class="lg wrongpg"></span>wrong page no.</div>
+    <div id="tocsel" class="tocsel"></div>
+    <div id="tocbody"></div>`;
+  el.onclick = e => {
+    const f = e.target.closest('[data-tocf]');
+    if (f) { R.tocFilter = f.dataset.tocf; return renderToc(el); }
+    const v = e.target.closest('[data-tocv]');
+    if (v) { R.tocView = v.dataset.tocv; return renderToc(el); }
+    const bx = e.target.closest('[data-trow]');
+    if (bx) return selectTocRow(+bx.dataset.trow, bx.closest('.tcol')?.dataset.side);
+    const r = e.target.closest('.tocrow');
+    if (r && !e.target.closest('.shot')) { const k = +r.dataset.row; R.tocOpen = R.tocOpen === k ? null : k; renderTocTable(); }
+  };
+  R.tocView === 'pages' ? renderTocPages() : renderTocTable();
+  if (R.tocSel != null) selectTocRow(R.tocSel, null, true);
+}
+
+function renderTocPages() {
+  const t = R.data.toc, base = `/runs/${R.job.id}/`;
+  const col = (side, label) => {
+    const imgs = (t.images || {})[side] || [];
+    return `<div class="tcol" data-side="${side}"><div class="tcolhead">${label} · ${t.levels[side]} levels${t.pages[side].length ? ` · pages ${t.pages[side].join(', ')}` : ''}</div>
+      <div class="tscroll">${imgs.map(im => {
+        const [pw, ph] = t.page_size[side][im.page];
+        const boxes = t.rows.map((r, k) => [r, k]).filter(([r]) => r[side] && r[side].toc_page === im.page).map(([r, k]) => {
+          const e = r[side], [x0, y0, x1, y1] = e.bbox, pos = r.pos[side];
+          const other = side === 'baseline' ? 'candidate' : 'baseline';
+          const tip = `#${pos} · L${e.level} · ${r.status}${r[other] ? ` · ${side === 'baseline' ? 'stage' : 'prod'} #${r.pos[other]} L${r[other].level}` : ''}${e.page_ok === false ? ' · page number wrong' : ''}`;
+          return `<div class="tbox ts-${TOC_STATUS[r.status]} ${e.page_ok === false ? 'wrongpg' : ''} ${tocPass(r) ? '' : 'dim'}" data-trow="${k}" title="${esc(tip)}"
+            style="left:${x0 / pw * 100 - 0.6}%;top:${y0 / ph * 100 - 0.3}%;width:${(x1 - x0) / pw * 100 + 1.2}%;height:${(y1 - y0) / ph * 100 + 0.6}%">
+            <span class="tpos">${pos}</span></div>`;
+        }).join('');
+        return `<div class="tpage"><img src="${base}${im.src}" alt="${label} TOC page ${im.page}" loading="lazy"><span class="tpno">p.${im.page}</span>${boxes}</div>`;
+      }).join('') || outlineList(side)}</div></div>`;
+  };
+  $('#tocbody').innerHTML = `<div class="tpages">${col('baseline', 'Prod TOC')}${col('candidate', R.data.meta.mode === 'html' ? 'Web page outline' : 'Stage TOC')}</div>`;
+  // the two columns scroll together, aligned by entries present on both sides
+  const [L, Rt] = [...document.querySelectorAll('.tscroll')];
+  const pts = () => t.rows.filter(r => r.baseline && r.candidate).map(r => {
+    const k = t.rows.indexOf(r);
+    const a = L.querySelector(`[data-trow="${k}"]`), b = Rt.querySelector(`[data-trow="${k}"]`);
+    return a && b ? [a.offsetTop + a.parentElement.offsetTop, b.offsetTop + b.parentElement.offsetTop] : null;
+  }).filter(Boolean);
+  let P = null, lock = null;
+  const follow = (src, dst, i, j) => {
+    if (lock === dst) return;
+    P = P || pts();
+    if (P.length < 2) return;
+    const fx = src.scrollTop + src.clientHeight * 0.3;
+    let k = 0; while (k < P.length - 2 && P[k + 1][i] <= fx) k++;
+    const [a0, a1, b0, b1] = [P[k][i], P[k + 1][i], P[k][j], P[k + 1][j]];
+    const y = b0 + (a1 === a0 ? 0 : (fx - a0) / (a1 - a0)) * (b1 - b0);
+    lock = src; dst.scrollTop = y - dst.clientHeight * 0.3;
+    requestAnimationFrame(() => { lock = null; });
+  };
+  L.onscroll = () => follow(L, Rt, 0, 1);
+  Rt.onscroll = () => follow(Rt, L, 1, 0);
+  document.querySelectorAll('.tpage img').forEach(img => img.addEventListener('load', () => { P = null; }));
+}
+
+// a side without a printed TOC (a web page, or a PDF with bookmarks only): show its outline as a list
+function outlineList(side) {
+  const t = R.data.toc;
+  const items = t.rows.map((r, k) => [r, k]).filter(([r]) => r[side]);
+  if (!items.length) return '<div class="empty">No TOC on this side.</div>';
+  return `<div class="toutline"><div class="small muted" style="margin-bottom:8px">${t.source[side] === 'bookmarks' ? (R.data.meta.mode === 'html' ? 'Heading outline of the web page (h1–h6)' : 'PDF bookmarks (no printed TOC)') : ''}</div>
+    ${items.map(([r, k]) => { const e = r[side];
+      return `<div class="tbox ts-${TOC_STATUS[r.status]} ${tocPass(r) ? '' : 'dim'}" data-trow="${k}" title="#${r.pos[side]} · L${e.level} · ${esc(r.status)}"
+        style="position:relative;margin:3px 0 3px ${(e.level - 1) * 22 + 26}px;padding:4px 8px;background:#fff"><span class="tpos">${r.pos[side]}</span>
+        <span class="lvl l${Math.min(e.level, 4)}" style="font-size:10px;color:#fff;border-radius:4px;padding:1px 5px;margin-right:6px">L${e.level}</span>${esc(e.title)}</div>`; }).join('')}</div>`;
+}
+
+function selectTocRow(k, fromSide, quiet) {
+  const t = R.data.toc, r = t.rows[k];
+  R.tocSel = k;
+  document.querySelectorAll('.tbox.sel').forEach(n => n.classList.remove('sel'));
+  document.querySelectorAll(`.tbox[data-trow="${k}"]`).forEach(n => {
+    n.classList.add('sel');
+    const side = n.closest('.tcol').dataset.side;
+    if (!quiet && side !== fromSide) {
+      const sc = n.closest('.tscroll');
+      sc.scrollTo({ top: n.offsetTop + n.parentElement.offsetTop - sc.clientHeight * 0.3, behavior: 'smooth' });
+    }
+  });
+  const e = x => x ? `<b>${esc(x.title)}</b> · L${x.level} · p.${x.page ?? '—'}${x.page_ok === false ? ' ⚠' : ''}` : '<span class="muted">not in this TOC</span>';
+  $('#tocsel').innerHTML = `<span class="badge b-${TOC_STATUS[r.status]}">${r.status}</span>
+    <span>Prod #${r.pos.baseline ?? '—'}: ${e(r.baseline)}</span><span class="arrow">⇆</span><span>Stage #${r.pos.candidate ?? '—'}: ${e(r.candidate)}</span>
+    ${r.flags.length ? `<span class="muted small">${esc(r.flags.join(' · '))}</span>` : ''}`;
+  $('#tocsel').classList.add('on');
+}
+
+function renderTocTable() {
+  const t = R.data.toc;
+  const rowFinding = {};
+  R.data.sections.forEach(s => s.findings.forEach(f => { if (f.category === 'toc' && f.detail.row !== undefined) (rowFinding[f.detail.row] ||= []).push(f); }));
+  const side = e => e ? `<span class="lvl l${Math.min(e.level, 4)}">L${e.level}</span>
+      <span class="tt" style="padding-left:${(e.level - 1) * 18}px">${esc(e.title)}</span>
+      <span class="pg ${e.page_ok === false ? 'bad' : ''}" title="${e.page_ok === false ? `says p.${e.page}, heading on PDF p.${e.actual_page}` : 'printed page'}">${e.page ?? ''}${e.page_ok === false ? ' ⚠' : ''}</span>` : '<span class="none">—</span>';
+  $('#tocbody').innerHTML = `<div class="card toc" style="padding:0">
+      <div class="tochead"><span>Prod #</span><span>Prod (baseline)</span><span>Status</span><span>Stage (candidate)</span><span>Stage #</span></div>
+      ${t.rows.map((r, k) => tocPass(r) ? `<div class="tocrow ts-${TOC_STATUS[r.status]} ${R.tocOpen === k ? 'open' : ''}" data-row="${k}">
+        <span class="no">${r.pos.baseline ?? '—'}</span>
+        <span class="tside">${side(r.baseline)}</span>
+        <span class="status"><span class="badge b-${TOC_STATUS[r.status]}">${r.status}</span>${r.status === 'level differs' || r.flags.includes('level differs') ? `<small>L${r.baseline.level} → L${r.candidate.level}</small>` : ''}${r.status === 'order differs' ? `<small>#${r.pos.baseline} → #${r.pos.candidate}</small>` : ''}${r.flags.filter(x => x.endsWith('page wrong')).map(x => `<small class="bad">${x}</small>`).join('')}</span>
+        <span class="tside">${side(r.candidate)}</span>
+        <span class="no">${r.pos.candidate ?? '—'}</span>
+        ${R.tocOpen === k && rowFinding[k] ? `<div class="detail">${rowFinding[k].map(f => `<div class="small" style="margin:6px 0">${esc(f.message)}</div>`).join('')}${shotsHtml(rowFinding[k][0], -1)}</div>` : ''}
+      </div>` : '').join('')}
+    </div>`;
+}
+
+let current = [];
+function renderIssues(keepScroll) {
+  current = filteredIssues();
+  const pills = [];
+  if (R.cat !== 'all') pills.push(['cat', CAT_LABEL[R.cat]]);
+  R.types.forEach(t => pills.push(['type:' + t, t]));
+  R.sevs.forEach(v => pills.push(['sev:' + v, v]));
+  if (R.critOnly) pills.push(['crit', 'critical only']);
+  if (R.section) pills.push(['sec', R.data.sections.find(s => s.id === R.section)?.title || R.section]);
+  if (R.q) pills.push(['q', `“${R.q}”`]);
+  $('#rbar').innerHTML = `<b>${current.length}</b> issue${current.length === 1 ? '' : 's'}
+    ${pills.map(([k, l]) => `<button class="pill" data-pill="${esc(k)}" title="Remove filter">${esc(l)} ✕</button>`).join('')}
+    <span class="spacer"></span>
+    <label class="small muted">Group <select id="group"><option value="none">none</option><option value="section" ${R.group === 'section' ? 'selected' : ''}>by section</option><option value="type" ${R.group === 'type' ? 'selected' : ''}>by type</option></select></label>
+    <div class="seg" role="group" aria-label="View"><button data-view="list" aria-pressed="${R.view === 'list'}">List</button><button data-view="cards" aria-pressed="${R.view === 'cards'}">Cards</button></div>
+    <span class="small muted keys" title="Keyboard">j/k move · Enter expand · o viewer</span>`;
+  const list = current.slice(0, R.shown);
+  const rows = [];
+  let lastGroup = null;
+  list.forEach(({ f, s }, i) => {
+    const g = R.group === 'section' ? s.id : R.group === 'type' ? f.types[0] : null;
+    if (g !== null && g !== lastGroup) {
+      lastGroup = g;
+      rows.push(R.group === 'section'
+        ? `<div class="ghead"><span class="dot st-${s.status}"></span><b>${esc(s.title)}</b><span class="pct ${s.content.status}">${s.content.match_pct.toFixed(2)}%</span>
+            <span class="muted small">prod p.${s.baseline.start.page + 1} · stage p.${s.candidate.start.page + 1}</span><span class="spacer"></span>
+            <span class="muted small">${current.filter(x => x.s.id === s.id).length} issues</span></div>`
+        : `<div class="ghead"><b>${esc(g)}</b><span class="spacer"></span><span class="muted small">${current.filter(x => x.f.types[0] === g).length} issues</span></div>`);
+    }
+    const pa = f.baseline[0] ? 'p.' + (f.baseline[0].page + 1) : '—', pc = f.candidate[0] ? 'p.' + (f.candidate[0].page + 1) : '—';
+    const tags = `${f.critical ? '<span class="badge crit">critical</span>' : ''}<span class="sevdot ${f.severity}" title="${f.severity}"></span>
+      <span class="cat" style="--kc:var(--k-${f.category})">${CAT_LABEL[f.category]}</span><span class="type">${esc(f.types.join(', '))}</span>`;
+    if (R.view === 'cards') {
+      rows.push(`<article class="issue card-issue ${f.critical ? 'is-crit' : ''}" style="border-left-color:var(--k-${f.category})">
+        <div class="meta">${tags}<span>${esc(s.title)}</span><span class="sp">prod ${pa} ⇆ stage ${pc}</span>
+          <a href="${viewerLink(f, s)}" target="_blank" rel="noopener">viewer ↗</a></div>
+        <div class="msg">${esc(f.message)}</div>${shotsHtml(f, i)}</article>`);
+    } else {
+      const open = R.open.has(i);
+      rows.push(`<div class="issue-row ${open ? 'open' : ''} ${R.sel === i ? 'sel' : ''} ${f.critical ? 'is-crit' : ''}" data-idx="${i}" tabindex="-1" style="--kc:var(--k-${f.category})">
+        <div class="line"><span class="chev">${open ? '▾' : '▸'}</span>${tags}<span class="m">${esc(f.message)}</span>
+          <span class="where">${esc(s.title)}</span><span class="pages">${pa} ⇆ ${pc}</span></div>
+        ${open ? `<div class="detail">${shotsHtml(f, i)}<div class="dactions"><a class="btn sm" href="${viewerLink(f, s)}" target="_blank" rel="noopener">Open this issue in the viewer ↗</a>
+          <button class="btn sm" data-sec="${s.id}">Only this section</button><span class="muted small">#${f.id}</span></div></div>` : ''}
+      </div>`);
+    }
+  });
+  const y = window.scrollY;
+  $('#ilist').innerHTML = (rows.join('') || '<div class="empty">No issues match these filters. ✓</div>') +
+    (current.length > R.shown ? `<div style="text-align:center;margin:14px 0"><button class="btn" id="more">Show more (${current.length - R.shown} left)</button></div>` : '');
+  if (keepScroll) window.scrollTo(0, y);
+}
+
+function onKeys(e) {
+  if (R.tab !== 'issues' || e.target.matches('input, select, textarea') || document.querySelector('.lightbox')) return;
+  const n = Math.min(current.length, R.shown);
+  if (!n) return;
+  if (e.key === 'j' || e.key === 'k') {
+    R.sel = Math.max(0, Math.min(n - 1, R.sel + (e.key === 'j' ? 1 : -1)));
+    renderIssues(true);
+    document.querySelector(`.issue-row[data-idx="${R.sel}"]`)?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault(); toggleRow(R.sel);
+  } else if (e.key === 'o') {
+    const { f, s } = current[R.sel]; window.open(viewerLink(f, s), '_blank', 'noopener');
+  }
+}
+
+const kindNote = k => k === 'aligned' ? ' · not present — aligned position' : k === 'section' ? ' · not present — section start' : '';
+
+function openLightbox(i) {
+  const base = `/runs/${R.job.id}/`;
+  const show = k => {
+    i = (k + current.length) % current.length;
+    const { f, s } = current[i], sh = f.shots || {};
+    lb.innerHTML = `<div class="lb-head"><span class="badge b-${f.severity}">${f.severity}</span><b>${CAT_LABEL[f.category]} · ${esc(f.types.join(', '))}</b>
+      <span class="msg">${esc(s.title)} — ${esc(f.message)}</span><span class="small">${i + 1} / ${current.length} · ← → to browse · Esc to close</span>
+      <button class="btn sm" data-x>Close</button></div>
+      <div class="lb-body"><figure><figcaption>Prod · p.${sh.baseline_page ?? '?'}${kindNote(sh.baseline_kind)}</figcaption>${sh.baseline ? `<img src="${base}${sh.baseline}" alt="">` : ''}</figure>
+      <figure><figcaption>Stage · p.${sh.candidate_page ?? '?'}${kindNote(sh.candidate_kind)}</figcaption>${sh.candidate ? `<img src="${base}${sh.candidate}" alt="">` : ''}</figure></div>`;
+  };
+  const lb = document.createElement('div');
+  lb.className = 'lightbox'; lb.tabIndex = -1;
+  const close = () => { lb.remove(); removeEventListener('keydown', key); };
+  const key = e => { if (e.key === 'Escape') close(); if (e.key === 'ArrowRight') show(i + 1); if (e.key === 'ArrowLeft') show(i - 1); };
+  lb.onclick = e => { if (e.target === lb || e.target.closest('[data-x]')) close(); };
+  addEventListener('keydown', key);
+  document.body.appendChild(lb);
+  show(i);
+}
+
+route();
+</script>
+</body>
+</html>
