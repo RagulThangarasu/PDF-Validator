@@ -18,7 +18,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 import pymupdf
 from PIL import Image as PILImage
 
-from . import normalize
+from . import normalize, site_nav
 from .extract import _measure
 from .model import Doc, Image, Line, PageInfo, Style, Word
 
@@ -169,13 +169,16 @@ def _goto(page, url: str, timeout: int):
 
 def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEFAULT_EXCLUDE,
             width: int = 1280, wait_ms: int = 1500, slice_h: int = 1800, progress=None,
-            user: str = "", password: str = "", crawl: bool = False, max_pages: int = 0) -> tuple[Doc, dict]:
+            user: str = "", password: str = "", crawl: bool = False, max_pages: int = 0,
+            site: dict | None = None) -> tuple[Doc, dict]:
     """Render `url`, extract its structure and write <out_dir>/candidate_source.pdf. Returns (Doc, info).
     user/password (or a login in the URL): sent as HTTP basic auth and, when the site
     shows a sign-in form instead of the page, typed into that form.
     crawl: also every page of the same guide the pages link to (same site, under the
     start page's folder), in reading order, joined into one document: each page's title
-    becomes a level-1 heading with the page's own headings below it (max_pages: 0 = no limit)."""
+    becomes a level-1 heading with the page's own headings below it (max_pages: 0 = no limit).
+    site: the `[site]` config: also read each page's navigation chrome (site_nav) and open
+    what it points to; info["site"] holds it. None: skip."""
     from playwright.sync_api import sync_playwright
 
     report = progress or (lambda f, m: None)
@@ -187,6 +190,7 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
     creds = {"username": user, "password": password, "send": "always"} if user else None
     timeout = 90_000
     captured, skipped = [], []
+    chromes, visited, site_raw = [], {}, None
     with sync_playwright() as p:
         browser = p.chromium.launch()
         try:
@@ -205,6 +209,8 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                     if (resp is not None and resp.status >= 400) or _login_form(page):
                         bad = f"HTTP {resp.status}" if resp is not None and resp.status >= 400 else "login form"
                         skipped.append({"url": u, "reason": bad})
+                        visited[site_nav.key(u)] = {"status": resp.status if resp is not None else 0, "url": page.url,
+                                                    "error": "" if resp is not None and resp.status >= 400 else bad, "crawled": True}
                         k += 1
                         continue
                 if crawl:
@@ -219,11 +225,21 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                     seen.update(_page_key(l) for l in new)
                     queue[k + 1:k + 1] = new  # a page's sub-pages follow it (reading order)
                 data, slices = _read_page(page, root, exclude, wait_ms, slice_h, report, frac)
+                if site is not None:
+                    ch = site_nav.read_chrome(page, site, root)
+                    chromes.append(ch)
+                    visited[site_nav.key(u)] = visited[site_nav.key(page.url)] = {
+                        "status": 200, "url": page.url, "title": ch.get("title", ""), "h1": ch.get("h1", ""),
+                        "ids": ch.get("ids") or [], "crawled": True}
                 if data["words"]:
                     captured.append((page.url, data, slices))
                 else:
                     skipped.append({"url": u, "reason": "no text"})
                 k += 1
+            if site is not None and chromes:
+                report(0.86, "Checking the site navigation")
+                site_raw = {"pages": chromes, **site_nav.probe(page, chromes, visited, out, lambda m: report(0.87, m)),
+                            "dir": str(out)}
         finally:
             browser.close()
     if not captured:
@@ -251,6 +267,10 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
             "images": len(data["images"]), "links": len(data["links"]), "root": root or "auto (main / article / body)",
             "crawl": crawl, "web_pages": [{"url": u, "title": d["title"], "words": len(d["words"])} for u, d, _ in captured],
             "skipped": skipped}
+    if site_raw:
+        for ch in site_raw["pages"]:
+            ch.pop("ids", None)  # only needed for the link checks, large
+        info["site"] = site_raw
     return doc, info
 
 

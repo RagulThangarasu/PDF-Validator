@@ -98,11 +98,27 @@ def product_of(map_name: str, cfg: dict) -> tuple[str, str]:
     return key, ""
 
 
-def url_for(a: dict, cfg: dict) -> str:
-    """The link that opens the topic in AEM: the editor with the topic file AEM reported for the
-    GUID (resolve()). The file name is not derived from the GUID, so without a looked-up path the
-    link opens the editor's Explorer (`fallback_link`), never a guessed file that does not exist."""
-    tmpl, author = cfg.get("link", ""), (cfg.get("author") or "").rstrip("/")
+def map_path(a: dict, cfg: dict) -> str:
+    """DAM path of the product's map: the one found in AEM, else <product folder>/<Maps>/<map file>
+    (the map file is the stage PDF's title, e.g. sl04_and_sh04.ditamap)."""
+    if a.get("map_path"):
+        return a["map_path"]
+    folder, name = (a.get("folder") or "").rstrip("/"), a.get("map") or ""
+    if not folder or not name.lower().endswith(".ditamap"):
+        return ""
+    return f"{folder}/{cfg.get('maps_folder', 'Maps')}/{name}"
+
+
+def url_for(a: dict, cfg: dict, open_in: str | None = None) -> str:
+    """The link a GUID opens in AEM. open_in = "map" (default, `[aem] open_in`): the product's map in
+    the editor, with every topic of the map; "topic": the topic file AEM reported for the GUID
+    (resolve()). Without a known map / file the link opens the editor's Explorer (`fallback_link`),
+    never a guessed file that does not exist."""
+    author = (cfg.get("author") or "").rstrip("/")
+    if (open_in or cfg.get("open_in", "map")) == "map" and author and (mp := map_path(a, cfg)):
+        tmpl = cfg.get("map_link") or "{author}/libs/fmdita/clientlibs/xmleditor/page.html?src={path}&leftPanel=repository_panel&appMode=author"
+        return tmpl.format(author=author, path=quote(mp, safe="/"), guid=a["guid"], map=a.get("map", ""))
+    tmpl = cfg.get("link", "")
     if not tmpl or ("{author}" in tmpl and not author):
         return ""
     folder = (a.get("folder") or cfg.get("dam_root", "")).rstrip("/")
@@ -189,6 +205,33 @@ def resolve(guids: list[tuple[str, str]], cfg: dict) -> tuple[dict[str, str], st
     return out, err
 
 
+def find_map(name: str, cfg: dict) -> str:
+    """DAM path of the map file <name> (e.g. sl04_and_sh04.ditamap), asked from AEM; "" without a login."""
+    import base64
+    import json
+    from urllib import request as _rq
+    from urllib.parse import urlencode
+
+    author = (cfg.get("author") or "").rstrip("/")
+    if not name or not author or not cfg.get("user") or not cfg.get("password"):
+        return ""
+    if (author, name) in _PATHS:
+        return _PATHS[(author, name)]
+    auth = "Basic " + base64.b64encode(f"{cfg['user']}:{cfg['password']}".encode()).decode()
+    q = {"path": cfg.get("search_root") or "/content/dam", "type": "dam:Asset", "nodename": name,
+         "p.limit": "10", "p.hits": "selective", "p.properties": "jcr:path"}
+    try:
+        with _rq.urlopen(_rq.Request(f"{author}/bin/querybuilder.json?{urlencode(q)}",
+                                     headers={"Authorization": auth}), timeout=15) as r:
+            hits = [h["jcr:path"] for h in json.load(r).get("hits", [])]
+    except Exception:
+        return ""
+    hits.sort(key=lambda h: ("/en/" not in h, len(h)))
+    if hits:
+        _PATHS[(author, name)] = hits[0]
+    return hits[0] if hits else ""
+
+
 def merge_settings(acfg: dict, saved: dict) -> dict:
     """Config [aem] with the settings saved from the UI on top (products merged)."""
     out = {**acfg, **{k: v for k, v in saved.items() if k != "products" and v not in (None, "")}}
@@ -204,12 +247,19 @@ def relink(result: dict, acfg: dict) -> bool:
         return False
     a["product"], a["folder"] = product_of(a.get("map", ""), acfg)
     a["author"] = acfg.get("author", "")
-    paths, a["resolve_error"] = resolve([(t["guid"], t["lang"]) for t in a["topics"]], acfg)
-    base = {"map": a.get("map", ""), "product": a["product"], "folder": a["folder"]}
+    found = find_map(a.get("map", ""), acfg)  # with a login: the map's real place in AEM
+    maps = acfg.get("maps_folder", "Maps")
+    if found and not a["folder"]:  # .../<product>/Maps/<map>.ditamap -> the product folder
+        a["folder"] = re.sub(rf"/{re.escape(maps)}/[^/]+$", "", found) if f"/{maps}/" in found else found.rsplit("/", 1)[0]
+    a["map_path"] = found or map_path({"map": a.get("map", ""), "folder": a["folder"]}, acfg)
+    scfg = {**acfg, "search_root": a["folder"]} if a["folder"] else acfg  # topics: inside the product first
+    paths, a["resolve_error"] = resolve([(t["guid"], t["lang"]) for t in a["topics"]], scfg)
+    base = {"map": a.get("map", ""), "product": a["product"], "folder": a["folder"], "map_path": a["map_path"]}
     urls = {}
     for t in a["topics"]:
         t["path"] = paths.get(t["guid"], t.get("path", ""))
         t["url"] = urls[t["guid"]] = url_for({**base, **t}, acfg)
+        t["topic_url"] = url_for({**base, **t}, acfg, "topic") if t["path"] else ""
     a["resolved"] = sum(bool(t["path"]) for t in a["topics"])
     by_guid = {t["guid"]: t for t in a["topics"]}
     for s in result["sections"]:

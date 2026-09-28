@@ -90,3 +90,16 @@ def test_resolve_asks_aem_for_the_topic_path(monkeypatch):
     aem._PATHS.clear()
     assert aem.resolve([(T1, "en")], {**cfg, "password": "bad"}) == ({}, "AEM refused the login (user name or password wrong)")
     assert aem.resolve([(T1, "en")], {**cfg, "password": ""}) == ({}, "")  # no login: nothing asked
+
+
+def test_guid_opens_the_product_map_with_all_topics():
+    """<product folder>/Maps/<map file named in the stage PDF>, opened in the editor."""
+    cfg = {"author": "http://aem:4502", "maps_folder": "Maps", "link": "{author}/e?src={path}",
+           "map_link": "{author}/e?src={path}&appMode=author",
+           "products": {"sl04_and_sh04": "/content/dam/g/en/Education/Signage/SL04-and-SH04"}}
+    product, folder = aem.product_of("sl04_and_sh04.ditamap", cfg)
+    a = {"guid": T1, "lang": "en", "map": "sl04_and_sh04.ditamap", "product": product, "folder": folder}
+    assert aem.url_for(a, cfg) == "http://aem:4502/e?src=/content/dam/g/en/Education/Signage/SL04-and-SH04/Maps/sl04_and_sh04.ditamap&appMode=author"
+    found = {**a, "path": "/content/dam/g/en/Education/Signage/SL04-and-SH04/Topics/Product overview.dita"}
+    assert aem.url_for(found, cfg, "topic").endswith("/Topics/Product%20overview.dita")
+    assert aem.url_for({**a, "folder": ""}, cfg).startswith("http://aem:4502/libs/fmdita")  # no product folder: Explorer

@@ -32,6 +32,9 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
     report(0.98, "Building genuine-issues report")
     pdf_report.build(result, out, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
     write_genuine_csv(result, out / "genuine-issues.csv")
+    if (result.get("site") or {}).get("rows"):
+        from ..site_nav import write_csv
+        write_csv(result["site"], out / "site-navigation.csv")
     (out / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
     (out / "junit.xml").write_text(junit(result))
     (out / "summary.md").write_text(markdown(result))
@@ -149,6 +152,23 @@ def markdown(result: dict) -> str:
         lines += [f"| {t['topic']} | " + (f"[{t['guid']}]({t['url']})" if t["url"] else f"`{t['guid']}`")
                   + f" | {t['genuine']} | {t['critical']} | {t['issues']} |" for t in a["topics"]]
         lines.append("")
+    site = result.get("site") or {}
+    if site.get("rows"):
+        from ..site_nav import GROUPS
+        ss = site["summary"]
+        lines += [f"## Site navigation: {ss['status'].upper()} ({ss['fail']} fail, {ss['warn']} warn, {ss['pass']} pass, "
+                  f"{ss['pages']} pages)", "", "| Check | Pass | Warn | Fail |", "|---|---:|---:|---:|"]
+        lines += [f"| {t} | {ss['groups'][g]['pass']} | {ss['groups'][g]['warn']} | {ss['groups'][g]['fail']} |" for g, t in GROUPS]
+        bad = [r for r in site["rows"] if r["status"] in ("fail", "warn")]
+        if bad:
+            titles = dict(GROUPS)
+            cell = lambda x: str(x).replace("|", "\\|")
+            lines += ["", "| Check | Status | Item | Expected | Actual | Page | Note |", "|---|---|---|---|---|---|---|"]
+            lines += [f"| {titles[r['group']]} | {r['status']} | {cell(r['item'])} | {cell(r['expected'])} | {cell(r['actual'])} | "
+                      f"{r['page']} | {cell(r['note'])} |" for r in bad]
+        lines.append("")
+    elif site.get("error"):
+        lines += ["## Site navigation", "", f"Not checked: {site['error']}", ""]
     lines += ["## Sections", "",
               "| Section | Status | Content % | Missing / extra | Critical | CSS issues |",
               "|---|---|---:|---:|---:|---:|"]

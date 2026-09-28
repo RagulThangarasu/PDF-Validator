@@ -166,6 +166,7 @@ def check(u: Unit) -> list[Finding]:
     relocated_a = relocated_b = _parts(lost.elements()) & _parts(pool.elements())
     unmatched_a: Counter = Counter()
     findings = []
+    moves: list[tuple[Finding, list[int], list[int]]] = []
     matched = moved_words = hyphen_matched = 0
     for n, (tag, i1, i2, j1, j2) in enumerate(ops):
         if tag == "equal":
@@ -185,6 +186,7 @@ def check(u: Unit) -> list[Finding]:
                     locs(u.a, a_idx, rcfg["max_locs"]), locs(u.b, b_idx, rcfg["max_locs"]),
                     {"op": "move", "baseline_text": snippet(u.a, a_idx, 200), "words": len(a_idx)},
                     types=["reordered"], links=paired_locs(u.a, u.b, list(zip(a_idx, b_idx)), rcfg["max_locs"])))
+                moves.append((findings[-1], list(a_idx), list(b_idx)))
             continue
         unmatched_a.update(at[i1:i2])
         if max(i2 - i1, j2 - j1) < ccfg.get("min_diff_words", 1):
@@ -266,6 +268,14 @@ def check(u: Unit) -> list[Finding]:
     extra = sum((pool - unmatched_a).values())
     matched += reordered
     total = len(at)
+    in_place = {id(f) for f, a_idx, b_idx in moves if _visually_in_place(u, a_idx, b_idx)}
+    findings = [f for f in findings if id(f) not in in_place]
+    findings = _pair_near(findings)
+    scripts = _scripts(u, sev)
+    findings += scripts
+    # every content difference counts: prod words missing or changed, words stage adds, spacing and
+    # super/subscript errors - 100 % means the section's text is identical
+    denom = total + extra
     u.content = {
         "baseline_words": total,
         "candidate_words": len(bt),
@@ -274,10 +284,119 @@ def check(u: Unit) -> list[Finding]:
         "extra_words": extra,
         "moved_words": moved_words + reordered,
         "spacing_issues": spacing,
-        "match_pct": round(100.0 * max(matched - spacing, 0) / total, 2) if total else (100.0 if not bt else 0.0),
+        "script_issues": len(scripts),
+        "match_pct": round(100.0 * max(matched - spacing - len(scripts), 0) / denom, 2) if denom else 100.0,
     }
-    findings += _scripts(u, sev)
     return findings
+
+
+def _visual_rank(doc, rng) -> dict[int, int]:
+    """Word -> its place when the page is read by eye: page, then line top to bottom, then left to right."""
+    idx = [i for i in range(*rng) if doc.words[i].norm]
+    key = lambda i: (doc.words[i].page, round(doc.lines[doc.words[i].line].bbox[1] / 2), doc.words[i].bbox[0])
+    return {i: k for k, i in enumerate(sorted(idx, key=key))}
+
+
+def _visually_in_place(u: Unit, a_idx: list[int], b_idx: list[int]) -> bool:
+    """A "moved" block that sits between the same neighbouring text on the page in both PDFs has not
+    moved: only the order the PDF stores its text in differs (a wrapped line written as its own
+    run). Neighbours are the nearest paired words before and after the block in reading-by-eye order."""
+    if not a_idx or not b_idx:
+        return False
+    if _same_table_row(u, a_idx, b_idx) or _repeated_block(u, a_idx):
+        return True
+    ra, rb = _visual_rank(u.a, u.a_range), _visual_rank(u.b, u.b_range)
+    a2b = dict(u.pairs)
+    block = set(a_idx)
+    order_a = sorted(ra, key=ra.get)
+    lo, hi = min(ra.get(i, 0) for i in a_idx), max(ra.get(i, 0) for i in a_idx)
+    before = next((i for i in reversed(order_a[:lo]) if i in a2b and i not in block), None)
+    after = next((i for i in order_a[hi + 1:] if i in a2b and i not in block), None)
+    b_lo, b_hi = min(rb.get(j, 0) for j in b_idx), max(rb.get(j, 0) for j in b_idx)
+    ok_before = before is None or rb.get(a2b[before], -1) < b_lo
+    ok_after = after is None or rb.get(a2b[after], 10 ** 9) > b_hi
+    return (before is not None or after is not None) and ok_before and ok_after
+
+
+def _row_of(doc, i: int):
+    """(page, table, row) of a word inside a detected table, else None."""
+    from .tables import _raw
+    w = doc.words[i]
+    cx, cy = (w.bbox[0] + w.bbox[2]) / 2, (w.bbox[1] + w.bbox[3]) / 2
+    for t, tb, rows, _ in _raw(doc, w.page):
+        if tb[0] - 1 <= cx <= tb[2] + 1 and tb[1] - 1 <= cy <= tb[3] + 1:
+            for r, (rb, _) in enumerate(rows):
+                if rb[1] - 1 <= cy <= rb[3] + 1:
+                    return (w.page, t, r)
+    return None
+
+
+def _repeated_block(u: Unit, a_idx: list[int]) -> bool:
+    """The block's text occurs several times in the section, as often in stage as in prod (a column
+    header row repeated over several tables): which copy pairs with which is arbitrary, so the
+    copies have not moved."""
+    seq = [u.a.words[i].norm for i in a_idx]
+    def count(doc, rng):
+        toks = [w.norm for w in doc.words[rng[0]:rng[1]] if w.norm]
+        n = len(seq)
+        return sum(1 for k in range(len(toks) - n + 1) if toks[k:k + n] == seq)
+    ca = count(u.a, u.a_range)
+    return ca >= 2 and ca == count(u.b, u.b_range)
+
+
+def _same_table_row(u: Unit, a_idx: list[int], b_idx: list[int]) -> bool:
+    """The block is a table cell that sits beside the same (paired) cells on both sides: a label set
+    in the middle of its row in one PDF and at the top in the other reads in another order, but it
+    has not moved. The row comes from whichever side has a detected table (a table without ruling
+    lines is not detected); on the other side the block must sit beside the row's other cells."""
+    a2b = dict(u.pairs)
+    b2a = {j: i for i, j in a2b.items()}
+    for X, Y, xi, yi, fwd in ((u.a, u.b, a_idx, b_idx, a2b), (u.b, u.a, b_idx, a_idx, b2a)):
+        row = _row_of(X, xi[0])
+        if row is None:
+            continue
+        rng = u.a_range if X is u.a else u.b_range
+        block = set(xi)
+        mates = [fwd[i] for i in range(*rng) if i not in block and i in fwd and X.words[i].page == row[0]
+                 and _row_of(X, i) == row]
+        page = Y.words[yi[0]].page
+        ys = [(Y.words[j].bbox[1] + Y.words[j].bbox[3]) / 2 for j in mates if Y.words[j].page == page]
+        if len(ys) < 2:
+            continue
+        cy = sum((Y.words[j].bbox[1] + Y.words[j].bbox[3]) / 2 for j in yi) / len(yi)
+        h = max(Y.words[j].bbox[3] - Y.words[j].bbox[1] for j in yi)
+        if min(ys) - h <= cy <= max(ys) + h:
+            return True
+    return False
+
+
+def _pair_near(findings: list[Finding]) -> list[Finding]:
+    """A missing and an extra piece of text at the same place that differ only in spacing,
+    punctuation or case are one change: “requirements.” -> “requirements”, “meets the” ->
+    “meetsthe”. (They come apart when stage draws the edited text as a separate run, so the
+    diff meets it out of reading order.)"""
+    miss = [f for f in findings if f.detail.get("op") == "delete" and f.baseline]
+    extra = [f for f in findings if f.detail.get("op") == "insert" and f.candidate]
+    drop = set()
+    for m in miss:
+        at = m.candidate_at
+        for e in extra:
+            if id(e) in drop:
+                continue
+            c = e.candidate[0]
+            if at is not None and (at.page != c.page or abs(at.bbox[1] - c.bbox[1]) > 40):
+                continue
+            ta, tb = (m.detail.get("baseline_text") or "").split(), (e.detail.get("candidate_text") or "").split()
+            kind = classify(ta, tb)
+            if kind not in ("spacing", "punctuation", "case", "case + punctuation"):
+                continue
+            m.message = f"{_TYPE_LABEL[kind]}: “{m.detail['baseline_text']}” → “{e.detail['candidate_text']}”"
+            m.candidate, m.candidate_at, m.types = e.candidate, None, [kind]
+            m.links = [(m.baseline[0], e.candidate[0])]
+            m.detail = {**m.detail, "op": "replace", "candidate_text": e.detail["candidate_text"], "absent_words": 0}
+            drop.add(id(e))
+            break
+    return [f for f in findings if id(f) not in drop]
 
 
 _SUP = str.maketrans("0123456789+-=()nia", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱᵃ")

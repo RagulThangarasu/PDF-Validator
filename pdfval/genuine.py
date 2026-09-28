@@ -267,7 +267,7 @@ def _links(u: Unit, units: list[Unit], mode: str) -> list[Finding]:
         ta, tb = _target_word(A, la), _target_word(B, lb)
         if ta is not None and tb is not None:
             ua, ub = _unit_of(units, "a", ta), _unit_of(units, "b", tb)
-            if ua is not None and ub is not None and ua is not ub:
+            if ua is not None and ub is not None and ua is not ub and not _names_target(text, ub.title, ua.title):
                 out.append(Finding(
                     "integrity", "error",
                     f"Link points to the wrong section: “{text}” goes to “{ua.title}” in prod "
@@ -285,6 +285,16 @@ def _links(u: Unit, units: list[Unit], mode: str) -> list[Finding]:
                     {"kind": "link-target-differs", "baseline_uri": ua_, "candidate_uri": ub_},
                     types=["link target differs"]))
     return out
+
+
+def _names_target(text: str, stage_title: str, prod_title: str) -> bool:
+    """The link text names stage's target and not prod's ("Front panel." -> section "Front panel" in
+    stage, its parent "Components" in prod): stage is right, not a wrong link."""
+    from difflib import SequenceMatcher
+    from .normalize import title
+    t = title(re.sub(r"\s*on page \d+\s*$", "", text or "", flags=re.I)).strip("“”\"' .")
+    score = lambda h: max(SequenceMatcher(None, t, title(h)).ratio(), 1.0 if title(h) and title(h) in t else 0.0)
+    return bool(t) and score(stage_title) >= 0.85 and score(prod_title) < 0.85
 
 
 def _in(w, r) -> bool:

@@ -140,6 +140,14 @@
   details.more .menu a { display: block; padding: 7px 10px; border-radius: 6px; color: var(--ink); }
   details.more .menu a:hover { background: var(--soft); text-decoration: none; }
   .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0 4px; }
+  .kpis.five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .sitegroups { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .sitegroups button { text-align: left; display: grid; gap: 4px; border: 1px solid var(--line); border-left: 4px solid var(--pass); border-radius: 8px; background: var(--panel); padding: 10px 12px; cursor: pointer; color: inherit; font: inherit; }
+  .sitegroups button.s-warn { border-left-color: var(--warn); } .sitegroups button.s-fail { border-left-color: var(--fail); }
+  .sitegroups button[aria-pressed=true] { background: var(--accent-soft); border-color: var(--accent); }
+  .sitegroups .n { font-size: 12px; color: var(--muted); }
+  table.t.site td { vertical-align: top; font-size: 13px; overflow-wrap: anywhere; } table.t.site td.st { width: 70px; white-space: nowrap; }
+  table.t.site code { font-size: 11px; color: var(--muted); }
   @media (max-width: 900px) { .kpis { grid-template-columns: 1fr 1fr; } }
   .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px; display: grid; gap: 2px; text-align: left; font: inherit; color: inherit; }
   button.kpi { cursor: pointer; } button.kpi:hover { border-color: var(--accent); }
@@ -650,9 +658,13 @@ async function viewRun(id, qs) {
         ${s.genuine ? `<a class="btn ${s.genuine.total ? 'danger' : ''}" href="${base}genuine-issues.pdf?download=${encodeURIComponent('genuine-issues-' + id + '.pdf')}"
             title="Only the real problems: missing/duplicated sections, missing/broken/misplaced images, missing data, table and link problems — each with a description and prod/stage screenshots">⬇ Genuine issues (${s.genuine.total})</a>` : ''}
         <button class="btn" data-report title="Choose what goes into the PDF report">⬇ PDF report…</button>
+        <a class="btn" href="/api/runs/${id}/source?side=both" title="Everything in the prod${isWeb ? '' : ' and stage'} PDF: raw data (text with fonts and positions, tables, images, links, attachments, fonts) and the document rebuilt as AEM Guides DITA source${isWeb ? '' : '; stage also gets the real topic files from AEM when you are logged in'}. Building takes a few seconds.">⬇ Source${isWeb ? ' (prod)' : ' (prod + stage)'}</a>
         <details class="more"><summary class="btn" aria-label="More downloads">⋯</summary><div class="menu">
           ${s.genuine ? `<a href="${base}genuine-issues.pdf?download=${encodeURIComponent('genuine-issues-' + id + '.pdf')}">⬇ Genuine issues (PDF, with screenshots)</a>
           <a href="${base}genuine-issues.csv?download=${encodeURIComponent('genuine-issues-' + id + '.csv')}">⬇ Genuine issues (CSV / Excel)</a>` : ''}
+          ${d.site?.rows ? `<a href="${base}site-navigation.csv?download=${encodeURIComponent('site-navigation-' + id + '.csv')}">⬇ Site navigation (CSV / Excel)</a>` : ''}
+          <a href="/api/runs/${id}/source?side=baseline">⬇ Prod source (DITA + raw data)</a>
+          ${isWeb ? '' : `<a href="/api/runs/${id}/source?side=candidate">⬇ Stage source (DITA + raw data + AEM files)</a>`}
           <a href="${base}report.pdf?download=${encodeURIComponent('parity-report-' + id + '-full.pdf')}">⬇ Full PDF report (everything)</a>
           <a href="${base}report.pdf" target="_blank" rel="noopener">View full PDF report ↗</a>
           <a href="${base}results.json?download=results.json">results.json</a>
@@ -660,7 +672,7 @@ async function viewRun(id, qs) {
       </div></div>
     ${job.warning ? `<div class="warnbox" role="alert"><b>⚠ Same file compared twice.</b> ${esc(job.warning)}
        <a class="btn sm" href="#/new?from=${id}">Pick another candidate</a></div>` : ''}
-    <div class="kpis">
+    <div class="kpis ${s.site ? 'five' : ''}">
       <div class="kpi"><span class="k">Result</span><span class="badge b-${s.result}">${s.result}</span>
         <span class="sub"><span style="color:var(--fail)">${s.fail} fail</span> · <span style="color:var(--warn)">${s.warn} warn</span> · <span style="color:var(--pass)">${s.pass} pass</span></span></div>
       <button class="kpi" data-kpi="content" title="Show content issues"><span class="k">Content match</span><span class="pct ${cst}">${c.match_pct.toFixed(2)}%</span>
@@ -670,11 +682,15 @@ async function viewRun(id, qs) {
         <span class="sub">${Object.entries(crit.by_kind).map(([k, v]) => `${v} × ${esc(k)}`).join(' · ') || 'nothing breaking'}</span></button>
       <button class="kpi" data-kpi="css" title="Show CSS / layout issues"><span class="k">CSS / layout</span><span class="big">${s.css.issues}</span>
         <span class="sub">style ${s.css.style} · layout ${s.css.layout}</span></button>
+      ${s.site ? `<button class="kpi" data-tab="site" title="Left navigation, links, Download PDF, next / previous, On this page, product subtitle"><span class="k">Site navigation</span>
+        <span class="badge b-${s.site.status}">${s.site.status}</span>
+        <span class="sub"><span style="color:var(--fail)">${s.site.fail} fail</span> · <span style="color:var(--warn)">${s.site.warn} warn</span> · <span style="color:var(--pass)">${s.site.pass} pass</span></span></button>` : ''}
     </div>
     <div class="tabs" role="tablist">
       <button data-tab="issues">Issues</button>${d.toc ? `<button data-tab="toc">TOC (${d.toc.summary.baseline_entries} ⇆ ${d.toc.summary.candidate_entries})</button>` : ''}
       <button data-tab="sections">Sections (${s.sections})</button>${d.aem ? `<button data-tab="topics" title="The AEM Guides topics (GUIDs) the stage issues come from">AEM topics (${d.aem.topics.length})</button>` : ''}
       <button data-tab="stylemap">Style map (${d.style_map.length})</button>
+      ${d.site ? `<button data-tab="site" title="The web guide's navigation around the content">Site navigation${d.site.summary ? ` (${d.site.summary.fail} fail)` : ''}</button>` : ''}
     </div>
     <div id="tab"></div>`;
   app.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { R.tab = b.dataset.tab; writeState(); renderTab(); });
@@ -740,6 +756,7 @@ function renderTab() {
   }
   if (R.tab === 'toc') { renderToc(el); return; }
   if (R.tab === 'topics') { renderTopics(el); return; }
+  if (R.tab === 'site') { renderSite(el); return; }
   if (R.tab === 'stylemap') {
     el.innerHTML = `<p class="muted">Every font / size / colour mismatch across the document, grouped by role. Each row is one CSS rule to fix in the stage stylesheet.</p>
       <div class="card" style="padding:0;overflow-x:auto"><table class="t"><thead><tr><th>Role</th><th>Prod</th><th>Stage</th><th class="n">Words</th><th class="n">Sections</th></tr></thead><tbody>
@@ -893,7 +910,8 @@ async function renderTopics(el) {
   el.innerHTML = `
     <div class="card" style="margin-bottom:14px">
       <div class="row"><div><b>Map</b> <code>${esc(a.map || '—')}</code> · <b>Product</b> <code>${esc(a.product || '—')}</code> ·
-        ${a.topics.length} of ${a.topics_in_pdf} topics have issues</div><span class="spacer"></span>
+        ${a.topics.length} of ${a.topics_in_pdf} topics have issues
+        ${a.map_path ? `<div class="small muted" style="margin-top:4px">GUID links open the map <a href="${esc(a.topics[0]?.url || '#')}" target="_blank" rel="noopener"><code>${esc(a.map_path)}</code> ↗</a> with all its topics</div>` : ''}</div><span class="spacer"></span>
         ${!a.topics.some(t => t.url) ? '<span class="badge b-warn">links off — set the AEM author URL below</span>'
           : a.resolve_error ? `<span class="badge b-warn" title="Links use <folder>/<GUID>.dita">${esc(a.resolve_error)}</span>`
           : a.resolved ? `<span class="badge b-pass">${a.resolved} of ${a.topics.length} topics found in AEM</span>`
@@ -917,7 +935,8 @@ async function renderTopics(el) {
     <div class="card" style="padding:0;overflow-x:auto"><table class="t"><thead><tr><th>Topic</th><th>GUID (opens in AEM)</th><th>Stage p.</th>
       <th class="n">Genuine</th><th class="n">Critical</th><th class="n">All issues</th><th></th></tr></thead><tbody>
       ${a.topics.map(t => `<tr><td><b>${esc(t.topic || '—')}</b><div class="small muted">${t.sections.length} section(s)${t.path ? ' · <code>' + esc(t.path) + '</code>' : ''}</div></td>
-        <td>${guidChip(t)} <button class="btn sm" data-copy="${esc(t.guid)}" title="Copy the GUID">Copy</button></td>
+        <td>${guidChip(t)} <button class="btn sm" data-copy="${esc(t.guid)}" title="Copy the GUID">Copy</button>
+          ${t.topic_url ? `<a class="small" href="${esc(t.topic_url)}" target="_blank" rel="noopener" title="${esc(t.path)}">topic file ↗</a>` : ''}</td>
         <td>${t.page ?? ''}</td>
         <td class="n">${t.genuine ? `<b style="color:var(--fail)">${t.genuine}</b>` : '0'}</td>
         <td class="n">${t.critical ? `<span class="badge crit">${t.critical}</span>` : ''}</td>
@@ -947,6 +966,41 @@ async function renderTopics(el) {
       R.data = await api(`/runs/${R.job.id}/results.json?t=${Date.now()}`);
       renderTopics(el);
     } catch (err) { st.textContent = err.message; st.classList.add('err'); }
+  };
+}
+
+// ---------------- Site navigation: the web guide's chrome (left nav vs L1 TOC, links, download, pager, on this page, subtitle)
+function renderSite(el) {
+  const st = R.data.site, base = `/runs/${R.job.id}/`;
+  if (!st.rows) { el.innerHTML = `<div class="card">Site navigation was not checked: ${esc(st.error || 'no data')}</div>`; return; }
+  const sm = st.summary, g = R.siteGroup || '', f = R.siteFilter || 'issues';
+  const worst = c => c.fail ? 'fail' : c.warn ? 'warn' : 'pass';
+  const rows = st.rows.filter(r => (!g || r.group === g) && (f === 'all' || r.status === 'fail' || r.status === 'warn'));
+  const title = Object.fromEntries(st.groups.map(x => [x.id, x.title]));
+  const short = u => { try { const x = new URL(u); return x.pathname.split('/').pop() || x.pathname; } catch (e) { return u; } };
+  const src = st.subtitle_source || {};
+  el.innerHTML = `
+    <div class="card" style="margin-bottom:12px"><div class="row">
+      <div><b>${sm.pages} page(s)</b> checked · L1 TOC of the PDF: ${sm.l1.length} entries
+        ${st.download?.found ? ` · Download PDF: ${st.download.file ? `<a href="${base}${esc(st.download.file)}" target="_blank" rel="noopener">downloaded file ↗</a>` : esc(st.download.error || 'not a PDF')}` : ''}
+        ${src.property ? ` · subtitle from AEM <code>${esc(src.page)}/jcr:content/${esc(src.property)}</code>` : ''}</div>
+      <span class="spacer"></span>
+      <div class="seg" role="group" aria-label="Rows"><button data-sf="issues" aria-pressed="${f === 'issues'}">Problems only</button><button data-sf="all" aria-pressed="${f === 'all'}">All checks</button></div>
+      <a class="btn sm" href="${base}site-navigation.csv?download=${encodeURIComponent('site-navigation-' + R.job.id + '.csv')}">⬇ CSV</a></div></div>
+    <div class="sitegroups">${st.groups.map(x => { const c = sm.groups[x.id]; return `<button class="s-${worst(c)}" data-sg="${x.id}" aria-pressed="${g === x.id}">
+      <b>${esc(x.title)}</b><span class="n"><span style="color:var(--fail)">${c.fail} fail</span> · <span style="color:var(--warn)">${c.warn} warn</span> · ${c.pass} pass</span></button>`; }).join('')}</div>
+    <div class="card" style="padding:0;overflow-x:auto"><table class="t site"><thead><tr><th>Status</th>${g ? '' : '<th>Check</th>'}<th>Item</th><th>Expected</th><th>Actual</th><th>Page</th><th>Note</th></tr></thead><tbody>
+      ${rows.map(r => `<tr><td class="st"><span class="badge b-${r.status}">${r.status}</span></td>${g ? '' : `<td>${esc(title[r.group])}</td>`}
+        <td><b>${esc(r.item)}</b>${r.where ? `<div><code title="Element the value is read from">${esc(r.where)}</code></div>` : ''}</td>
+        <td>${esc(r.expected)}</td><td>${esc(r.actual)}</td>
+        <td>${r.page ? `<a href="${esc(r.page)}" target="_blank" rel="noopener" title="${esc(r.page)}">${esc(short(r.page))} ↗</a>` : ''}</td>
+        <td class="small">${esc(r.note)}</td></tr>`).join('') || `<tr><td colspan="7" class="muted">${f === 'issues' ? 'No problems found.' : 'No checks.'}</td></tr>`}
+    </tbody></table></div>`;
+  el.onclick = e => {
+    const b = e.target.closest('[data-sg]');
+    if (b) { R.siteGroup = R.siteGroup === b.dataset.sg ? '' : b.dataset.sg; return renderSite(el); }
+    const v = e.target.closest('[data-sf]');
+    if (v) { R.siteFilter = v.dataset.sf; return renderSite(el); }
   };
 }
 

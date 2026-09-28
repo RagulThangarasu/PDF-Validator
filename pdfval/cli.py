@@ -60,7 +60,19 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--runs", help="where runs are stored (default: <project>/runs)")
     u.add_argument("--no-browser", action="store_true")
 
+    x = sub.add_parser("source", help="export a PDF's source: raw data + rebuilt AEM Guides DITA (zip)")
+    x.add_argument("pdf")
+    x.add_argument("--out", help="zip file (default: <pdf name>-source.zip next to the PDF)")
+    x.add_argument("--config", help="TOML overrides merged over config/default.toml")
+
     args = ap.parse_args(argv)
+    if args.cmd == "source":
+        from . import source_export
+        out = args.out or str(Path(args.pdf).with_name(Path(args.pdf).stem + "-source.zip"))
+        path = source_export.export(args.pdf, out, engine.load_config(args.config), label=Path(args.pdf).stem,
+                                    progress=lambda f, m: print(f"{int(f * 100):3d}%  {m}"))
+        print(f"source: {path}")
+        return 0
     if args.cmd == "ui":
         from .app import server
         server.run(args.port, args.root, args.runs, open_browser=not args.no_browser)

@@ -153,6 +153,21 @@ crawl = true                  # validate every page of the guide: follow the sta
                               # pages under the same folder, in reading order, joined into one document
 max_pages = 0                 # stop after this many pages (0 = no limit)
 
+[site]                        # web page runs: the chrome around the content (see pdfval/site_nav.py)
+enabled = true                # left navigation vs the PDF's L1 TOC, its links, Download PDF, next / previous
+                              # topic, "On this page", product subtitle
+# CSS selectors, only when the labels ("Table of contents", "On this page", "Next topic", "Download PDF")
+# do not find the element on a site; empty = found automatically
+nav = ""                      # the left navigation (table of contents)
+on_this_page = ""             # the right-hand list of the page's headings
+next = ""                     # the next-topic link
+prev = ""                     # the previous-topic link
+download = ""                 # the Download PDF link / button
+header = ""                   # the header that holds the product title
+subtitle = ""                 # the product title (subtitle) itself
+footer = ""
+breadcrumb = ""
+
 [genuine]
 # The issues that mean something is really wrong in stage (the "genuine issues" report and
 # `pdfval compare --genuine`). Everything else - CSS, wrapping, moved text - is still in the full report.
@@ -192,7 +207,13 @@ dam_root = "/content/dam/benq-aem-guides/en"   # {folder} when the product has n
 # The link. Placeholders: {author} {path} (topic file's DAM path: found in AEM, else {folder}/{guid}.dita)
 # {folder} {guid} {lang} {map} {product} {element} {q} (URL-encoded GUID).
 link = "{author}/libs/fmdita/clientlibs/xmleditor/page.html?src={path}&leftPanel=repository_panel&appMode=author"
-# When a topic's file could not be looked up (no AEM login): open the editor's Explorer, never a guessed file.
+# What a GUID link opens: "map" = the product's map in the editor, with all of its topics
+# (<product folder>/<maps_folder>/<map file from the stage PDF>, or where AEM has it when logged in);
+# "topic" = the topic file itself (needs the AEM login to find it).
+open_in = "map"
+maps_folder = "Maps"
+map_link = "{author}/libs/fmdita/clientlibs/xmleditor/page.html?src={path}&leftPanel=repository_panel&appMode=author"
+# When neither is known: open the editor's Explorer, never a guessed file.
 fallback_link = "{author}/libs/fmdita/clientlibs/xmleditor/page.html?leftPanel=repository_panel&appMode=author"
 
 [aem.products]                # ditamap name (without .ditamap, exact or regex) = DAM folder of that product

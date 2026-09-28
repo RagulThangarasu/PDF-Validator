@@ -417,6 +417,10 @@ def check(u: Unit) -> list[Finding]:
                 add(tcfg.get("missing_table_severity", "error"),
                     f"Table missing in stage (prod p.{t.page + 1}, {len(t.rows)} rows: “{rtext(A, t.rows[0], 8)}”)",
                     [Loc(t.page, t.bbox)], [], "missing table", critical=True, b_at=al.loc_in_b(t.rows[0].idx[0]))
+                # its rows are part of this one finding, not each a "row missing" of their own
+                for k in [k for k, r in enumerate(rows_a) if r.table == t.key and k in missing_row]:
+                    if missing_row[k] in findings:
+                        findings.remove(missing_row.pop(k))
         else:
             _missing_header(t, ta, tb, dest, rows_a, missing_row, findings, add, tcfg, thr, A, B, al, rtext)
         if len(dest) >= 2:

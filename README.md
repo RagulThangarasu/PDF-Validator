@@ -39,6 +39,23 @@ Images get a second opinion from their pixels, not just from the visual hash: a 
 
 "Data missing" counts only text whose words are really absent from stage (≥ `genuine.data_missing_words`), not text that moved or changed case.
 
+## Proof: every kind of content defect is caught
+
+`tests/test_real_defects.py` plants one known defect into a copy of a real manual (the SL04 prod PDF), compares the original with the copy, and requires the defect to be reported as a genuine issue:
+
+| Planted in stage | Reported as |
+|---|---|
+| a word removed / text added | Data missing / Extra content |
+| a space removed (“meets the” → “meetsthe”) / a full stop removed | Space after a word differs / Punctuation differs |
+| a link removed / pointed at another section | Link not working / Link to wrong section |
+| an image removed / replaced by another picture | Image missing (or broken) / Different image |
+| a table row removed / a whole table removed / two tables merged into one | Table row missing / Table missing / Tables merged |
+| a section removed / moved / duplicated | Section missing / Section in the wrong place / Section duplicated |
+
+A missing or duplicated section is one finding: its own text, images and rows are folded into it, and the stage marker sits where the section belongs. Comparing each sample manual with itself gives no issue.
+
+**Internal links are checked by where they land.** InDesign and AEM Guides link inside a document through *named destinations*, not page numbers. Each one is resolved to its page and position, including destination names in other scripts (“錨點”), so a link that jumps to another section, or to a destination that does not exist, is reported. It is not reported when the link's own text names stage's target and not prod's, for example “Front panel.” going to *Front panel* in stage but to its parent *Components* in prod.
+
 ## AEM topic GUIDs: open the source topic and fix it
 
 A stage PDF published by AEM Guides has a named destination for every topic (`GUID-…-en`) and for each section, table, list, note and image in it (`GUID-…-en-section_3`). The validator maps every stage issue to the topic it comes from, using the issue's own position in stage, and to the nearest element in that topic ([pdfval/aem.py](pdfval/aem.py)).
@@ -46,6 +63,8 @@ A stage PDF published by AEM Guides has a named destination for every topic (`GU
 - **UI**: every issue shows a GUID chip, and the chip opens that topic in AEM in a new tab. The expanded issue shows *Source topic*, the full GUID, **Copy GUID**, and the nearest element (e.g. `near section_2 “Panel”`). The sidebar filters issues by topic. The **AEM topics** tab lists each topic with its GUID link and its genuine, critical and total issue counts, plus **Show issues** (the filter is kept in the URL, so you can share it).
 - **Reports**: `genuine-issues.pdf` starts with *AEM topics to fix*, and every issue in it has a clickable GUID. `genuine-issues.csv` has *AEM topic*, *GUID* (an Excel `HYPERLINK`), *Element* and *Open in AEM* columns. `summary.md` and the side-by-side viewer show the links too.
 - TOC issues have no GUID. They come from the ditamap and the PDF template, not from a topic.
+
+**What a GUID opens** (`[aem] open_in`): by default the product's **map** in the author editor, with all of its topics, from `<product folder>/Maps/<map file>`. The map file is named in the stage PDF (e.g. `sl04_and_sh04.ditamap`), and the product folder comes from the product settings, e.g. `sl04_and_sh04` = `/content/dam/benq-aem-guides/en/Education/Signage/SL04-and-SH04`. With the AEM login, the map is looked up in AEM (so the product folder is found automatically), topic files are searched inside that product folder, and the AEM topics tab also offers each topic file directly. `open_in = "topic"` opens the topic file instead.
 
 **Link settings** (AEM topics tab → *AEM link settings*, saved in `runs/aem-settings.json`, or `[aem]` in the config):
 
@@ -56,6 +75,33 @@ A stage PDF published by AEM Guides has a named destination for every topic (`GU
 | Link template, with placeholders `{author} {folder} {guid} {lang} {map} {product} {element} {q}` | `{author}/libs/fmdita/clientlibs/xmleditor/page.html?src={folder}/{guid}.dita` |
 
 When you save, the current run's links, CSV, genuine-issues PDF and viewer are rebuilt. Runs made before this feature get their GUIDs the first time you open them.
+
+## Site navigation (PDF ⇄ Web page runs)
+
+The content checks read only the page's main content. A web run also checks the guide's chrome around it, on every crawled page ([pdfval/site_nav.py](pdfval/site_nav.py)):
+
+| Check | What is validated | Example finding |
+|---|---|---|
+| **Left navigation: L1 TOC** | every level-1 entry of the prod PDF's TOC (bookmarks) is a top-level entry of the left navigation, in the same order; the navigation is the same on every page | `Supported media: missing (L1 TOC entry not in the left navigation)` |
+| **Navigation links** | every navigation link opens (HTTP status), lands on the page it names (title / h1 = link text) and on its `#anchor`; the highlighted entry is the page itself | `Troubleshooting: opens “Settings”` |
+| **Download PDF** | the button is on every page, the file downloads and is a PDF, and it is the prod document (page count, shared vocabulary, cover) | `Download: text/html, 5120 bytes` |
+| **Next / previous topic** | each page's next / previous goes to the next / previous page of the navigation, its label names that page; none before the first or after the last page | `Next topic: Basic operations → Settings (goes to another page than the navigation order)` |
+| **On this page** | every sub-heading is listed, and each entry jumps to its heading | `Mounting: #nope, anchor not found` |
+| **Product subtitle** | where the header's product title is read from (element, and the AEM `jcr:content` property it comes from on an author instance); the same on every page; it names the product on the prod PDF's cover, title or file name; the version in the footer matches the PDF | `Monitor arm BSH Series: none of BSH is on the PDF cover — wrong product?` |
+
+In the UI: the **Site navigation** card and tab (*Problems only* / *All checks*, filter by check). Each row shows the element the value was read from. Downloads: `site-navigation.csv`, the `summary.md` section, and `site-download.pdf` (the file the site's button delivers). The elements are found by their labels ("Table of contents", "On this page", "Next topic", "Download PDF"). If a site labels them differently, set CSS selectors under `[site]` in the config.
+
+## Source download: what prod and stage really contain
+
+Stage PDFs come from AEM Guides DITA that was converted from the prod PDF, and content and structure can get lost on the way. **⬇ Source (prod + stage)** on a run, the ⋯ menu for one side only, or `pdfval source <pdf> --out file.zip`, gives each PDF as:
+
+| Folder | Contents |
+|---|---|
+| `raw/` | Everything read straight from the PDF, unfiltered: `document.json` (every text line with its spans: font, size, colour, bold, italic, superscript, position; outline; named destinations; images; links; tables cell by cell; metadata), `text.txt`, `tables/*.csv`, `images/` (the original embedded files), `attachments/`, `fonts.csv`, `links.csv`, `metadata.xmp` |
+| `dita/` | The document rebuilt as **DITA 1.3 source that AEM Guides can import**: a `.ditamap` with one topic per heading, nested like the outline; paragraphs, bulleted/numbered lists, note/tip/warning callouts (including bordered note boxes), CALS tables, figures with the extracted images, inline bold/italic/superscript/subscript and `<xref>` links. The language comes from the PDF's tag, unless the text is in another script. Running headers/footers and the printed TOC are left out (the map generates them) but are in `raw/`. |
+| `aem/` | Stage only, with an AEM login: the **real topic files downloaded from AEM** for every topic GUID in the PDF, and `manifest.json` (GUID → DAM path). |
+
+The zip is built on first download (tens of seconds for a 70-page manual) and kept in the run folder.
 
 ## Issue categories and types (filters in the UI, viewer and PDF report)
 
@@ -99,7 +145,7 @@ Every issue has one **category** and one or more **types**. In the UI you pick a
 
 | Dimension | What it covers | How it is judged |
 |---|---|---|
-| **Content %** | The text itself: words, case, **punctuation** (`. , : ;`, quotes, dashes) and **spacing** between words on the same line (double or missing spaces). | `match % = prod words present in stage (in order, moved, or reordered in a table) − spacing errors ÷ prod words`. Pass ≥ `content.pass_pct` (98), warn ≥ `content.warn_pct` (90), below that fail. Font weight, colour and size never affect it. |
+| **Content %** | The text itself: words, case, **punctuation** (`. , : ;`, quotes, dashes) and **spacing** between words on the same line (double or missing spaces). | `match % = (prod words present in stage − spacing errors − superscript/subscript errors) ÷ (prod words + words stage adds)`. **100 % means the text is identical**: every missing, changed or added word, space and punctuation mark lowers it. Text that is only stored in another order in the PDF (a wrapped line written as its own run, a table label centred in its row on one side and top-aligned on the other, a repeated column header) is not reported as reordered.. Pass ≥ `content.pass_pct` (98), warn ≥ `content.warn_pct` (90), below that fail. Font weight, colour and size never affect it. |
 | **Critical / breaking** | A missing section, **missing table row**, missing figure image, missing embedded **file**, a missing content block (≥ 8 prod words absent from stage in any order), a broken link target, broken glyphs (U+FFFD or private-use characters), or text outside the page. | Always flagged. A section with any critical issue **fails** whatever its content %. |
 | **CSS / layout** | Font family, weight, size, colour, indent, alignment, line height. | Counted separately, with the global style map. A section with CSS issues can be at most **warn**. |
 | Other | Links present in prod but plain text in stage, extra images or rows, image geometry, bookmark differences. | Uses its own severity: an error fails the section, a warning makes it warn. |

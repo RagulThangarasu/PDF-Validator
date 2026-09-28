@@ -66,7 +66,7 @@ def _reset_caches() -> None:
         for doc in mod._DOCS.values():
             doc.close()
     for cache in (assets._DOCS, assets._VIS, assets._BLANK, integrity._DOCS, integrity._LINKS,
-                  integrity._OFFPAGE, tables._DOCS, tables._RAW, tables._RULES):
+                  integrity._OFFPAGE, integrity._NAMES, tables._DOCS, tables._RAW, tables._RULES):
         cache.clear()
     placement._shapes.cache_clear()
 
@@ -203,6 +203,8 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 candidate_at=spot, critical=True))
     count_a = Counter(an.norm for an in anA)
     count_b = Counter(an.norm for an in anB)
+    pos_b = lambda k: (B.words[k].page, B.words[k].bbox[1]) if k < len(B.words) else (len(B.pages), 0.0)
+    dup_spans: list[tuple[tuple, tuple, Finding]] = []  # stage (page, y) start, end of a duplicate copy
     for j, an in enumerate(anB):
         if j not in matched_b and count_b[an.norm] > count_a[an.norm] and count_b[an.norm] >= 2:
             first = next(x for x in anB if x.norm == an.norm)
@@ -212,6 +214,8 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 f"but {count_a[an.norm]} time(s) in prod (again on stage p.{an.page + 1}, first on p.{first.page + 1})",
                 [], [locs(B, [an.word])[0]] if an.located else [Loc(an.page, (0, an.y, B.pages[an.page].width, an.y + 20))],
                 detail={"kind": "duplicate-section", "heading": an.title}, critical=True, types=["duplicate section"]))
+            end = min((x.word for x in anB if x.word > an.word), default=len(B.words))
+            dup_spans.append((pos_b(an.word), pos_b(end), struct[unit_for("b", an.word).id][-1]))
             continue
         if j not in matched_b:
             struct[unit_for("b", an.word).id].append(Finding(
@@ -275,11 +279,26 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 truncated[f.check] += 1
             findings.extend(must + rest[:max_f])
         _resolve_one_sided(u, findings, cfg)
-        for f in findings:  # prod-only findings inside a missing section: marked where the section belongs
-            if f.baseline and not f.candidate:
-                at = (f.baseline[0].page, f.baseline[0].bbox[1])
-                for start, end, spot, title in missing_spans:
-                    if spot and start <= at < end:
+        # stage-only findings inside a duplicate copy of a section are that duplicate, not news of their own
+        for start, end, dup in dup_spans:
+            inside = [f for f in findings if f is not dup and f.candidate and not f.baseline
+                      and start <= (f.candidate[0].page, f.candidate[0].bbox[1]) < end]
+            if inside:
+                findings[:] = [f for f in findings if not any(f is x for x in inside)]
+                dup.detail = {**dup.detail, "folded": dup.detail.get("folded", 0) + len(inside)}
+        # prod-only findings inside a missing section (its text, images, rows) are that section, not
+        # issues of their own: folded into the "Section missing" finding, counted there
+        for start, end, spot, title in missing_spans:
+            head = next((f for f in findings if f.check == "structure" and f.detail.get("heading") == title
+                         and "not found in candidate" in f.message), None)
+            inside = [f for f in findings if f is not head and f.baseline and not f.candidate
+                      and start <= (f.baseline[0].page, f.baseline[0].bbox[1]) < end]
+            if head is not None and inside:
+                findings[:] = [f for f in findings if not any(f is x for x in inside)]
+                head.detail = {**head.detail, "folded": head.detail.get("folded", 0) + len(inside)}
+            else:
+                for f in inside:  # the section finding sits in another unit: keep them, marked where it belongs
+                    if spot:
                         f.candidate_at = spot
                         f.detail = {**f.detail, "in_missing_section": title}
         sync_points += _sync_points(u)
@@ -335,8 +354,9 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
 
     status = Counter(s["status"] for s in out_sections)
     cstatus = Counter(s["content"]["status"] for s in out_sections)
-    base_words = sum(s["content"].get("baseline_words", 0) for s in out_sections)
-    good_words = sum(s["content"].get("matched_words", 0) - s["content"].get("spacing_issues", 0) for s in out_sections)
+    base_words = sum(s["content"].get("baseline_words", 0) + s["content"].get("extra_words", 0) for s in out_sections)
+    good_words = sum(s["content"].get("matched_words", 0) - s["content"].get("spacing_issues", 0)
+                     - s["content"].get("script_issues", 0) for s in out_sections)
     crit_kinds = Counter(_critical_kind(f) for s in out_sections for f in s["findings"] if f["critical"])
     result = {
         "meta": {
@@ -351,7 +371,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             "pass": status["pass"], "warn": status["warn"], "fail": status["fail"],
             "content": {
                 "match_pct": round(100.0 * good_words / base_words, 2) if base_words else 100.0,
-                "baseline_words": base_words,
+                "baseline_words": sum(s["content"].get("baseline_words", 0) for s in out_sections),
                 "missing_words": sum(s["content"].get("missing_words", 0) for s in out_sections),
                 "extra_words": sum(s["content"].get("extra_words", 0) for s in out_sections),
                 "spacing_issues": sum(s["content"].get("spacing_issues", 0) for s in out_sections),
@@ -668,7 +688,9 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
         url, out_dir, root=h.get("root", ""), exclude=h.get("exclude") or html_source.DEFAULT_EXCLUDE,
         width=int(h.get("width") or 1280), wait_ms=int(h.get("wait_ms") or 1500),
         user=h.get("user", ""), password=h.get("password", ""), crawl=crawl, max_pages=max_pages,
+        site=cfg.get("site", {}) if cfg.get("site", {}).get("enabled", True) else None,
         progress=lambda f, m: report(0.3 * f, m))
+    site = info.pop("site", None)
     if crawl:  # the whole guide against the whole PDF, not one chapter
         cfg["sections"]["page_scope"] = False
     cfg["layout"]["enabled"] = False
@@ -681,4 +703,11 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
     result = compare(baseline, doc.path, cfg, candidate_doc=doc,
                      candidate_meta={"mode": "html", "url": url, "page_title": info["title"], "capture": info},
                      progress=lambda f, m: report(0.3 + 0.7 * f, m))
+    if site:  # left navigation, download PDF, next/previous, on this page, product subtitle
+        from . import site_nav
+        try:
+            result["site"] = site_nav.evaluate(site, baseline, cfg.get("site", {}))
+            result["summary"]["site"] = {k: result["site"]["summary"][k] for k in ("status", "fail", "warn", "pass")}
+        except Exception as e:  # the content result stands on its own
+            result["site"] = {"error": f"{type(e).__name__}: {e}"}
     return result

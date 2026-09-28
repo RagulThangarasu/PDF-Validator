@@ -147,6 +147,38 @@ class Jobs:
                 pdf_report.build(result, run_dir, severities=sev)
         return result.get("aem") or {}
 
+    def source(self, jid: str, side: str) -> Path:
+        """Source export (raw data + rebuilt DITA; stage: + the real AEM topic files when logged in)
+        of the run's prod / stage PDF, or both in one zip. Built once, kept in the run folder."""
+        import zipfile
+        from .. import source_export
+        run_dir = self.path(jid)
+        job = self.get(jid)
+        if side == "both":
+            out = run_dir / "source-prod-and-stage.zip"
+            if not out.exists():
+                parts = [("prod", self.source(jid, "baseline"))]
+                if job.get("mode", "pdf") != "html":
+                    parts.append(("stage", self.source(jid, "candidate")))
+                with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+                    for prefix, path in parts:
+                        with zipfile.ZipFile(path) as src:
+                            for n in src.namelist():
+                                z.writestr(f"{prefix}/{n}", src.read(n))
+            return out
+        if side == "candidate" and job.get("mode", "pdf") == "html":
+            raise ValueError("The stage of this run is a web page: its source is the page itself")
+        tag = "prod" if side == "baseline" else "stage"
+        out = run_dir / f"source-{tag}.zip"
+        if not out.exists():
+            pdf = run_dir / ("baseline.pdf" if side == "baseline" else "candidate.pdf")
+            pdf = pdf if pdf.exists() else Path(job["baseline" if side == "baseline" else "candidate"])
+            cfg = engine.load_config()
+            _apply_options(cfg, job.get("options", {}))
+            acfg = self.aem_config() if side == "candidate" and self.aem_config().get("author") else None
+            source_export.export(str(pdf), out, cfg, label=tag, aem_cfg=acfg)
+        return out
+
     def delete(self, jid: str) -> None:
         shutil.rmtree(self.path(jid), ignore_errors=True)
 
@@ -283,6 +315,19 @@ def make_handler(jobs: Jobs, root: Path):
                     return self._json({**{k: v for k, v in c.items() if k != "password"}, "has_password": bool(c["password"])})
                 if p == "/api/files":
                     return self._json(_list_pdfs(root, jobs.dir))
+                if m := re.fullmatch(r"/api/runs/([\w-]+)/source", p):
+                    side = parse_qs(u.query).get("side", ["both"])[0]
+                    if side not in ("baseline", "candidate", "both"):
+                        return self._json({"error": "side must be baseline, candidate or both"}, 400)
+                    job = jobs.get(m[1])
+                    stem = {"baseline": Path(job["baseline"]).stem, "candidate": Path(job["candidate"]).stem,
+                            "both": re.sub(r"[^\w.-]+", "-", job["name"]).strip("-")}[side]
+                    tag = {"baseline": "prod", "candidate": "stage", "both": "prod-and-stage"}[side]
+                    try:
+                        path = jobs.source(m[1], side)
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, 400)
+                    return self._file(path, download=f"{stem[:60]}-{tag}-source.zip")
                 if m := re.fullmatch(r"/runs/([\w-]+)/(.+)", p):
                     base = jobs.path(m[1]).resolve()
                     target = (base / m[2]).resolve()
