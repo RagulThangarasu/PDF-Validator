@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from ..model import SEVERITY_RANK, Finding, Style
-from . import Unit, locs, snippet
+from . import Unit, locs, paired_locs, snippet
 
 
 def _rgb(hex_: str) -> tuple[int, int, int]:
@@ -36,7 +36,7 @@ def check(u: Unit) -> list[Finding]:
     scfg, rcfg = u.cfg["style"], u.cfg["report"]
     sev_map = scfg.get("severity", {})
     groups: dict[tuple, list[tuple[int, int]]] = defaultdict(list)
-    for i, j in u.pairs:
+    for i, j in u.pairs + u.style_pairs:
         wa, wb = u.a.words[i], u.b.words[j]
         d = diff(wa.style, wb.style, scfg)
         if d:
@@ -56,5 +56,6 @@ def check(u: Unit) -> list[Finding]:
             locs(u.a, a_idx, rcfg["max_locs"]), locs(u.b, b_idx, rcfg["max_locs"]),
             {"role": role, "props": [{"property": p, "baseline": x, "candidate": y} for p, x, y in d],
              "words": len(pairs), "baseline_style": wa.style.css(), "candidate_style": wb.style.css()},
+            links=paired_locs(u.a, u.b, pairs, rcfg["max_locs"]),
         ))
     return findings

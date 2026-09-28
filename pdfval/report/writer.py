@@ -1,6 +1,7 @@
 """Write results.json, junit.xml, summary.md, report.pdf (issues + screenshots) and the interactive viewer."""
 from __future__ import annotations
 
+import csv
 import json
 import os
 import shutil
@@ -28,14 +29,42 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
     report(0.75, "Building PDF report")
     pdf_report.build(result, out, severities=shotmod.SEVERITIES.get(shots) or None,
                      progress=lambda f, m: report(0.75 + 0.23 * f, m))
+    report(0.98, "Building genuine-issues report")
+    pdf_report.build(result, out, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
+    write_genuine_csv(result, out / "genuine-issues.csv")
     (out / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
     (out / "junit.xml").write_text(junit(result))
     (out / "summary.md").write_text(markdown(result))
     for name, meta in (("baseline.pdf", result["meta"]["baseline"]), ("candidate.pdf", result["meta"]["candidate"])):
         _link_or_copy(meta["path"], out / name)
+    return write_viewer(result, out)
+
+
+def write_viewer(result: dict, out: Path) -> Path:
     data = json.dumps(result, ensure_ascii=False).replace("</", "<\\/")
     (out / "index.html").write_text(VIEWER.read_text().replace("/*__DATA__*/", data))
     return out / "index.html"
+
+
+def write_genuine_csv(result: dict, path: Path) -> Path:
+    """One row per genuine issue (opens in Excel): where it is and what is wrong."""
+    from ..genuine import where
+    with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(["#", "Section", "Issue", "Severity", "Prod pages", "Stage pages", "AEM topic", "GUID", "Element",
+                    "Open in AEM", "Description", "Why it matters", "Prod screenshot", "Stage screenshot"])
+        for s in result["sections"]:
+            for f in s["findings"]:
+                if f.get("genuine"):
+                    pa, pc = where(f)
+                    shots = f.get("shots") or {}
+                    a = f.get("aem") or {}
+                    # Excel shows the GUID as a link that opens the topic in AEM
+                    guid = f'=HYPERLINK("{a["url"]}","{a["guid"]}")' if a.get("url") else a.get("guid", "")
+                    w.writerow([f["id"], s["title"], f["issue"], f["severity"], pa, pc, a.get("topic", ""), guid,
+                                a.get("element", ""), a.get("url", ""), f["description"],
+                                f.get("why", ""), shots.get("baseline", ""), shots.get("candidate", "")])
+    return path
 
 
 def _toc_images(result: dict, out: Path, zoom: float = 1.6) -> None:
@@ -112,6 +141,13 @@ def markdown(result: dict) -> str:
     if crit:
         lines += ["## Critical issues", "", "| Section | Check | Issue |", "|---|---|---|"]
         lines += [f"| {s['title']} | {f['check']} | {f['message']} |" for s, f in crit]
+        lines.append("")
+    if result.get("aem"):
+        a = result["aem"]
+        lines += [f"## AEM topics with issues (map `{a['map']}`)", "",
+                  "| Topic | GUID | Genuine | Critical | All issues |", "|---|---|---:|---:|---:|"]
+        lines += [f"| {t['topic']} | " + (f"[{t['guid']}]({t['url']})" if t["url"] else f"`{t['guid']}`")
+                  + f" | {t['genuine']} | {t['critical']} | {t['issues']} |" for t in a["topics"]]
         lines.append("")
     lines += ["## Sections", "",
               "| Section | Status | Content % | Missing / extra | Critical | CSS issues |",

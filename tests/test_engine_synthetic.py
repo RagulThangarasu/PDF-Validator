@@ -197,11 +197,22 @@ def test_missing_table_is_critical(tmp_path, cfg):
 
 
 def test_content_types_case_punctuation_spacing(tmp_path, cfg):
-    a = make_pdf(tmp_path / "a.pdf", body_text="Note the quick brown fox jumps over the lazy dog, near the bank.")
-    b = make_pdf(tmp_path / "b.pdf", body_text="NOTE the quick brown fox jumps over the lazy dog; near the bank .")
+    a = make_pdf(tmp_path / "a.pdf", body_text="See the quick brown fox jumps over the lazy dog, near the bank.")
+    b = make_pdf(tmp_path / "b.pdf", body_text="SEE the quick brown fox jumps over the lazy dog; near the bank .")
     r = compare(a, b, cfg)
     types = {t for s in r["sections"] for f in s["findings"] if f["category"] == "content" for t in f["types"]}
     assert {"case", "punctuation", "spacing"} <= types
+
+
+def test_callout_labels_are_house_style(tmp_path, cfg):
+    """"Tips" -> "TIPS:", "Note" -> "NOTE:", "Warning" -> "WARNING:" are expected; "Tip" -> "NOTE:" is not."""
+    a = make_pdf(tmp_path / "a.pdf", body_text="Tips Keep the remote control dry. Note Unplug the cord. Warning Hot surface.")
+    b = make_pdf(tmp_path / "b.pdf", body_text="TIPS: Keep the remote control dry. NOTE: Unplug the cord. WARNING: Hot surface.")
+    r = compare(a, b, cfg)
+    assert not [f for s in r["sections"] for f in s["findings"] if f["category"] == "content"]
+    c = make_pdf(tmp_path / "c.pdf", body_text="NOTE: Keep the remote control dry. NOTE: Unplug the cord. WARNING: Hot surface.")
+    r = compare(a, c, cfg)
+    assert [f for s in r["sections"] for f in s["findings"] if f["category"] == "content" and "Tips" in f["message"]]
     assert all(f["category"] == "content" for s in r["sections"] for f in s["findings"] if f["check"] == "content")
 
 
@@ -230,6 +241,7 @@ def test_toc_levels_missing_extra_and_not_content(tmp_path, cfg):
     heads = ["Overview", "Setup", "Mounting", "Settings"]
     a = make_toc_pdf(tmp_path / "a.pdf", [(1, "Overview", 2), (2, "Setup", 3), (3, "Mounting", 4), (1, "Settings", 5)], heads)
     b = make_toc_pdf(tmp_path / "b.pdf", [(1, "Overview", 2), (2, "Setup", 3), (2, "Mounting", 4), (2, "Extras", 4)], heads)
+    cfg["toc"]["max_level"] = 0  # every level
     r = compare(a, b, cfg)
     status = {(row["baseline"] or row["candidate"])["title"]: row["status"] for row in r["toc"]["rows"]}
     assert status == {"Overview": "match", "Setup": "match", "Mounting": "level differs",
@@ -238,6 +250,17 @@ def test_toc_levels_missing_extra_and_not_content(tmp_path, cfg):
     assert not any("...." in f["message"] or "Extras" in f["message"] for f in content)
     assert {t for s in r["sections"] for f in s["findings"] if f["category"] == "toc" for t in f["types"]} >= \
         {"level differs", "missing entry", "extra entry"}
+
+
+def test_toc_top_level_only_by_default(tmp_path, cfg):
+    """Only level-1 entries are validated: deeper entries are ignored unless the title is level 1
+    on the other side (then it is a level difference, not a missing entry)."""
+    heads = ["Overview", "Setup", "Mounting", "Settings"]
+    a = make_toc_pdf(tmp_path / "a.pdf", [(1, "Overview", 2), (2, "Setup", 3), (1, "Mounting", 4), (1, "Settings", 5)], heads)
+    b = make_toc_pdf(tmp_path / "b.pdf", [(1, "Overview", 2), (2, "Extras", 3), (2, "Mounting", 4), (1, "Settings", 5)], heads)
+    r = compare(a, b, cfg)
+    status = {(row["baseline"] or row["candidate"])["title"]: row["status"] for row in r["toc"]["rows"]}
+    assert status == {"Overview": "match", "Mounting": "level differs", "Settings": "match"}
 
 
 def test_toc_sequence_swapped_entries(tmp_path, cfg):
@@ -268,6 +291,7 @@ def _wrapped_pdf(path, lines):
 def test_line_wrap_is_layout_not_content(tmp_path, cfg):
     a = _wrapped_pdf(tmp_path / "a.pdf", ["Supported models SL6504/", "SL7504/ and the quick brown fox jumps over", "the lazy dog."])
     b = _wrapped_pdf(tmp_path / "b.pdf", ["Supported models SL6504/SL7504/ and the quick brown fox", "jumps over the lazy dog."])
+    cfg["layout"]["check_wrap"] = True  # off by default
     r = compare(a, b, cfg)
     assert not checks(r, "content")
     assert section_by(r, "Overview")["content"]["match_pct"] == 100
@@ -280,6 +304,7 @@ def test_pdf_vs_web_page_toc_driven(tmp_path, cfg):
     per-section text differences, heading level and order differences are reported,
     and site navigation is not treated as content."""
     from pdfval.engine import compare_url
+    cfg["toc"]["max_level"] = 0  # the page's heading levels are part of this test
     heads = ["Overview", "Setup", "Mounting", "Settings"]
     pdf = make_toc_pdf(tmp_path / "a.pdf", [(1, "Overview", 2), (2, "Setup", 3), (2, "Mounting", 4), (1, "Settings", 5)], heads)
     body = {h: f"Body text about {h.lower()} for the reader." for h in heads}
@@ -309,3 +334,128 @@ def test_cells_merged_is_flagged(tmp_path, cfg):
     b = make_table_pdf(tmp_path / "b.pdf", [ROWS[0], "Storage 64 GB", ROWS[2], ROWS[3]])
     types = [t for f in checks(compare(a, b, cfg), "tables") for t in f["types"]]
     assert "cells merged" in types
+
+
+def _list_pdf(path, bullet_dx, gap=6, marker_after=False):
+    """A label line and three bullet items; bullet_dx: marker offset from the label."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "Overview", fontsize=18, fontname="hebo")
+    page.insert_text((72, 130), "Important", fontsize=11, fontname="hebo")
+    y = 146
+    for t in ("Keep the box for transport.", "Do not leave bags near children.", "Recycle the carton."):
+        if not marker_after:
+            page.insert_text((72 + bullet_dx, y), "•", fontsize=11, fontname="helv")
+        page.insert_text((72 + bullet_dx + gap, y), t, fontsize=11, fontname="helv")
+        if marker_after:  # bullet stored after its text in reading order
+            page.insert_text((72 + bullet_dx, y), "•", fontsize=11, fontname="helv")
+        y += 14
+    doc.set_toc([[1, "Overview", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_bullet_alignment_is_an_indent_issue(tmp_path, cfg):
+    a = _list_pdf(tmp_path / "a.pdf", 0)
+    b = _list_pdf(tmp_path / "b.pdf", 9, marker_after=True)
+    bullets = [f for f in checks(compare(a, b, cfg), "layout") if "bullet" in f["types"]]
+    assert bullets and all("indent" in f["types"] for f in bullets)
+    assert any(f["detail"]["kind"] == "bullet indent" and f["detail"]["lines"] == 3 for f in bullets)  # the whole list shifted
+    same = [f for f in checks(compare(a, _list_pdf(tmp_path / "c.pdf", 0, marker_after=True), cfg), "layout")
+            if "bullet" in f["types"]]
+    assert not same  # same alignment, bullet only stored elsewhere in reading order
+
+
+def _numbered_pdf(path, labels):
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "Overview", fontsize=18, fontname="hebo")
+    page.insert_text((72, 130), "Remove the box as follows.", fontsize=11, fontname="helv")
+    for k, (lab, t) in enumerate(zip(labels, ("Cut the straps.", "Unfasten the clips.", "Lift the cover."))):
+        page.insert_text((84, 146 + 14 * k), lab, fontsize=11, fontname="helv")
+        page.insert_text((100, 146 + 14 * k), t, fontsize=11, fontname="helv")
+    doc.set_toc([[1, "Overview", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_list_numbering_style_format_and_sequence(tmp_path, cfg):
+    a = _numbered_pdf(tmp_path / "a.pdf", ["a.", "b.", "c."])
+    kinds = lambda b: {(f["detail"]["kind"], f["detail"]["baseline"], f["detail"]["candidate"])
+                       for f in checks(compare(a, b, cfg), "layout") if "bullet" in f["types"]}
+    roman = kinds(_numbered_pdf(tmp_path / "b.pdf", ["i.", "ii.", "ii."]))
+    assert ("numbering style", "a, b, c", "i, ii, iii") in roman
+    assert any(k == "numbering sequence" and "expected “iii.”" in c for k, _, c in roman)
+    paren = kinds(_numbered_pdf(tmp_path / "c.pdf", ["a)", "b)", "c)"]))
+    assert {k for k, _, _ in paren} == {"numbering format"}
+    assert not kinds(_numbered_pdf(tmp_path / "d.pdf", ["a.", "b.", "c."]))
+
+
+def _note_pdf(path, image_inside):
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 30), False)
+    for xx in range(40):
+        for yy in range(30):
+            pix.set_pixel(xx, yy, ((xx * 6) % 256, (yy * 8) % 256, 90))
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "Overview", fontsize=18, fontname="hebo")
+    page.insert_text((72, 130), "Place the display on a flat surface.", fontsize=11, fontname="helv")
+    page.draw_rect(pymupdf.Rect(66, 150, 480, 260), color=None, fill=(0.85, 0.9, 0.95))  # the note panel
+    page.insert_text((76, 170), "Note: keep the ventilation openings clear.", fontsize=11, fontname="helv")
+    r = pymupdf.Rect(76, 185, 156, 245) if image_inside else pymupdf.Rect(76, 280, 156, 340)
+    page.insert_image(r, stream=pix.tobytes("png"))
+    page.insert_text((72, 380), "Then connect the power cord.", fontsize=11, fontname="helv")
+    doc.set_toc([[1, "Overview", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_image_outside_its_note_box(tmp_path, cfg):
+    a = _note_pdf(tmp_path / "a.pdf", True)
+    out = [f for f in checks(compare(a, _note_pdf(tmp_path / "b.pdf", False), cfg), "assets")
+           if "image outside box" in f["types"]]
+    assert out and "Note: keep the ventilation" in out[0]["message"] and out[0]["genuine"]
+    same = [f for f in checks(compare(a, _note_pdf(tmp_path / "c.pdf", True), cfg), "assets")
+            if "image outside box" in f["types"]]
+    assert not same
+
+
+def _steps_cell_pdf(path, numbered):
+    """A table-like row: an action on the left, numbered steps in the right cell."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "Overview", fontsize=18, fontname="hebo")
+    page.insert_text((72, 140), "Change the language", fontsize=11, fontname="helv")
+    for k, t in enumerate(("Select Languages.", "Select a language from the list.")):
+        if numbered:
+            page.insert_text((280, 140 + 16 * k), f"{k + 1}.", fontsize=11, fontname="helv")
+        page.insert_text((296, 140 + 16 * k), t, fontsize=11, fontname="helv")
+    doc.set_toc([[1, "Overview", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_list_numbers_missing_in_a_table_cell(tmp_path, cfg):
+    r = compare(_steps_cell_pdf(tmp_path / "a.pdf", True), _steps_cell_pdf(tmp_path / "b.pdf", False), cfg)
+    f = [f for f in checks(r, "layout") if f["detail"].get("kind") == "bullet marker"]
+    assert f and f[0]["detail"]["lines"] == 2 and "“1.”, “2.”" in f[0]["message"] and "missing in stage" in f[0]["message"]
+    assert f[0]["genuine"]
+
+
+def test_toc_wrong_page_number_is_genuine(tmp_path, cfg):
+    heads = ["Overview", "Setup", "Mounting", "Settings"]
+    a = make_toc_pdf(tmp_path / "a.pdf", [(1, "Overview", 2), (1, "Setup", 3), (1, "Mounting", 4), (1, "Settings", 5)], heads)
+    b = make_toc_pdf(tmp_path / "b.pdf", [(1, "Overview", 2), (1, "Setup", 3), (1, "Mounting", 9), (1, "Settings", 5)], heads)
+    r = compare(a, b, cfg)
+    assert [f for s in r["sections"] for f in s["findings"] if f.get("issue") == "TOC page number wrong" and "Mounting" in f["message"]]
+
+
+def test_genuine_issues_are_never_capped(tmp_path, cfg):
+    """The per-check cap thins CSS/layout findings only; every genuine issue is kept."""
+    words = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa".split()
+    a = make_pdf(tmp_path / "a.pdf", body_text=" ".join(words))
+    b = make_pdf(tmp_path / "b.pdf", body_text=" ".join(w.upper() if i % 4 == 1 else w for i, w in enumerate(words)))
+    count = lambda r: len([f for s in r["sections"] for f in s["findings"] if f.get("genuine") and f["category"] == "content"])
+    full = count(compare(a, b, cfg))
+    cfg["report"]["max_findings_per_check"] = 1
+    assert full >= 3 and count(compare(a, b, cfg)) == full

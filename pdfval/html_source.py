@@ -13,6 +13,7 @@ import io
 import math
 import re
 from pathlib import Path
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import pymupdf
 from PIL import Image as PILImage
@@ -60,7 +61,8 @@ _EXTRACT_JS = r"""
     const st = styleOf(el), block = blockOf(el);
     const h = el.closest('h1,h2,h3,h4,h5,h6');
     const a = el.closest('a[href]');
-    const re = /\S+/g; let m;
+    // a character of a script written without spaces (Chinese, Japanese, Thai, ...) is its own word
+    const re = /[__NOSPACE__]\p{Mn}*|[^\s__NOSPACE__]+/gu; let m;
     while ((m = re.exec(node.data))) {
       range.setStart(node, m.index); range.setEnd(node, m.index + m[0].length);
       const rs = range.getClientRects(); if (!rs.length) continue;
@@ -76,7 +78,8 @@ _EXTRACT_JS = r"""
   const headings = [...root.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(h => visible(h) && !excluded(h) && h.innerText.trim())
     .map(h => [+h.tagName[1], h.innerText.replace(/\s+/g, ' ').trim(), ...rect(h)]);
   const images = [...root.querySelectorAll('img, svg, [role="img"]')].filter(i => visible(i) && !excluded(i) && !i.closest('svg svg'))
-    .map(rect).filter(r => r[2] - r[0] >= 4 && r[3] - r[1] >= 4);
+    .map(i => [...rect(i), i.tagName === 'IMG' && i.complete && !i.naturalWidth ? 1 : 0])  // 1 = failed to load
+    .filter(r => r[2] - r[0] >= 4 && r[3] - r[1] >= 4);
   const tables = [...root.querySelectorAll('table')].filter(t => visible(t) && !excluded(t)).map(t => {
     const rows = [...t.rows].filter(visible);
     const gridRow = rows.reduce((b, r) => (r.cells.length > (b ? b.cells.length : 0) ? r : b), null);
@@ -90,43 +93,148 @@ _EXTRACT_JS = r"""
            words, headings, images, tables, links };
 }
 """
+_EXTRACT_JS = _EXTRACT_JS.replace("__NOSPACE__", normalize.NOSPACE)
+
+
+
+def split_login(url: str) -> tuple[str, str, str]:
+    """http://user:pass@host/x -> ("http://host/x", "user", "pass"); no login -> (url, "", "")."""
+    parts = urlsplit(url)
+    if not parts.username:
+        return url, "", ""
+    clean = urlunsplit(parts._replace(netloc=parts.hostname + (f":{parts.port}" if parts.port else "")))
+    return clean, unquote(parts.username), unquote(parts.password or "")
+
+
+def _login_form(page) -> bool:
+    return page.locator("input[type=password]:visible").count() > 0
+
+
+def _sign_in(page, user: str, password: str, timeout: int, settle_ms: int) -> None:
+    """Fill the sign-in form the site shows: the visible password field and the user
+    field before it in the same form (text / email / no type), then submit it.
+    Sites submit either as a normal form post or in the background (AEM), so wait for
+    the network to settle and give script redirects `settle_ms` (the run's "wait after
+    load") instead of expecting a navigation."""
+    pw = page.locator("input[type=password]:visible").first
+    user_field = pw.evaluate_handle("""p => {
+        const scope = p.form || document;
+        const fields = [...scope.querySelectorAll('input')].filter(i =>
+            ['', 'text', 'email'].includes((i.getAttribute('type') || '').toLowerCase()) && i.offsetParent !== null);
+        const before = fields.filter(i => i.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING);
+        return before[before.length - 1] || fields[0] || null;
+    }""").as_element()
+    if user_field is None:
+        raise RuntimeError("Found a password field but no user name field on the sign-in page")
+    user_field.fill(user)
+    pw.fill(password)
+    start = page.url
+    pw.press("Enter")
+    # done when the sign-in form is gone or the site navigated away; polled, not "network idle":
+    # AEM author pages keep background connections open, so the network is never idle
+    waited = 0
+    while waited < _SIGN_IN_MS:
+        page.wait_for_timeout(500)
+        waited += 500
+        try:
+            if page.url != start or not _login_form(page):
+                break
+        except Exception:  # the page is navigating
+            continue
+    _settle(page, settle_ms)
+
+
+_SIGN_IN_MS = 30_000  # a sign-in that has not left the login form by then has failed
+_IDLE_MS = 8_000  # at most this long for background requests to calm down after a page has loaded
+
+
+def _settle(page, extra_ms: int = 0) -> None:
+    """The page has loaded; give late requests (lazy content) a short, bounded time. Waiting for
+    the network to go fully idle never ends on pages that poll (AEM author, analytics, chat)."""
+    try:
+        page.wait_for_load_state("load", timeout=_IDLE_MS)
+        page.wait_for_load_state("networkidle", timeout=_IDLE_MS)
+    except Exception:
+        pass
+    if extra_ms:
+        page.wait_for_timeout(min(extra_ms, 5_000))
+
+
+def _goto(page, url: str, timeout: int):
+    """Open a page: wait for it to load (not for network idle, see _settle)."""
+    resp = page.goto(url, wait_until="load", timeout=timeout)
+    _settle(page)
+    return resp
 
 
 def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEFAULT_EXCLUDE,
-            width: int = 1280, wait_ms: int = 1500, slice_h: int = 1800, progress=None) -> tuple[Doc, dict]:
-    """Render `url`, extract its structure and write <out_dir>/candidate_source.pdf. Returns (Doc, info)."""
+            width: int = 1280, wait_ms: int = 1500, slice_h: int = 1800, progress=None,
+            user: str = "", password: str = "", crawl: bool = False, max_pages: int = 0) -> tuple[Doc, dict]:
+    """Render `url`, extract its structure and write <out_dir>/candidate_source.pdf. Returns (Doc, info).
+    user/password (or a login in the URL): sent as HTTP basic auth and, when the site
+    shows a sign-in form instead of the page, typed into that form.
+    crawl: also every page of the same guide the pages link to (same site, under the
+    start page's folder), in reading order, joined into one document: each page's title
+    becomes a level-1 heading with the page's own headings below it (max_pages: 0 = no limit)."""
     from playwright.sync_api import sync_playwright
 
     report = progress or (lambda f, m: None)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    url, url_user, url_password = split_login(url)
+    user, password = user or url_user, password or url_password
+    # "always": servers like AEM redirect to a login page instead of answering 401
+    creds = {"username": user, "password": password, "send": "always"} if user else None
+    timeout = 90_000
+    captured, skipped = [], []
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": width, "height": 1000}, device_scale_factor=1)
-        report(0.05, f"Opening {url}")
-        page.goto(url, wait_until="networkidle", timeout=90_000)
-        # scroll through once so lazy-loaded images/sections render, then back to the top
-        report(0.3, "Loading lazy content")
-        total = page.evaluate("document.documentElement.scrollHeight")
-        for y in range(0, int(total) + 1000, 800):
-            page.evaluate(f"window.scrollTo(0, {y})")
-            page.wait_for_timeout(60)
-        page.evaluate("window.scrollTo(0, 0)")
-        page.wait_for_timeout(wait_ms)
-        report(0.5, "Reading the page structure")
-        data = page.evaluate(_EXTRACT_JS, [root, exclude])
-        W, H = int(data["width"]), int(math.ceil(data["height"]))
-        cuts = _cuts(data, H, slice_h)
-        report(0.7, "Capturing the page")
-        slices = []
-        for y0, y1 in zip(cuts, cuts[1:]):
-            png = page.screenshot(clip={"x": 0, "y": y0, "width": W, "height": y1 - y0}, full_page=True)
-            slices.append((y0, y1, png))
-        browser.close()
+        try:
+            page = browser.new_page(viewport={"width": width, "height": 1000}, device_scale_factor=1, http_credentials=creds)
+            report(0.02, f"Opening {url}")
+            _open(page, url, user, password, timeout, wait_ms, report)
+            queue, seen = [url], {_page_key(url)}
+            ordered = not crawl
+            k = 0
+            while k < len(queue) and (not max_pages or len(captured) < max_pages):
+                u = queue[k]
+                frac = 0.05 + 0.8 * k / max(len(queue), 1)
+                if _page_key(page.url) != _page_key(u):
+                    report(frac, f"Page {k + 1}/{len(queue)}: {u}")
+                    resp = _goto(page, u, timeout)
+                    if (resp is not None and resp.status >= 400) or _login_form(page):
+                        bad = f"HTTP {resp.status}" if resp is not None and resp.status >= 400 else "login form"
+                        skipped.append({"url": u, "reason": bad})
+                        k += 1
+                        continue
+                if crawl:
+                    links = _guide_links(page, url)
+                    if not ordered:  # first page: when it is listed in the guide's navigation, follow that order
+                        ordered = True
+                        if _page_key(url) in {_page_key(l) for l in links}:
+                            queue, seen = links, {_page_key(l) for l in links}
+                            if _page_key(queue[0]) != _page_key(page.url):
+                                continue  # start with the navigation's first page
+                    new = [l for l in links if _page_key(l) not in seen]
+                    seen.update(_page_key(l) for l in new)
+                    queue[k + 1:k + 1] = new  # a page's sub-pages follow it (reading order)
+                data, slices = _read_page(page, root, exclude, wait_ms, slice_h, report, frac)
+                if data["words"]:
+                    captured.append((page.url, data, slices))
+                else:
+                    skipped.append({"url": u, "reason": "no text"})
+                k += 1
+        finally:
+            browser.close()
+    if not captured:
+        raise RuntimeError("No text found on the web page" + (f" inside “{root}”" if root else "")
+                           + " - check the URL, the content root selector and that the page loads without a login")
 
     report(0.9, "Building the document")
+    data, cuts, slices = _stack(captured, titled=crawl)
+    W = int(data["width"])
     pdf = pymupdf.open()
-    for y0, y1, png in slices:
+    for (y0, y1), png in zip(zip(cuts, cuts[1:]), slices):
         pg = pdf.new_page(width=W, height=y1 - y0)
         pg.insert_image(pg.rect, stream=png)
     for href, x0, y0, x1, y1 in data["links"]:
@@ -137,10 +245,115 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
     path = out / "candidate_source.pdf"
     pdf.save(path, garbage=3, deflate=True)
     doc = _to_doc(data, cuts, str(path))
-    info = {"url": url, "title": data["title"], "width": W, "height": H, "pages": len(slices),
+    first = captured[0][1]
+    info = {"url": url, "title": first["title"], "width": W, "height": int(cuts[-1]), "pages": len(slices),
             "words": len(doc.words), "headings": len(data["headings"]), "tables": len(data["tables"]),
-            "images": len(data["images"]), "links": len(data["links"]), "root": root or "auto (main / article / body)"}
+            "images": len(data["images"]), "links": len(data["links"]), "root": root or "auto (main / article / body)",
+            "crawl": crawl, "web_pages": [{"url": u, "title": d["title"], "words": len(d["words"])} for u, d, _ in captured],
+            "skipped": skipped}
     return doc, info
+
+
+def _open(page, url: str, user: str, password: str, timeout: int, wait_ms: int, report) -> None:
+    """Load the first page, signing in if the site asks for it; raise a clear error if it cannot be read."""
+    resp = _goto(page, url, timeout)
+    if _login_form(page) and user:
+        report(0.04, f"Signing in as {user} (up to {_SIGN_IN_MS // 1000} s)")
+        _sign_in(page, user, password, timeout, wait_ms)
+        if _login_form(page):
+            raise RuntimeError(f"Sign-in failed for user “{user}”: the site still shows its login form "
+                               "- check the user name and password")
+        report(0.05, "Signed in - opening the page")
+        resp = _goto(page, url, timeout)  # back to the page itself
+    if resp is not None and resp.status >= 400:
+        hint = (" - the page needs a login: enter the user name and password under “Login” in the run form"
+                if resp.status in (401, 403) else "")
+        raise RuntimeError(f"Web page returned HTTP {resp.status} {resp.status_text}{hint}")
+    if _login_form(page):  # redirected to a sign-in form
+        raise RuntimeError(f"The web page needs a login (it shows a sign-in form: {page.url}). "
+                           "Enter the user name and password under “Login” in the run form")
+
+
+def _read_page(page, root: str, exclude: str, wait_ms: int, slice_h: int, report, frac: float):
+    """Structure + slice screenshots of the loaded page."""
+    # scroll through once so lazy-loaded images/sections render, then back to the top
+    total = page.evaluate("document.documentElement.scrollHeight")
+    for y in range(0, int(total) + 1000, 800):
+        page.evaluate(f"window.scrollTo(0, {y})")
+        page.wait_for_timeout(60)
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(wait_ms)
+    report(frac, f"Reading “{page.title()}”")
+    data = page.evaluate(_EXTRACT_JS, [root, exclude])
+    W, H = int(data["width"]), int(math.ceil(data["height"]))
+    cuts = _cuts(data, H, slice_h)
+    slices = [page.screenshot(clip={"x": 0, "y": y0, "width": W, "height": y1 - y0}, full_page=True)
+              for y0, y1 in zip(cuts, cuts[1:])]
+    data["cuts"] = cuts
+    return data, slices
+
+
+_NON_PAGE = re.compile(r"\.(pdf|zip|png|jpe?g|gif|svg|webp|mp4|docx?|xlsx?|pptx?|txt|xml|json|js|css)$", re.I)
+
+
+def _page_key(u: str) -> str:
+    """Identity of a page: scheme://host/path (query and #fragment do not make another page)."""
+    s = urlsplit(u)
+    return f"{s.scheme}://{s.netloc}{s.path}"
+
+
+def _guide_links(page, start: str) -> list[str]:
+    """Links on the page to other pages of the same guide: same site, under the start
+    page's folder, not a file download, in document order (the navigation comes first).
+    They get the start page's query (e.g. ?wcmmode=disabled) when they have none."""
+    s = urlsplit(start)
+    folder = s.path.rsplit("/", 1)[0] + "/"
+    out, seen = [], set()
+    for href in page.evaluate("[...document.querySelectorAll('a[href]')].map(a => a.href)"):
+        h = urlsplit(href)
+        if h.scheme not in ("http", "https") or h.netloc != s.netloc or not h.path.startswith(folder) or _NON_PAGE.search(h.path):
+            continue
+        u = urlunsplit((h.scheme, h.netloc, h.path, h.query or s.query, ""))
+        key = _page_key(u)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(u)
+    return out
+
+
+def _stack(captured: list, titled: bool) -> tuple[dict, list[int], list[bytes]]:
+    """Join the captured pages top to bottom into one document (structure, slice
+    boundaries, slice images). titled: each web page's title becomes a level-1 heading
+    at its top unless the page already starts with that heading; the page's own
+    headings are ranked below it (per page, so h2/h3 on one page and h1/h2 on another
+    both become levels 2/3)."""
+    out = {"title": captured[0][1]["title"], "width": max(d["width"] for _, d, _ in captured),
+           "words": [], "headings": [], "images": [], "tables": [], "links": []}
+    cuts, slices, off = [0], [], 0
+    shift = lambda r: [r[0], r[1] + off, r[2], r[3] + off]
+    for n, (_, d, sl) in enumerate(captured):
+        for w in d["words"]:
+            w = list(w)
+            w[2] += off; w[4] += off
+            w[10] = n * 1_000_000 + w[10]  # block ids stay unique per page
+            out["words"].append(w)
+        used = sorted({h[0] for h in d["headings"]})
+        title = (d["title"] or "").strip()
+        add_title = titled and title and not (d["headings"] and normalize.title(d["headings"][0][1]) == normalize.title(title))
+        heads = [[used.index(h[0]) + 1 + (1 if add_title else 0), h[1], *shift(h[2:])] for h in d["headings"]]
+        if add_title:  # the page title is the level-1 heading, the page's headings sit below it
+            top = min((w[2] for w in d["words"]), default=0) + off
+            out["headings"].append([1, title, 0, top, 0, top])
+        out["headings"] += heads
+        out["images"] += [shift(r) + list(r[4:]) for r in d["images"]]
+        out["tables"] += [{"box": shift(t["box"]), "rows": [[shift(r), shift(c) if c else None] for r, c in t["rows"]],
+                           "grid": t["grid"]} for t in d["tables"]]
+        out["links"] += [[l[0], *shift(l[1:])] for l in d["links"]]
+        cuts += [c + off for c in d["cuts"][1:]]
+        slices += sl
+        off = cuts[-1]
+    return out, cuts, slices
 
 
 def _cuts(data: dict, H: int, slice_h: int) -> list[int]:
@@ -198,10 +411,10 @@ def _to_doc(data: dict, cuts: list[int], path: str) -> Doc:
     if words:
         words[-1].space_after = None
     images = []
-    for x0, y0, x1, y1 in data["images"]:
+    for x0, y0, x1, y1, *flag in data["images"]:
         p = _slice_of(cuts, y0)
         if p is not None:
-            images.append(Image(p, (x0, y0 - cuts[p], x1, min(y1, cuts[p + 1]) - cuts[p])))
+            images.append(Image(p, (x0, y0 - cuts[p], x1, min(y1, cuts[p + 1]) - cuts[p]), broken=bool(flag and flag[0])))
     # outline from the heading hierarchy: levels ranked (h2/h3/h4 used -> 1/2/3)
     used = sorted({h[0] for h in data["headings"]})
     outline = []

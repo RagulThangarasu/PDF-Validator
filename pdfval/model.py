@@ -30,6 +30,7 @@ class Word:
     line_start: bool = False
     role: str = "body"  # h1/h2/.../body/text-10pt, assigned by the engine
     space_after: int | None = None  # whitespace chars before the next word on the same line (None = line end)
+    script: str = ""  # per character: "^" superscript, "_" subscript, "." normal; "" = all normal
 
 
 @dataclass
@@ -46,6 +47,8 @@ class Line:
 class Image:
     page: int
     bbox: Rect
+    broken: bool = False  # failed to load (web page <img> with no pixels)
+    stretch: float = 1.0  # drawn shape / pixel shape ((box w/h) / (px w/h)); 1 = drawn in its own proportions
 
 
 @dataclass
@@ -111,6 +114,9 @@ class Finding:
     candidate_at: Loc | None = None
     critical: bool = False  # breaking issue (missing section/row/image/file, broken link/glyph, ...)
     types: list[str] = field(default_factory=list)  # sub-types for filtering, e.g. ["case"], ["missing row"]
+    # (prod box, stage box) of the same text, one per line pair: lets a screenshot
+    # highlight exactly the same words on both sides
+    links: list[tuple[Loc, Loc]] = field(default_factory=list)
 
     def to_json(self):
         return {
@@ -124,6 +130,7 @@ class Finding:
             "candidate_at": self.candidate_at.to_json() if self.candidate_at else None,
             "critical": self.critical,
             "types": self.types,
+            "links": [[a.to_json(), b.to_json()] for a, b in self.links],
         }
 
 

@@ -28,6 +28,9 @@ class Unit:
     similarity: float = 1.0
     content: dict = field(default_factory=dict)  # content % and word counts, set by the content check
     image_pairs: list = field(default_factory=list)  # (prod Image, stage Image) matched by the assets check
+    # same word on both sides although its text differs (case/punctuation/changed block):
+    # not a content match, but its style can still be compared
+    style_pairs: list[tuple[int, int]] = field(default_factory=list)
     wraps: list = field(default_factory=list)  # (prod word idxs, stage word idxs): same text, split over lines differently
 
 
@@ -109,9 +112,33 @@ def locs(doc: Doc, idxs, limit: int = 40) -> list[Loc]:
     return out
 
 
+def paired_locs(a: Doc, b: Doc, pairs, limit: int = 40) -> list[tuple[Loc, Loc]]:
+    """(prod box, stage box) per run of word pairs that sit on the same line on both
+    sides, so both screenshots can highlight exactly the same words."""
+    out: list[tuple[Loc, Loc]] = []
+    last = None
+
+    def grow(loc: Loc, box) -> None:
+        x0, y0, x1, y1 = loc.bbox
+        loc.bbox = (min(x0, box[0]), min(y0, box[1]), max(x1, box[2]), max(y1, box[3]))
+    for i, j in sorted(pairs):
+        wa, wb = a.words[i], b.words[j]
+        key = (wa.line, wb.line)
+        if key == last:
+            grow(out[-1][0], wa.bbox)
+            grow(out[-1][1], wb.bbox)
+            continue
+        if len(out) >= limit:
+            break
+        out.append((Loc(wa.page, wa.bbox), Loc(wb.page, wb.bbox)))
+        last = key
+    return out
+
+
 def snippet(doc: Doc, idxs, n: int = 18) -> str:
     idxs = list(idxs)
-    s = " ".join(doc.words[i].text for i in idxs[:n])
+    from .. import normalize
+    s = normalize.join_words(doc.words[i] for i in idxs[:n])
     return s + (" …" if len(idxs) > n else "")
 
 

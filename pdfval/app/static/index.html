@@ -12,11 +12,19 @@
     --c-structure: #2563eb; --c-content: #e11d48; --c-style: #7c3aed; --c-layout: #ea580c; --c-assets: #0d9488; --c-tables: #0284c7; --c-integrity: #b91c1c; --k-content: #e11d48; --k-images: #0d9488; --k-tables: #0284c7; --k-structure: #2563eb; --k-links: #b91c1c; --k-css: #7c3aed; --k-toc: #9333ea; --crit: #b42318;
     --radius: 10px; --shadow: 0 1px 2px rgb(16 24 40 / .06), 0 1px 3px rgb(16 24 40 / .08);
   }
+  /* theme: light by default (same as the report viewer); dark when chosen, or when
+     "System" is chosen and the OS is dark. The choice is remembered per browser. */
+  :root[data-theme="dark"] { --bg: #0f1218; --panel: #171b23; --ink: #e6e8ec; --muted: #98a2b3; --line: #2a303b; --soft: #1d222c;
+            --accent: #2dd4bf; --accent-ink: #042f2e; --accent-soft: #11302d; --fail: #f97066; --warn: #fdb022; --pass: #47cd89; --info: #98a2b3;
+            --shadow: none; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #0f1218; --panel: #171b23; --ink: #e6e8ec; --muted: #98a2b3; --line: #2a303b; --soft: #1d222c;
+    :root[data-theme="system"] { --bg: #0f1218; --panel: #171b23; --ink: #e6e8ec; --muted: #98a2b3; --line: #2a303b; --soft: #1d222c;
             --accent: #2dd4bf; --accent-ink: #042f2e; --accent-soft: #11302d; --fail: #f97066; --warn: #fdb022; --pass: #47cd89; --info: #98a2b3;
             --shadow: none; }
   }
+  .theme { margin-left: auto; display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .theme button { border: 0; background: transparent; padding: 4px 10px; cursor: pointer; color: var(--muted); font-size: 12px; }
+  .theme button[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); }
   a { color: var(--accent); text-decoration: none; }
@@ -46,7 +54,7 @@
   .picked { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--accent); background: var(--accent-soft); border-radius: var(--radius); }
   .picked .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
   .or { text-align: center; color: var(--muted); font-size: 12px; margin: 10px 0; }
-  select, input[type=text], input[type=number], textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  select, input[type=text], input[type=password], input[type=number], textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
   label.f { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   .opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; margin-top: 14px; }
   details summary { cursor: pointer; color: var(--muted); }
@@ -112,6 +120,15 @@
   .err { color: var(--fail); }
   .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
   .spacer { flex: 1; }
+  .guid { display: inline-flex; align-items: center; gap: 4px; font: 600 11.5px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 8px;
+          border-radius: 6px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); background: var(--accent-soft); color: var(--ink); white-space: nowrap; cursor: pointer; }
+  a.guid:hover { border-color: var(--accent); text-decoration: none; } button.guid { cursor: copy; }
+  .guid.off { background: var(--soft); border-color: var(--line); color: var(--muted); }
+  .src { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 10px; font-size: 13px; }
+  .src .k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .aemcfg { display: grid; grid-template-columns: 1.2fr 1.2fr; gap: 12px; }
+  .aemcfg .wide { grid-column: 1 / -1; }
+  @media (max-width: 800px) { .aemcfg { grid-template-columns: 1fr; } }
 
   body.wide main { max-width: none; padding: 18px 24px; }
   .rhead { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
@@ -241,16 +258,34 @@
   .cat { font-size: 12px; font-weight: 700; color: var(--kc); white-space: nowrap; }
   .type { font-size: 11px; background: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
 </style>
+<script>
+  // before first paint, so opening the app never flashes the other theme
+  (() => { let t = 'light'; try { t = localStorage.getItem('pdfval-theme') || 'light'; } catch (e) {}
+           document.documentElement.dataset.theme = t; })();
+</script>
 </head>
 <body>
 <header class="top">
   <a class="brand" href="#/new" title="Home – new comparison" style="color:inherit;text-decoration:none"><span class="logo">⇆</span>PDF Parity</a>
   <nav><a href="#/new" data-nav="new">New comparison</a><a href="#/runs" data-nav="runs">Runs</a></nav>
+  <div class="theme" role="group" aria-label="Theme">
+    <button data-theme-set="light">Light</button><button data-theme-set="dark">Dark</button><button data-theme-set="system" title="Follow the operating system">System</button>
+  </div>
 </header>
 <main id="app"></main>
 
 <script>
 const $ = (s, r = document) => r.querySelector(s);
+(function themeSwitch() {
+  const mark = () => document.querySelectorAll('[data-theme-set]').forEach(b =>
+    b.setAttribute('aria-pressed', b.dataset.themeSet === document.documentElement.dataset.theme));
+  document.querySelectorAll('[data-theme-set]').forEach(b => b.onclick = () => {
+    document.documentElement.dataset.theme = b.dataset.themeSet;
+    try { localStorage.setItem('pdfval-theme', b.dataset.themeSet); } catch (e) {}
+    mark();
+  });
+  mark();
+})();
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const CHECKS = ['structure', 'content', 'tables', 'assets', 'integrity', 'style', 'layout'];
 const CATS = [['content', 'Content'], ['images', 'Images'], ['tables', 'Tables'], ['toc', 'TOC'], ['structure', 'Structure'],
@@ -285,7 +320,8 @@ addEventListener('hashchange', route);
 // ---------------- new comparison (landing page)
 const pick = { baseline: null, candidate: null };  // {path?, file?, name, size}
 let MODE = 'pdf';  // 'pdf' = PDF ⇄ PDF, 'html' = PDF ⇄ web page (URL)
-let newToken = 0;  // a newer render of the form cancels an older one still awaiting data
+let newToken = 0;
+const AEM_TRIED = new Set();  // runs already checked for AEM Guides GUIDs  // a newer render of the form cancels an older one still awaiting data
 
 async function viewNew(qs) {
   const token = ++newToken;
@@ -317,6 +353,18 @@ async function viewNew(qs) {
         <input type="url" id="url" placeholder="https://docs.example.com/manual/sl04" value="${esc(prev?.mode === 'html' ? prev.candidate : '')}" aria-label="Web page URL">
         <p class="small muted" style="margin:8px 0 0">The page is opened in a headless browser and read from its structure (headings, text, tables, images, links).
           Its headings are matched to the PDF's table of contents and every section is validated.</p>
+        <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="o-html_crawl" ${o.html_crawl === false ? '' : 'checked'}>
+          <span><b>All pages of the guide</b> – follow this page's links to every page under the same folder (in navigation order) and validate them all against the whole PDF.
+          Unchecked: only this page, against the PDF chapter it belongs to.</span></label>
+        <div style="margin-top:6px;max-width:220px"><label class="f">Max pages (0 = all)</label><input type="number" id="o-html_max_pages" value="${esc(o.html_max_pages || 0)}" min="0"></div>
+        <details style="margin-top:10px" ${o.html_user ? 'open' : ''}><summary>Login (if the page needs one)</summary>
+          <div class="opts">
+            <div><label class="f">User name</label><input type="text" id="o-html_user" value="${esc(o.html_user || '')}" autocomplete="username"></div>
+            <div><label class="f">Password</label><input type="password" id="o-html_password" value="" autocomplete="current-password"></div>
+          </div>
+          <p class="small muted" style="margin:6px 0 0">Sent as HTTP basic auth and typed into the site's sign-in form (e.g. AEM author).
+            The password is kept in the server's memory only – it is not saved with the run; re-enter it after a server restart.</p>
+        </details>
         <details style="margin-top:10px" ${o.html_root || o.html_exclude ? 'open' : ''}><summary>Web page options</summary>
           <div class="opts">
             <div><label class="f">Content area (CSS selector)</label><input type="text" id="o-html_root" value="${esc(o.html_root || '')}" placeholder="auto: main / article / body"></div>
@@ -326,6 +374,16 @@ async function viewNew(qs) {
           <div style="margin-top:10px"><label class="f">Exclude (CSS selectors – site navigation, headers, footers…)</label>
             <input type="text" id="o-html_exclude" value="${esc(o.html_exclude || '')}" placeholder="nav, header, footer, aside, [role=navigation] (default)"></div>
         </details>`}
+      </div>
+    </div>
+    <div class="card" id="aem-card" style="margin-top:16px">
+      <div class="row"><b>AEM login</b><span class="muted small">— so every issue links to its exact topic file in AEM (stage PDFs from AEM Guides)</span>
+        <span class="spacer"></span><span id="aem-state" class="small"></span></div>
+      <div class="aemcfg" style="margin-top:10px">
+        <div><label class="f" for="n-aem-user">AEM user</label><input type="text" id="n-aem-user" autocomplete="username"></div>
+        <div><label class="f" for="n-aem-pass">AEM password</label><input type="password" id="n-aem-pass" autocomplete="current-password" placeholder="kept in memory only, never saved"></div>
+        <div class="wide row"><button class="btn" id="aem-check" type="button">Check login</button>
+          <span id="aem-msg" class="small muted"></span></div>
       </div>
     </div>
     <div class="card" style="margin-top:16px">
@@ -349,8 +407,7 @@ async function viewNew(qs) {
           <div><label class="f">Font-size mismatch severity</label><select id="o-sev_font-size"><option>error</option><option>warning</option><option>info</option></select></div>
           <div><label class="f">&nbsp;</label><label><input type="checkbox" id="o-case_sensitive" checked> Case-sensitive text</label><br>
                <label><input type="checkbox" id="o-check_spacing" checked> Check spacing</label><br>
-               <label><input type="checkbox" id="o-normalize_typography"> Ignore quote/dash style (’ vs ')</label><br>
-               <label><input type="checkbox" id="o-front_matter" checked> Validate cover (PDF ⇄ PDF)</label></div>
+               <label><input type="checkbox" id="o-normalize_typography"> Ignore quote/dash style (’ vs ')</label></div>
         </div>
         <div class="grid2" style="margin-top:14px">
           <div><label class="f">Skip sections (regex per line, on title)</label><textarea id="o-skip" rows="3" placeholder="^table of contents?$"></textarea></div>
@@ -377,7 +434,35 @@ async function viewNew(qs) {
   if (MODE === 'pdf') renderSlot('candidate', files);
   else $('#url').oninput = updateGo;
   $('#go').onclick = start;
+  $('#aem-check').onclick = () => aemLogin(true);
   updateGo();
+  aemLoad();
+}
+
+// ---------------- AEM login before the run: the run looks up each GUID's topic file with it
+let AEM = { author: '', has_password: false, user: '', ok: false };
+async function aemLoad() {
+  try { AEM = { ...AEM, ...(await api('/api/aem')) }; } catch (e) { return; }
+  if (!$('#aem-card')) return;
+  $('#n-aem-user').value = AEM.user || '';
+  AEM.ok = !!AEM.has_password;
+  aemShow(AEM.ok ? `ready — logged in as ${AEM.user}` : (AEM.author ? 'not logged in' : 'no AEM author URL set'), AEM.ok ? 'pass' : 'warn');
+}
+function aemShow(text, cls) {
+  const el = $('#aem-state');
+  if (el) el.innerHTML = `<span class="badge b-${cls}">${esc(text)}</span>`;
+}
+async function aemLogin(explicit) {
+  const user = $('#n-aem-user').value.trim(), password = $('#n-aem-pass').value;
+  const msg = $('#aem-msg');
+  if (!explicit && AEM.ok && !password && user === AEM.user) return true;  // already logged in this session
+  msg.classList.remove('err'); msg.textContent = 'Checking with AEM…';
+  const r = await api('/api/aem/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify({ user, password }) });
+  msg.textContent = r.message; msg.classList.toggle('err', !r.ok);
+  AEM.ok = r.ok; if (r.ok) { AEM.user = r.user; AEM.has_password = true; $('#n-aem-pass').value = ''; }
+  aemShow(r.ok ? `ready — logged in as ${r.user}` : 'not logged in', r.ok ? 'pass' : 'fail');
+  return r.ok;
 }
 
 function renderSlot(side, files) {
@@ -432,6 +517,15 @@ async function start() {
   const go = $('#go'), st = $('#go-status');
   go.disabled = true; st.classList.remove('err');
   try {
+    // log in to AEM first: the run looks up each GUID's topic file, so the links in every report work
+    if (MODE === 'pdf' && AEM.author) {
+      const typed = $('#n-aem-user').value.trim() || $('#n-aem-pass').value;
+      if (typed || AEM.ok) {
+        if (!(await aemLogin(false))) { st.textContent = 'AEM login failed — fix it, or clear the AEM fields to run without links to the files.'; st.classList.add('err'); go.disabled = false; return; }
+      } else if (!confirm('Run without an AEM login?\n\nIssues will show their topic GUID, but the GUID links can only open the AEM editor, not the exact topic file.')) {
+        go.disabled = false; $('#n-aem-user').focus(); return;
+      }
+    }
     const paths = {};
     paths.baseline = pick.baseline.path || await upload(pick.baseline.file, 'prod');
     paths.candidate = MODE === 'html' ? $('#url').value.trim() : (pick.candidate.path || await upload(pick.candidate.file, 'stage'));
@@ -487,12 +581,12 @@ const pctStatus = s => { const c = s.content; return c.match_pct >= c.pass_pct ?
 
 // ---------------- single run (report workspace)
 const R = { job: null, data: null, tab: 'issues', cat: 'all', types: new Set(), sevs: new Set(), section: '', q: '',
-            critOnly: false, view: 'list', group: 'none', shown: 60, open: new Set(), sel: 0 };
+            critOnly: false, view: 'list', group: 'none', shown: 60, open: new Set(), sel: 0, topic: '' };
 
 function readState(qs) {
   const p = new URLSearchParams(qs || '');
   Object.assign(R, {
-    tab: p.get('tab') || 'issues', cat: p.get('cat') || 'all', section: p.get('sec') || '', q: p.get('q') || '',
+    tab: p.get('tab') || 'issues', cat: p.get('cat') || 'all', section: p.get('sec') || '', q: p.get('q') || '', topic: p.get('topic') || '',
     types: new Set((p.get('types') || '').split('|').filter(Boolean)), sevs: new Set((p.get('sev') || '').split('|').filter(Boolean)),
     critOnly: p.get('crit') === '1', view: p.get('view') || 'list', group: p.get('group') || 'none', shown: 60, open: new Set(), sel: 0,
   });
@@ -506,6 +600,7 @@ function writeState() {  // keep filters in the URL (shareable, survives reload)
   if (R.sevs.size) p.set('sev', [...R.sevs].join('|'));
   if (R.critOnly) p.set('crit', '1');
   if (R.section) p.set('sec', R.section);
+  if (R.topic) p.set('topic', R.topic);
   if (R.q) p.set('q', R.q);
   if (R.view !== 'list') p.set('view', R.view);
   if (R.group !== 'none') p.set('group', R.group);
@@ -540,6 +635,10 @@ async function viewRun(id, qs) {
     return;
   }
   if (!R.data || R.job?.id !== id) R.data = await api(`/runs/${id}/results.json`);
+  if (!R.data.aem && !isWeb && !AEM_TRIED.has(id)) {  // a run from before GUIDs were traced: trace them once
+    AEM_TRIED.add(id);
+    try { if ((await api(`/api/runs/${id}/relink`, { method: 'POST' })).topics) R.data = await api(`/runs/${id}/results.json?t=${Date.now()}`); } catch (e) { /* not an AEM Guides PDF */ }
+  }
   R.job = job;
   readState(qs);
   const d = R.data, s = d.summary, c = s.content, cst = pctStatus(s), crit = s.critical;
@@ -548,8 +647,12 @@ async function viewRun(id, qs) {
   app.innerHTML = head + `
       <div class="ractions">
         <a class="btn primary" href="${base}index.html" target="_blank" rel="noopener">Side-by-side viewer ↗</a>
+        ${s.genuine ? `<a class="btn ${s.genuine.total ? 'danger' : ''}" href="${base}genuine-issues.pdf?download=${encodeURIComponent('genuine-issues-' + id + '.pdf')}"
+            title="Only the real problems: missing/duplicated sections, missing/broken/misplaced images, missing data, table and link problems — each with a description and prod/stage screenshots">⬇ Genuine issues (${s.genuine.total})</a>` : ''}
         <button class="btn" data-report title="Choose what goes into the PDF report">⬇ PDF report…</button>
         <details class="more"><summary class="btn" aria-label="More downloads">⋯</summary><div class="menu">
+          ${s.genuine ? `<a href="${base}genuine-issues.pdf?download=${encodeURIComponent('genuine-issues-' + id + '.pdf')}">⬇ Genuine issues (PDF, with screenshots)</a>
+          <a href="${base}genuine-issues.csv?download=${encodeURIComponent('genuine-issues-' + id + '.csv')}">⬇ Genuine issues (CSV / Excel)</a>` : ''}
           <a href="${base}report.pdf?download=${encodeURIComponent('parity-report-' + id + '-full.pdf')}">⬇ Full PDF report (everything)</a>
           <a href="${base}report.pdf" target="_blank" rel="noopener">View full PDF report ↗</a>
           <a href="${base}results.json?download=results.json">results.json</a>
@@ -570,7 +673,7 @@ async function viewRun(id, qs) {
     </div>
     <div class="tabs" role="tablist">
       <button data-tab="issues">Issues</button>${d.toc ? `<button data-tab="toc">TOC (${d.toc.summary.baseline_entries} ⇆ ${d.toc.summary.candidate_entries})</button>` : ''}
-      <button data-tab="sections">Sections (${s.sections})</button>
+      <button data-tab="sections">Sections (${s.sections})</button>${d.aem ? `<button data-tab="topics" title="The AEM Guides topics (GUIDs) the stage issues come from">AEM topics (${d.aem.topics.length})</button>` : ''}
       <button data-tab="stylemap">Style map (${d.style_map.length})</button>
     </div>
     <div id="tab"></div>`;
@@ -596,7 +699,9 @@ function matches({ f, s }, skip = '') {
     && (skip === 'types' || skip === 'cat' || !R.types.size || f.types.some(t => R.types.has(t)))
     && (skip === 'sev' || !R.sevs.size || R.sevs.has(f.severity))
     && (skip === 'sec' || !R.section || s.id === R.section)
-    && (!q || f.message.toLowerCase().includes(q) || s.title.toLowerCase().includes(q) || f.types.join(' ').includes(q));
+    && (skip === 'topic' || !R.topic || f.aem?.guid === R.topic)
+    && (!q || f.message.toLowerCase().includes(q) || s.title.toLowerCase().includes(q) || f.types.join(' ').includes(q)
+        || (f.aem && (f.aem.guid.toLowerCase().includes(q) || f.aem.topic.toLowerCase().includes(q))));
 }
 
 function filteredIssues() {
@@ -634,6 +739,7 @@ function renderTab() {
     return;
   }
   if (R.tab === 'toc') { renderToc(el); return; }
+  if (R.tab === 'topics') { renderTopics(el); return; }
   if (R.tab === 'stylemap') {
     el.innerHTML = `<p class="muted">Every font / size / colour mismatch across the document, grouped by role. Each row is one CSS rule to fix in the stage stylesheet.</p>
       <div class="card" style="padding:0;overflow-x:auto"><table class="t"><thead><tr><th>Role</th><th>Prod</th><th>Stage</th><th class="n">Words</th><th class="n">Sections</th></tr></thead><tbody>
@@ -679,6 +785,10 @@ function renderSide(keepSearch) {
       <label class="chk"><input type="checkbox" data-crit ${R.critOnly ? 'checked' : ''}><span><span class="badge crit">critical</span> only</span><span class="n">${count(x => x.f.critical, 'crit')}</span></label>
       ${SEVS.map(v => `<label class="chk"><input type="checkbox" data-sev="${v}" ${R.sevs.has(v) ? 'checked' : ''}><span><span class="badge b-${v}">${v}</span></span><span class="n">${count(x => x.f.severity === v, 'sev')}</span></label>`).join('')}
     </div>
+    ${R.data.aem ? `<div class="sgroup"><div class="sh">AEM topic (GUID) ${R.topic ? '<a href="#" data-topic="">all</a>' : ''}</div>
+      ${R.data.aem.topics.map(t => { const n = all.filter(x => x.f.aem?.guid === t.guid && matches(x, 'topic')).length;
+        return `<button class="nav sec ${R.topic === t.guid ? 'on' : ''}" data-topic="${t.guid}" title="${esc(t.guid)}"><span class="t">${esc(t.topic || t.guid)}</span><span class="n">${n || ''}</span></button>`; }).join('')}
+    </div>` : ''}
     <div class="sgroup"><div class="sh">Section ${R.section ? '<a href="#" data-sec="">all</a>' : ''}</div>
       <input type="search" id="secq" placeholder="Find section…" aria-label="Find section">
       <div id="seclist" class="seclist"></div>
@@ -708,8 +818,10 @@ function onWorkspaceClick(e) {
   if (t.closest('[data-clear-types]')) { e.preventDefault(); return set({ types: new Set() }); }
   if (t.closest('input[data-crit]')) return set({ critOnly: !R.critOnly });
   if ((el = t.closest('input[data-sev]'))) { const v = el.dataset.sev; R.sevs.has(v) ? R.sevs.delete(v) : R.sevs.add(v); return set({}); }
+  if ((el = t.closest('[data-copy]'))) { e.preventDefault(); return copyGuid(el); }
+  if ((el = t.closest('[data-topic]'))) { e.preventDefault(); return set({ topic: el.dataset.topic }); }
   if ((el = t.closest('[data-sec]')) && !t.closest('.issue-row, .card-issue')) { e.preventDefault(); return set({ section: el.dataset.sec }); }
-  if (t.closest('[data-reset]')) return set({ cat: 'all', types: new Set(), sevs: new Set(), critOnly: false, section: '', q: '' });
+  if (t.closest('[data-reset]')) return set({ cat: 'all', types: new Set(), sevs: new Set(), critOnly: false, section: '', q: '', topic: '' });
   if ((el = t.closest('[data-pill]'))) {
     const [k, v] = el.dataset.pill.split(':');
     if (k === 'cat') return set({ cat: 'all', types: new Set() });
@@ -717,6 +829,7 @@ function onWorkspaceClick(e) {
     if (k === 'sev') { R.sevs.delete(v); return set({}); }
     if (k === 'crit') return set({ critOnly: false });
     if (k === 'sec') return set({ section: '' });
+    if (k === 'topic') return set({ topic: '' });
     if (k === 'q') return set({ q: '' });
   }
   if ((el = t.closest('[data-view]'))) { R.view = el.dataset.view; writeState(); return renderIssues(); }
@@ -743,6 +856,98 @@ function shotsHtml(f, i) {
     <figure><figcaption>Prod · p.${sh.baseline_page ?? '?'}${kindNote(sh.baseline_kind)}</figcaption>${sh.baseline ? `<img class="shot" loading="lazy" data-idx="${i}" src="${base}${sh.baseline}" alt="Prod screenshot for issue ${f.id}">` : ''}</figure>
     <figure><figcaption>Stage · p.${sh.candidate_page ?? '?'}${kindNote(sh.candidate_kind)}</figcaption>${sh.candidate ? `<img class="shot" loading="lazy" data-idx="${i}" src="${base}${sh.candidate}" alt="Stage screenshot for issue ${f.id}">` : ''}</figure>
   </div>`;
+}
+
+// ---------------- AEM Guides source topics (GUIDs)
+const shortGuid = g => g.replace(/^GUID-([0-9a-f]{8}).*$/i, 'GUID-$1…');
+
+function guidChip(a, short) {
+  if (!a) return '';
+  const label = esc(short ? shortGuid(a.guid) : a.guid);
+  return a.url
+    ? `<a class="guid" href="${esc(a.url)}" target="_blank" rel="noopener" title="Open topic “${esc(a.topic)}” in AEM (new tab)\n${esc(a.guid)}">${label} ↗</a>`
+    : `<button class="guid off" data-copy="${esc(a.guid)}" title="${esc(a.guid)} — click to copy. Set the AEM author URL in the AEM topics tab to make it a link.">${label}</button>`;
+}
+
+function sourceHtml(f) {
+  const a = f.aem;
+  if (!a) return R.data.aem ? '<div class="src small muted"><span class="k">Source</span> cover / TOC — generated from the ditamap and PDF template, not a topic</div>' : '';
+  return `<div class="src"><span class="k">Source topic</span><b>${esc(a.topic || '—')}</b>${guidChip(a)}
+    <button class="btn sm" data-copy="${esc(a.guid)}" title="Copy the GUID">Copy GUID</button>
+    ${a.element ? `<span class="muted small">near <code>${esc(a.element)}</code>${a.element_title ? ' “' + esc(a.element_title) + '”' : ''}</span>` : ''}
+    ${a.exact ? '' : '<span class="muted small">(issue has no position in stage: topic of the section start)</span>'}</div>`;
+}
+
+function copyGuid(el) {
+  const g = el.dataset.copy;
+  (navigator.clipboard?.writeText(g) || Promise.reject()).then(
+    () => { const t = el.textContent; el.textContent = 'Copied ✓'; setTimeout(() => el.textContent = t, 1200); },
+    () => prompt('Copy the GUID:', g));
+}
+
+async function renderTopics(el) {
+  const a = R.data.aem, base = `/runs/${R.job.id}/`;
+  let cfg = {};
+  try { cfg = await api('/api/aem'); } catch (e) { /* settings are optional */ }
+  const folder = cfg.products?.[a.product] || '';
+  el.innerHTML = `
+    <div class="card" style="margin-bottom:14px">
+      <div class="row"><div><b>Map</b> <code>${esc(a.map || '—')}</code> · <b>Product</b> <code>${esc(a.product || '—')}</code> ·
+        ${a.topics.length} of ${a.topics_in_pdf} topics have issues</div><span class="spacer"></span>
+        ${!a.topics.some(t => t.url) ? '<span class="badge b-warn">links off — set the AEM author URL below</span>'
+          : a.resolve_error ? `<span class="badge b-warn" title="Links use <folder>/<GUID>.dita">${esc(a.resolve_error)}</span>`
+          : a.resolved ? `<span class="badge b-pass">${a.resolved} of ${a.topics.length} topics found in AEM</span>`
+          : '<span class="badge b-info" title="Links use <folder>/<GUID>.dita. Add an AEM user and password to open the exact file.">paths not checked in AEM</span>'}</div>
+      <details style="margin-top:10px" ${a.topics.some(t => t.url) ? '' : 'open'}><summary>AEM link settings</summary>
+        <form id="aemform" class="aemcfg" style="margin-top:10px">
+          <div><label class="f" for="aem-author">AEM author URL</label>
+            <input type="text" id="aem-author" value="${esc(cfg.author || '')}" placeholder="http://139.59.13.139:4502"></div>
+          <div><label class="f" for="aem-folder">DAM folder of <b>${esc(a.product || 'this product')}</b></label>
+            <input type="text" id="aem-folder" value="${esc(folder)}" placeholder="${esc(cfg.dam_root || '/content/dam/benq-aem-guides/en')}"></div>
+          <div><label class="f" for="aem-user">AEM user (to find each topic's file in AEM)</label>
+            <input type="text" id="aem-user" value="${esc(cfg.user || '')}" autocomplete="username"></div>
+          <div><label class="f" for="aem-pass">AEM password ${cfg.has_password ? '(set — leave empty to keep)' : ''}</label>
+            <input type="password" id="aem-pass" value="" autocomplete="current-password" placeholder="kept in memory only, never saved"></div>
+          <div class="wide"><label class="f" for="aem-link">Link template — {author} {path} {folder} {guid} {lang} {map} {product} {element} {q}</label>
+            <input type="text" id="aem-link" value="${esc(cfg.link || '')}"></div>
+          <div class="wide row"><button class="btn primary" type="submit">Save &amp; update links</button>
+            <span id="aemstatus" class="small muted">Saved for every run. This run's links, CSV and genuine-issues PDF are rebuilt.</span></div>
+        </form></details>
+    </div>
+    <div class="card" style="padding:0;overflow-x:auto"><table class="t"><thead><tr><th>Topic</th><th>GUID (opens in AEM)</th><th>Stage p.</th>
+      <th class="n">Genuine</th><th class="n">Critical</th><th class="n">All issues</th><th></th></tr></thead><tbody>
+      ${a.topics.map(t => `<tr><td><b>${esc(t.topic || '—')}</b><div class="small muted">${t.sections.length} section(s)${t.path ? ' · <code>' + esc(t.path) + '</code>' : ''}</div></td>
+        <td>${guidChip(t)} <button class="btn sm" data-copy="${esc(t.guid)}" title="Copy the GUID">Copy</button></td>
+        <td>${t.page ?? ''}</td>
+        <td class="n">${t.genuine ? `<b style="color:var(--fail)">${t.genuine}</b>` : '0'}</td>
+        <td class="n">${t.critical ? `<span class="badge crit">${t.critical}</span>` : ''}</td>
+        <td class="n">${t.issues}</td>
+        <td style="white-space:nowrap"><button class="btn sm" data-topic-issues="${t.guid}">Show issues</button></td></tr>`).join('')}
+      </tbody></table></div>`;
+  el.onclick = e => {
+    const c = e.target.closest('[data-copy]');
+    if (c) { e.preventDefault(); return copyGuid(c); }
+    const b = e.target.closest('[data-topic-issues]');
+    if (b) {
+      Object.assign(R, { tab: 'issues', topic: b.dataset.topicIssues, section: '', cat: 'all', types: new Set(), sevs: new Set(), critOnly: false, shown: 60 });
+      writeState(); renderTab();
+    }
+  };
+  $('#aemform').onsubmit = async e => {
+    e.preventDefault();
+    const st = $('#aemstatus'); st.textContent = 'Saving…'; st.classList.remove('err');
+    try {
+      const products = { ...(cfg.products || {}) };
+      const f = $('#aem-folder').value.trim();
+      if (a.product) { if (f) products[a.product] = f; else delete products[a.product]; }
+      await api('/api/aem', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ author: $('#aem-author').value.trim(), link: $('#aem-link').value.trim(), dam_root: cfg.dam_root || '', products,
+                               user: $('#aem-user').value.trim(), password: $('#aem-pass').value }) });
+      await api(`/api/runs/${R.job.id}/relink`, { method: 'POST' });
+      R.data = await api(`/runs/${R.job.id}/results.json?t=${Date.now()}`);
+      renderTopics(el);
+    } catch (err) { st.textContent = err.message; st.classList.add('err'); }
+  };
 }
 
 // ---------------- TOC: full prod TOC (left) vs stage TOC (right) – pages and entries
@@ -897,6 +1102,7 @@ function renderIssues(keepScroll) {
   R.sevs.forEach(v => pills.push(['sev:' + v, v]));
   if (R.critOnly) pills.push(['crit', 'critical only']);
   if (R.section) pills.push(['sec', R.data.sections.find(s => s.id === R.section)?.title || R.section]);
+  if (R.topic) pills.push(['topic', 'AEM ' + (R.data.aem?.topics.find(t => t.guid === R.topic)?.topic || R.topic)]);
   if (R.q) pills.push(['q', `“${R.q}”`]);
   $('#rbar').innerHTML = `<b>${current.length}</b> issue${current.length === 1 ? '' : 's'}
     ${pills.map(([k, l]) => `<button class="pill" data-pill="${esc(k)}" title="Remove filter">${esc(l)} ✕</button>`).join('')}
@@ -919,18 +1125,18 @@ function renderIssues(keepScroll) {
     }
     const pa = f.baseline[0] ? 'p.' + (f.baseline[0].page + 1) : '—', pc = f.candidate[0] ? 'p.' + (f.candidate[0].page + 1) : '—';
     const tags = `${f.critical ? '<span class="badge crit">critical</span>' : ''}<span class="sevdot ${f.severity}" title="${f.severity}"></span>
-      <span class="cat" style="--kc:var(--k-${f.category})">${CAT_LABEL[f.category]}</span><span class="type">${esc(f.types.join(', '))}</span>`;
+      <span class="cat" style="--kc:var(--k-${f.category})">${CAT_LABEL[f.category]}</span><span class="type">${esc(f.types.join(', '))}</span>${guidChip(f.aem, true)}`;
     if (R.view === 'cards') {
       rows.push(`<article class="issue card-issue ${f.critical ? 'is-crit' : ''}" style="border-left-color:var(--k-${f.category})">
         <div class="meta">${tags}<span>${esc(s.title)}</span><span class="sp">prod ${pa} ⇆ stage ${pc}</span>
           <a href="${viewerLink(f, s)}" target="_blank" rel="noopener">viewer ↗</a></div>
-        <div class="msg">${esc(f.message)}</div>${shotsHtml(f, i)}</article>`);
+        <div class="msg">${esc(f.message)}</div>${sourceHtml(f)}${shotsHtml(f, i)}</article>`);
     } else {
       const open = R.open.has(i);
       rows.push(`<div class="issue-row ${open ? 'open' : ''} ${R.sel === i ? 'sel' : ''} ${f.critical ? 'is-crit' : ''}" data-idx="${i}" tabindex="-1" style="--kc:var(--k-${f.category})">
         <div class="line"><span class="chev">${open ? '▾' : '▸'}</span>${tags}<span class="m">${esc(f.message)}</span>
           <span class="where">${esc(s.title)}</span><span class="pages">${pa} ⇆ ${pc}</span></div>
-        ${open ? `<div class="detail">${shotsHtml(f, i)}<div class="dactions"><a class="btn sm" href="${viewerLink(f, s)}" target="_blank" rel="noopener">Open this issue in the viewer ↗</a>
+        ${open ? `<div class="detail">${sourceHtml(f)}${shotsHtml(f, i)}<div class="dactions"><a class="btn sm" href="${viewerLink(f, s)}" target="_blank" rel="noopener">Open this issue in the viewer ↗</a>
           <button class="btn sm" data-sec="${s.id}">Only this section</button><span class="muted small">#${f.id}</span></div></div>` : ''}
       </div>`);
     }
@@ -957,7 +1163,8 @@ function onKeys(e) {
 }
 
 // ---------------- PDF report with chosen options
-const REPORT_PARTS = [['summary', 'Summary (result, content %, issues by category)'], ['critical', 'Critical issues table'],
+const REPORT_PARTS = [['summary', 'Summary (result, content %, issues by category)'], ['genuine', 'Genuine issues table (with descriptions)'],
+  ['critical', 'Critical issues table'],
   ['sections', 'Sections table'], ['toc', 'TOC comparison (prod vs candidate)'], ['stylemap', 'Global style map (CSS)'],
   ['issues', 'Issue details'], ['screenshots', 'Prod / candidate screenshots with each issue']];
 
@@ -974,6 +1181,7 @@ function openReportDialog() {
       </fieldset>
       <fieldset><legend>Issues in the report</legend>
         <label class="chk"><input type="radio" name="scope" value="all" ${hasFilters ? '' : 'checked'}><span>All issues</span><span class="n">${all.length}</span></label>
+        <label class="chk"><input type="radio" name="scope" value="genuine"><span>Genuine issues only</span><span class="n">${all.filter(x => x.f.genuine).length}</span></label>
         <label class="chk"><input type="radio" name="scope" value="current" ${hasFilters ? 'checked' : ''} ${hasFilters ? '' : 'disabled'}><span>Current filters from the Issues tab</span><span class="n">${all.filter(x => matches(x)).length}</span></label>
         <label class="chk"><input type="radio" name="scope" value="custom"><span>Choose…</span></label>
         <div class="custom">
@@ -999,6 +1207,7 @@ function openReportDialog() {
   const filter = () => {
     const scope = f.scope.value;
     if (scope === 'all') return {};
+    if (scope === 'genuine') return { genuine_only: true };
     if (scope === 'current') return { categories: R.cat !== 'all' ? [R.cat] : [], types: [...R.types], severities: [...R.sevs],
                                       critical_only: R.critOnly, sections: R.section ? [R.section] : [], q: R.q };
     return { categories: vals('cat'), types: vals('type'), severities: vals('sev'), critical_only: f.crit.checked,
@@ -1006,7 +1215,7 @@ function openReportDialog() {
   };
   const count = flt => all.filter(({ f: x, s }) => (!flt.categories?.length || flt.categories.includes(x.category))
     && (!flt.types?.length || x.types.some(t => flt.types.includes(t))) && (!flt.severities?.length || flt.severities.includes(x.severity))
-    && (!flt.critical_only || x.critical) && (!flt.sections?.length || flt.sections.includes(s.id))
+    && (!flt.critical_only || x.critical) && (!flt.genuine_only || x.genuine) && (!flt.sections?.length || flt.sections.includes(s.id))
     && (!flt.q || x.message.toLowerCase().includes(flt.q.toLowerCase()) || s.title.toLowerCase().includes(flt.q.toLowerCase()))).length;
   const refresh = () => {
     f.querySelector('.custom').classList.toggle('on', f.scope.value === 'custom');
@@ -1029,7 +1238,7 @@ function openReportDialog() {
     e.preventDefault();
     const include = Object.fromEntries(REPORT_PARTS.map(([k]) => [k, vals('inc').includes(k)]));
     const flt = filter();
-    const label = f.scope.value === 'all' ? 'all' : [...(flt.categories || []), ...(flt.severities || []), flt.critical_only ? 'critical' : ''].filter(Boolean).join('-') || 'filtered';
+    const label = f.scope.value === 'all' ? 'all' : f.scope.value === 'genuine' ? 'genuine' : [...(flt.categories || []), ...(flt.severities || []), flt.critical_only ? 'critical' : ''].filter(Boolean).join('-') || 'filtered';
     $('#rgo').disabled = true; $('#rstatus').textContent = 'Building the report…';
     try {
       const res = await fetch(`/api/runs/${R.job.id}/report`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1048,7 +1257,8 @@ function openReportDialog() {
   dlg.showModal();
 }
 
-const kindNote = k => k === 'aligned' ? ' · not present — aligned position' : k === 'section' ? ' · not present — section start' : '';
+const kindNote = k => k === 'aligned' ? ' · not present — aligned position' : k === 'section' ? ' · not present — section start'
+  : k === 'section-slot' ? ' · not present — where the missing section belongs' : '';
 
 function openLightbox(i) {
   const base = `/runs/${R.job.id}/`;

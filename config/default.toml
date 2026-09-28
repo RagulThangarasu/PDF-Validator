@@ -3,6 +3,7 @@
 
 [extract]
 use_trimbox = true            # drop printer slugs / crop marks outside the trim box
+table_reading_order = true    # read tables row by row, cell by cell (a wrapped cell no longer scrambles the order)
 strip_repeating = true        # drop running headers/footers/page numbers
 repeat_threshold = 0.3        # ...when the same line sits at the same y on >=30% of pages
 ignore_patterns = [           # regexes; matching lines are ignored entirely
@@ -14,7 +15,9 @@ ignore_patterns = [           # regexes; matching lines are ignored entirely
 source = "auto"               # outline | headings | auto (outline when the PDF has bookmarks)
 locate_threshold = 0.8        # fuzzy score to find a bookmark's heading text on its page
 title_match_threshold = 0.85  # fuzzy score to pair baseline and candidate headings
-front_matter = true           # validate content before the first section (cover, TOC)
+front_matter = false          # true = also validate content before the first section (cover page)
+page_scope = true             # web page vs PDF: validate only the top-level (L1) chapter(s) the page covers
+                              # (by its matched headings or its title); heading levels compared relative to it
 skip = []                     # regexes on normalised titles to exclude, e.g. ['^table of contents?$']
 missing_severity = "error"
 extra_severity = "warning"
@@ -26,8 +29,9 @@ outline_only_severity = "warning"   # heading text exists on both sides, only th
 
 [content]
 # Content = the text itself: words, case, punctuation (. , : ; quotes, dashes) and the spacing
-# between words on a line. Font weight/colour/size are CSS ([style]); line wrapping is layout
-# (text present but wrapped to the next line elsewhere is reported by [layout] as line-wrap).
+# between words on a line. Font weight/colour/size are CSS ([style]). Text that is present but
+# continues on the next line elsewhere is not an issue at all (see ignore_relocated, check_paragraphs
+# and [layout] check_wrap).
 # The section verdict is a PERCENTAGE of prod words present in stage (CSS does not affect it):
 pass_pct = 98.0               # content match % >= pass_pct            -> content PASS
 warn_pct = 90.0               # warn_pct <= content match % < pass_pct -> content WARN, below -> FAIL
@@ -35,9 +39,17 @@ critical_missing_words = 8    # a missing block of >= N prod words is flagged CR
 case_sensitive = true
 normalize_typography = false  # true = treat ‘ ’ “ ” – — as ' " - (ignore typographic quote/dash changes)
 check_spacing = true          # double / missing spaces between words on the same line
+ignore_relocated = true       # a missing/extra block whose words all exist unmatched on the other side
+                              # (wrapped to the next line, another cell order) is not reported
+ignore_repeated_headers = true  # a table header row repeated at the top of a continuation page is pagination
+check_paragraphs = false      # true = report text starting a new paragraph/line on one side only
 dehyphenate = true            # a word split by a hyphen at a line break is one word (line breaks are layout)
 ignore_toc_page_numbers = true  # "Title ...... 17": page numbers shift whenever the layout differs
 ignore_tokens = ["•", "●", "■", "▪", "◦"]   # bullet glyphs are list styling
+# Callout labels: "Tips" / "TIPS:", "Note" / "NOTE:", "Warning" / "WARNING:" are the same label (case,
+# colon and plural are house style). Every occurrence of these words is compared this way.
+# Empty list = compare labels strictly.
+label_words = ["note", "tip", "hint", "warning", "important", "caution", "danger", "notice", "attention"]
 min_diff_words = 1
 severity = "warning"          # individual text diffs (they are counted in the %)
 spacing_severity = "warning"
@@ -48,6 +60,7 @@ enabled = true
 row_match_ratio = 0.5         # a prod table row is MISSING (critical) when < 50 % of its words are found in stage
 missing_row_severity = "error"
 extra_row_severity = "warning"
+overflow_severity = "error"   # text in a stage table that runs across its cell border (not in prod)
 
 [integrity]
 glyphs = true                 # broken glyphs in stage (U+FFFD, private-use, NUL) -> critical
@@ -58,6 +71,7 @@ missing_link_severity = "error"
 [toc]
 # The printed table of contents is compared on its own: entries, levels (from indentation) and
 # page numbers. Its text is excluded from the content check.
+max_level = 1                 # validate only TOC entries up to this level (1 = chapters); 0 = all levels
 min_entries = 4               # a page is a TOC page when it has >= N "Title ...... 12" lines
 max_front_fraction = 0.25     # ... and sits in the first 25 % of the document
 title_match_threshold = 0.8   # fuzzy score to pair prod and stage entries
@@ -90,7 +104,16 @@ line_height_tolerance_em = 0.3
 heading_space_tolerance_em = 0.8
 min_lines = 1
 check_placement = true        # graphics: inline vs own line, and which word they follow (via text alignment)
-check_wrap = true             # same text wrapping to the next line at a different word -> layout (not content)
+check_wrap = false            # true = report the same text wrapping to the next line at a different word (line-wrap)
+check_bullets = true          # bullet / numbered list alignment, reported as indent issues (see list_marker)
+# a line's first word is a list marker when it is an enumerator (1. 2) a. (b) iv.) ...
+list_marker = '^\(?(?:\d{1,3}|[A-Za-z]|[ivxlcdmIVXLCDM]{1,4})[.)]$'
+# ... or made only of characters of these Unicode categories: Po punctuation (• * ·), Pd dash (- –),
+# So other symbol (▪ ✓ ➢). Math symbols (Sm: × + |) are not bullets.
+list_symbol_categories = ["Po", "Pd", "So"]
+bullet_tolerance_em = 0.3     # marker position / marker-text gap / hanging indent may differ by this much (em)
+bullet_intro_max_gap_em = 2.0 # the line introducing a list must be this close above it (em); a list with none
+                              # (e.g. first list in a table cell) is checked for its items lining up with each other
 
 [layout.severity]
 text-align = "error"
@@ -102,6 +125,8 @@ line-wrap = "warning"
 
 [assets]
 aspect_tolerance = 0.05       # 5 %
+distorted_tolerance = 0.25    # stage draws a picture >= 25 % out of its own pixel proportions (prod does not)
+                              # = stretched / squashed (genuine)
 width_tolerance = 0.10        # 10 % of content width
 count_severity = "error"
 geometry_severity = "warning"
@@ -111,10 +136,64 @@ icons = "ignore"              # small icons (< icon_max_width): ignore | info | 
 match_window_words = 80       # how far (in aligned words) an image may drift and still pair
 visual_match_threshold = 0.25 # max difference-hash distance (0-1) for "same picture"
 same_spot_words = 12          # a different picture this close to the expected spot = replaced image
-changed_severity = "warning"
+changed_severity = "error"    # a different picture at the same spot
+same_picture_similarity = 0.8 # pixel correlation (-1..1) at or above which two pictures are the same picture
+different_picture_similarity = 0.3  # ... below which a hash-paired picture is really a different one
+picture_min_width = 0.15      # ... judged only for pictures at least this share of the content width (not logos)
+blackout_fraction = 0.15      # share of a picture that is black in stage but not in prod -> blacked out
 raster_vs_vector_severity = "info"  # same artwork, bitmap on one side and vector paths on the other
 artwork_match_score = 0.6      # min cross-correlation when searching the other page for the same artwork
 
 [report]
 max_locs = 40                 # highlight boxes per finding
 max_findings_per_check = 60   # per section
+
+[html]                        # web page (URL) as the candidate
+crawl = true                  # validate every page of the guide: follow the start page's links to the other
+                              # pages under the same folder, in reading order, joined into one document
+max_pages = 0                 # stop after this many pages (0 = no limit)
+
+[genuine]
+# The issues that mean something is really wrong in stage (the "genuine issues" report and
+# `pdfval compare --genuine`). Everything else - CSS, wrapping, moved text - is still in the full report.
+# Content: every text difference counts - missing / extra / changed words, case, each punctuation
+# mark, the space after a word (missing / extra / double space) and paragraph breaks.
+# Bullets: a bullet point missing, added or changed, and bullet alignment (marker position, the gap
+# to the text, hanging indent of wrapped lines).
+types = [
+  "missing section", "duplicate section", "order differs",
+  "missing image", "broken image", "image blacked out", "image changed", "duplicate image",
+  "image in wrong section", "image outside box", "missing image label",
+  "content in wrong section", "duplicate content", "missing text", "extra text", "changed text",
+  "case", "punctuation", "case + punctuation", "spacing", "superscript", "paragraph break",
+  "bullet", "extra section", "outline level",
+  "missing entry", "extra entry", "title differs", "wrong page", "level differs", "heading differs",
+  "extra image", "image distorted",
+  "missing table", "missing row", "missing header", "tables merged", "rows merged", "table split",
+  "extra table", "extra row", "row split", "cells merged", "cells split", "table to text", "text to table",
+  "text outside table border",
+  "broken link", "missing link", "link to wrong section", "link target differs",
+  "missing file", "broken glyph", "text off page",
+]
+data_missing_words = 1        # "missing text" is genuine when >= N of its words are absent from stage (1 = any)
+moved_min_words = 5           # content in the wrong section: blocks of >= N words ...
+moved_overlap = 0.8           # ... whose words are >= 80 % the same as extra text in another section
+
+[aem]
+# AEM Guides source topics. A stage PDF published by AEM Guides names a destination after every
+# topic's GUID, so each issue is traced to the topic (.dita file) it comes from and gets a link
+# that opens that topic in AEM in a new tab.
+enabled = true
+author = ""                   # AEM author URL, e.g. "http://139.59.13.139:4502"
+user = ""                     # AEM user: with a password (UI, or env PDFVAL_AEM_PASSWORD) the tool asks AEM
+                              # where each GUID's file is, so the link opens exactly that topic
+search_root = "/content/dam/benq-aem-guides"   # where AEM is searched for the topic files
+dam_root = "/content/dam/benq-aem-guides/en"   # {folder} when the product has no entry in [aem.products]
+# The link. Placeholders: {author} {path} (topic file's DAM path: found in AEM, else {folder}/{guid}.dita)
+# {folder} {guid} {lang} {map} {product} {element} {q} (URL-encoded GUID).
+link = "{author}/libs/fmdita/clientlibs/xmleditor/page.html?src={path}&leftPanel=repository_panel&appMode=author"
+# When a topic's file could not be looked up (no AEM login): open the editor's Explorer, never a guessed file.
+fallback_link = "{author}/libs/fmdita/clientlibs/xmleditor/page.html?leftPanel=repository_panel&appMode=author"
+
+[aem.products]                # ditamap name (without .ditamap, exact or regex) = DAM folder of that product
+# "sl04_and_sh04" = "/content/dam/benq-aem-guides/en/board/sl04-sh04"

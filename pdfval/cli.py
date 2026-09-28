@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--config", help="TOML overrides merged over config/default.toml")
     c.add_argument("--out", default="reports/latest", help="report directory")
     c.add_argument("--only", help="regex: validate only sections whose title matches")
-    c.add_argument("--fail-on", choices=["error", "warning", "never"], default="error",
+    c.add_argument("--fail-on", choices=["error", "warning", "genuine", "never"], default="error",
                    help="exit non-zero when a finding of this severity exists")
     c.add_argument("--screenshots", choices=["all", "warnings", "errors", "none"], default="all",
                    help="which issues get prod/stage screenshots")
@@ -76,12 +76,18 @@ def main(argv: list[str] | None = None) -> int:
     sm = result["summary"]
     print(f"{sm['result'].upper()}: {sm['sections']} sections — {sm['fail']} fail, {sm['warn']} warn, {sm['pass']} pass")
     print("findings: " + ", ".join(f"{k}={v}" for k, v in sm["by_check"].items()))
+    gen = sm["genuine"]
+    print(f"genuine issues: {gen['total']}" + (" (" + ", ".join(f"{v} × {k}" for k, v in gen["by_issue"].items()) + ")"
+                                               if gen["total"] else ""))
     print(f"report:   {index}")
+    print(f"genuine:  {Path(args.out) / 'genuine-issues.pdf'}  ·  {Path(args.out) / 'genuine-issues.csv'}")
     if args.open:
         serve(args.out)
         _block()
     if args.fail_on == "never":
         return 0
+    if args.fail_on == "genuine":
+        return 1 if gen["total"] else 0
     bad = {"error": ("fail",), "warning": ("fail", "warn")}[args.fail_on]
     return 1 if any(x["status"] in bad for x in result["sections"]) else 0
 

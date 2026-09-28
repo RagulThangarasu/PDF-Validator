@@ -14,13 +14,56 @@ Validates a **candidate** PDF (stage) against a **baseline** PDF (prod) section 
 
 The PDFs don't need the same page size, page count or engine. The sample pair is InDesign at 668×915 pt versus AEM Guides on A4. The engine aligns the two by **section**, not by page.
 
+## Genuine issues (the report to act on)
+
+Most findings are differences you can live with (CSS, wrapping, case/punctuation, spacing). The **genuine issues** are the real problems, listed in `[genuine] types` in the config:
+
+| Issue | Example |
+|---|---|
+| Section missing / duplicated / in the wrong place | `Duplicate section in stage: “Setup” appears 2 times in stage but 1 time(s) in prod` |
+| Image missing / broken / in the wrong section | `Image placed in the wrong section: in prod it is in “Installation” (p.2), in stage it is in “Maintenance” (p.4)` |
+| Image blacked out / a different image at the same spot | `Image blacked out in stage: 50% of the picture is black where prod shows content` · `Different image in stage: the picture at this spot is not the prod picture` |
+| Image duplicated into another section | `Image duplicated: the picture from “Installation” (prod p.2) appears again in “Maintenance” in stage` |
+| Image label / caption missing | `Image label / caption missing in stage: Missing text: “Low Brightness Low Contrast High Contrast”` |
+| Content in the wrong section, data missing | `Content placed in the wrong section: “Keep the ventilation …” is in “Overview” in prod but in “Maintenance” in stage` |
+| Content duplicated into another section | `Content duplicated in stage: “Keep the ventilation …” is prod text from “Overview”, repeated in “Maintenance”` |
+| Table missing / header missing / rows missing / tables or rows merged / table split | `Table header missing in stage: prod table (p.3) starts with the header row “Setting Value” …` |
+| Link broken / not a link in stage / pointing to the wrong section / to a different address | `Link points to the wrong section: “For details, see …” goes to “Setup” in prod but to “Maintenance” in stage` |
+| Attachment missing, broken characters, text cut off | |
+
+**Nothing genuine is dropped.** Each check keeps at most `report.max_findings_per_check` findings per section, but that cap only thins presentation findings (CSS, layout). Critical and genuine issues are always kept, however many a section has. Presentation findings stay out of the genuine report: fonts, colours, indent, alignment, line height, line-wrap, graphic placement, same artwork drawn as vector vs image, bookmark-only differences and reordered-only text. Everything else is in: the level-1 TOC (missing, extra or renamed entries, level, page number, heading); extra sections and heading levels; extra, distorted, different, blacked-out and duplicated images and missing image labels; and every table-structure change (extra table or row, rows split, cells merged or split, table turned into text and back). An image counts as *distorted* when stage draws it at least 25 % out of its own pixel proportions and prod does not.
+
+Every run writes `genuine-issues.pdf` (overview table with a description and why it matters, then each issue with prod/stage screenshots) and `genuine-issues.csv` (opens in Excel). In the UI: **⬇ Genuine issues (N)**, or *PDF report… → Genuine issues only*. CLI: `--fail-on genuine` exits 1 when there is any genuine issue.
+
+Images get a second opinion from their pixels, not just from the visual hash: a correlation of the two pictures (pictures ≥ 15 % of the content width, not small logos) and the share that turned black, measured on the whole image box. On the sample manuals, genuinely identical pictures correlate ≥ 0.8 and swapped ones ≤ 0.72. Thresholds: `assets.same_picture_similarity`, `different_picture_similarity`, `picture_min_width`, `blackout_fraction`. Duplicates count only across sections, because text or pictures repeated within one section are usually table reading order.
+
+"Data missing" counts only text whose words are really absent from stage (≥ `genuine.data_missing_words`), not text that moved or changed case.
+
+## AEM topic GUIDs: open the source topic and fix it
+
+A stage PDF published by AEM Guides has a named destination for every topic (`GUID-…-en`) and for each section, table, list, note and image in it (`GUID-…-en-section_3`). The validator maps every stage issue to the topic it comes from, using the issue's own position in stage, and to the nearest element in that topic ([pdfval/aem.py](pdfval/aem.py)).
+
+- **UI**: every issue shows a GUID chip, and the chip opens that topic in AEM in a new tab. The expanded issue shows *Source topic*, the full GUID, **Copy GUID**, and the nearest element (e.g. `near section_2 “Panel”`). The sidebar filters issues by topic. The **AEM topics** tab lists each topic with its GUID link and its genuine, critical and total issue counts, plus **Show issues** (the filter is kept in the URL, so you can share it).
+- **Reports**: `genuine-issues.pdf` starts with *AEM topics to fix*, and every issue in it has a clickable GUID. `genuine-issues.csv` has *AEM topic*, *GUID* (an Excel `HYPERLINK`), *Element* and *Open in AEM* columns. `summary.md` and the side-by-side viewer show the links too.
+- TOC issues have no GUID. They come from the ditamap and the PDF template, not from a topic.
+
+**Link settings** (AEM topics tab → *AEM link settings*, saved in `runs/aem-settings.json`, or `[aem]` in the config):
+
+| Setting | Example |
+|---|---|
+| AEM author URL | `https://author-p12345-e67890.adobeaemcloud.com` |
+| DAM folder per product, keyed by the ditamap name (`sl04_and_sh04.ditamap` → `sl04_and_sh04`) | `/content/dam/benq-aem-guides/en/…` |
+| Link template, with placeholders `{author} {folder} {guid} {lang} {map} {product} {element} {q}` | `{author}/libs/fmdita/clientlibs/xmleditor/page.html?src={folder}/{guid}.dita` |
+
+When you save, the current run's links, CSV, genuine-issues PDF and viewer are rebuilt. Runs made before this feature get their GUIDs the first time you open them.
+
 ## Issue categories and types (filters in the UI, viewer and PDF report)
 
 Every issue has one **category** and one or more **types**. In the UI you pick a category and see only its issues, then narrow them with the type chips.
 
 | Category | Types |
 |---|---|
-| **Content** | missing text · extra text · changed text · case (uppercase/lowercase) · punctuation · case + punctuation · spacing (word gap: double, missing or extra spaces, "details,see" vs "details, see") · paragraph break (gap between paragraphs added or removed) · reordered |
+| **Content** | missing text · extra text · changed text · case (uppercase/lowercase) · punctuation · case + punctuation · spacing (word gap: double, missing or extra spaces, "details,see" vs "details, see") · paragraph break (off by default: `content.check_paragraphs`) · reordered |
 | **Images** | missing image · extra image · image changed (same place, different picture) · size / aspect · placement (inline in a sentence vs on its own line) · raster vs vector |
 | **Tables** | missing table · extra table · tables merged · table split · missing row · extra row · rows merged · row split · cells merged · cells split · table to text / text to table |
 | **Structure** | missing section · extra section · bookmark only · outline level · heading text |
@@ -33,6 +76,24 @@ Every issue has one **category** and one or more **types**. In the UI you pick a
 - A *data* table needs at least 2 rows and at least 2 columns with text, so a bordered Note/Tip box doesn't count.
 - Rows are mapped by their words in any order, with the first-cell label required. When identical rows repeat, such as column headers, the one at the aligned position wins, and repeated header rows are ignored when relating tables.
 - A table only counts as "turned into plain text" if text from different rows runs together on one line on the other side. Otherwise it is still a table, just one the detector couldn't see.
+
+**Cover page and TOC.** The cover (everything before the first section) is not validated (`sections.front_matter = false`). The printed TOC is compared for its **level-1 entries only** (`toc.max_level = 1`): title, order and page number of each chapter. A level-1 entry that is deeper on the other side is reported as a level difference, and the TOC heading ("Table of contents") is still compared. `max_level = 0` compares every level.
+
+**Other languages.** Every character is compared, in any script:
+- Chinese, Japanese, Thai, Lao, Khmer and Myanmar have no spaces between words, so each character is compared on its own, and a finding names exactly the characters that differ. A short difference is shown in its line, e.g. `Changed text: “废” → “州” in “有关 China WEEE 州弃电器电子产品回收处理”`.
+- Right-to-left text (Arabic, Hebrew) is compared in reading order. Arabic "presentation form" characters and ligatures (ﬁ) are folded to plain letters.
+- Full-width and CJK punctuation (“，” “（）” “。”) is kept, so “，” → “,” is reported.
+- Tested on Arabic, Chinese, Japanese, Russian and English prod/stage pairs: an identical copy gives no issue, and missing, extra and changed text, a missing sentence, empty table cells and table overflow are all caught.
+
+**Tables are read row by row, cell by cell** (right to left in Arabic/Hebrew tables), top to bottom inside a cell (`extract.table_reading_order`). Plain top-to-bottom reading scrambles a row whose label wraps ("液晶面 / 板"), so the two sides no longer line up. A row whose label changed ("液晶面板" → "液晶螢幕") is paired by its position between matched neighbours and the same values. It is reported once, as changed text with both sides boxed, not as an extra row or a row split. A line break inside a cell joins Chinese/Japanese characters without a space ("面板").
+
+**Superscript / subscript.** Every character records whether it is raised or lowered: at least 15 % smaller than the line's main text and above or below its baseline. The PDF's own superscript flag is a guess and is not used. The same text raised or lowered on one side only is a genuine issue, shown in Unicode: `Superscript / subscript differs: “(Cr+6)” → “(Cr⁺⁶)” (“+6” is superscript in stage)`.
+
+**Text outside the table border.** Stage text in a table that runs across a cell border (into the next column, past the table edge, or down over a row line) is a genuine issue when the same text sits inside its cell in prod. The borders are the lines the page actually draws. Row lines are tested against the core height of the text (centre ± 0.35 × font size), because the glyph boxes of tall scripts such as Arabic reach past letters that sit inside the cell. The screenshots box the overflowing line in stage and the same words in prod.
+
+**Callout labels are house style, not content.** "Tips" → "TIPS:", "Note" → "NOTE:", "Warning" → "WARNING:", "Important" → "IMPORTANT:" (case, colon, plural) are not reported. A *different* label ("Tip" → "NOTE:") still is. The words are listed in `content.label_words`; an empty list compares them strictly.
+
+**Text that only continues on the next line is not an issue.** When the same text wraps to the next line at a different word, is hyphenated over a line break, starts a new line/paragraph on one side only, or sits in another cell order because a table cell wrapped, nothing is reported as content, CSS/layout or table layout. The switches `content.ignore_relocated`, `content.check_paragraphs` and `layout.check_wrap` turn those reports back on.
 
 ## Verdict model: content %, critical, CSS kept separate
 

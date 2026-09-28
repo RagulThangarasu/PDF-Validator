@@ -20,6 +20,7 @@ try:
     _FONT = ImageFont.load_default(size=17)
 except TypeError:  # Pillow < 10.1
     _FONT = ImageFont.load_default()
+PAD, MIN_H, MAX_H = 45, 150, 420  # crop: padding around the boxes, min/max crop height (pt)
 SEVERITIES = {"errors": {"error"}, "warnings": {"error", "warning"}, "all": {"error", "warning", "info"}, "none": set()}
 
 
@@ -41,7 +42,7 @@ class _PageCache:
 
 
 def _crop(pc: _PageCache, page: int, boxes: list, color, note: str | None,
-          pad: float = 45, min_h: float = 150, max_h: float = 420) -> Image.Image:
+          pad: float = PAD, min_h: float = MIN_H, max_h: float = MAX_H) -> Image.Image:
     src = pc.get(page)
     z = pc.zoom
     pw, ph = src.width / z, src.height / z
@@ -72,7 +73,9 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 1
            progress: Callable[[float, str], None] | None = None) -> int:
     """Adds f["shots"] = {"baseline": rel, "candidate": rel} to each rendered finding."""
     want = SEVERITIES.get(mode, SEVERITIES["all"])
-    todo = [(s, f) for s in result["sections"] for f in s["findings"] if f["severity"] in want]
+    # genuine issues always get screenshots (unless none at all): they go into the genuine-issues report
+    todo = [(s, f) for s in result["sections"] for f in s["findings"]
+            if f["severity"] in want or (want and f.get("genuine"))]
     if not todo:
         return 0
     out = Path(out_dir)
@@ -82,9 +85,14 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 1
     for k, (s, f) in enumerate(todo):
         f["shots"] = {}
         color = COLORS.get(f["check"], (220, 38, 38))
+        linked = _linked_view(f.get("links") or [])
         for side in ("baseline", "candidate"):
             locs = f[side]
-            if locs:
+            if linked:  # the same words highlighted on both sides
+                page, boxes, note = linked[side]
+                img = _crop(caches[side], page, boxes, color, note)
+                kind = "issue"
+            elif locs:
                 page = locs[0]["page"]
                 boxes = [l["bbox"] for l in locs if l["page"] == page]
                 others = len({l["page"] for l in locs}) - 1
@@ -95,9 +103,13 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 1
                 at = f[side + "_at"]
                 page = at["page"]
                 where = "stage" if side == "candidate" else "prod"
-                img = _crop_marker(caches[side], page, at["bbox"][1], color,
-                                   f"Not in {where} - marker shows where it would be (aligned by surrounding text)")
-                kind = "aligned"
+                missing_sec = f["detail"].get("in_missing_section") or (
+                    f["check"] == "structure" and "not found in candidate" in f["message"] and f["detail"].get("heading"))
+                # (no title in the banner: its font has no CJK/Arabic glyphs; the issue text names the section)
+                how = "where the missing section belongs: before the next section" if missing_sec \
+                    else "aligned by surrounding text"
+                img = _crop_marker(caches[side], page, at["bbox"][1], color, f"Not in {where} - marker shows {how}")
+                kind = "section-slot" if missing_sec else "aligned"
             else:  # no alignment available at all: fall back to the section start
                 start = s[side]["start"]
                 page = start["page"]
@@ -112,6 +124,22 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 1
         if progress and k % 20 == 0:
             progress(k / len(todo), f"Screenshots {k}/{len(todo)}")
     return len(todo)
+
+
+def _linked_view(links: list) -> dict | None:
+    """From (prod box, stage box) links of the same text, pick the ones both crops can
+    show: same page as the first link on each side and within one crop height of it
+    on both sides. Both screenshots then highlight exactly the same words."""
+    if not links:
+        return None
+    fa, fb = links[0]
+    span = MAX_H - 2 * PAD
+    fits = lambda l, f: l["page"] == f["page"] and l["bbox"][3] - f["bbox"][1] <= span and f["bbox"][1] - l["bbox"][1] <= span
+    shown = [(a, b) for a, b in links if fits(a, fa) and fits(b, fb)]
+    hidden = len(links) - len(shown)
+    note = f"+ {hidden} more place(s) outside this view" if hidden else None
+    return {"baseline": (fa["page"], [a["bbox"] for a, _ in shown], note),
+            "candidate": (fb["page"], [b["bbox"] for _, b in shown], note)}
 
 
 def _crop_marker(pc: _PageCache, page: int, y: float, color, note: str) -> Image.Image:

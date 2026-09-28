@@ -7,6 +7,7 @@ directly with one shared font, and screenshots are down-sampled to JPEG.
 from __future__ import annotations
 
 import io
+from collections import Counter
 import re
 from html import escape
 from pathlib import Path
@@ -42,8 +43,13 @@ def _pct_status(c: dict) -> str:
     return "pass" if c["match_pct"] >= c["pass_pct"] else "warn" if c["match_pct"] >= c["warn_pct"] else "fail"
 
 
-INCLUDE_ALL = {"summary": True, "critical": True, "sections": True, "toc": True, "stylemap": True,
+INCLUDE_ALL = {"summary": True, "genuine": True, "critical": True, "sections": True, "toc": True, "stylemap": True,
                "issues": True, "screenshots": True}
+
+# the genuine-issues report: its overview table and every genuine issue with screenshots, nothing else
+GENUINE = {"include": {"summary": False, "genuine": True, "critical": False, "sections": False, "toc": False,
+                       "stylemap": False, "issues": True, "screenshots": True},
+           "filter": {"genuine_only": True}}
 
 
 def _summary_html(result: dict, include: dict | None = None, note: str = "", n_issues: int | None = None) -> list[str]:
@@ -88,6 +94,9 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
             html.append(f"<tr><td><b style='color:{CAT_COLOR[c]}'>{label}</b></td><td class='n'>{bc['total']}</td><td>"
                         + (" · ".join(f"{escape(t)} {n}" for t, n in bc["types"].items()) or "—") + "</td></tr>")
         html.append("</table>")
+    gen = [(s, f) for s in result["sections"] for f in s["findings"] if f.get("genuine")]
+    if inc["genuine"]:
+        html.append(genuine_html(gen))
     crit = [(s, f) for s in result["sections"] for f in s["findings"] if f.get("critical")]
     if crit and inc["critical"]:
         html.append("<h2 style='color:#b42318'>Critical issues</h2><table class='grid'><tr><th>#</th><th>Section</th>"
@@ -183,15 +192,20 @@ class _Canvas:
                 cur = word
         return lines + [cur] if cur else lines
 
-    def runs(self, runs: list[tuple[str, str, bool]], size: float, x: float | None = None):
-        """One line of differently coloured runs: [(text, '#hex', bold)]."""
+    def runs(self, runs: list[tuple], size: float, x: float | None = None):
+        """One line of differently coloured runs: [(text, '#hex', bold)] or (text, '#hex', bold, url) for a link."""
         x = self.M if x is None else x
-        for text, color, bold in runs:
+        for text, color, bold, *url in runs:
             font = self.bold if bold else self.regular
             tw = pymupdf.TextWriter(self.PAGE)
             tw.append((x, self.y + size), text, font=font, fontsize=size)
             tw.write_text(self.page, color=_rgb(color))
-            x += font.text_length(text, size)
+            w = font.text_length(text, size)
+            if url and url[0]:
+                r = pymupdf.Rect(x, self.y, x + w, self.y + size * 1.3)
+                self.page.draw_line(r.bl + (0, -1), r.br + (0, -1), color=_rgb(color), width=0.5)
+                self.page.insert_link({"kind": pymupdf.LINK_URI, "from": r, "uri": url[0]})
+            x += w
         self.y += size * 1.35
 
 
@@ -221,6 +235,49 @@ def _section_header(c: _Canvas, s: dict, cont: bool = False):
     c.y += 4
 
 
+def genuine_html(gen: list[tuple]) -> str:
+    """Overview of the genuine issues: count per issue, then one row per issue with its description."""
+    from ..genuine import where
+    if not gen:
+        return ("<h2 style='color:#16a34a'>Genuine issues: none</h2><p>No missing or duplicated sections, missing or "
+                "broken images, misplaced images or content, missing data, table or link problems.</p>")
+    by = Counter(f["issue"] for _, f in gen)
+    out = [f"<h2 style='color:#b42318'>Genuine issues ({len(gen)})</h2><p>"
+           + " · ".join(f"<b>{n}</b> × {escape(k)}" for k, n in by.most_common()) + "</p>",
+           _topics_html(gen),
+           "<table class='grid'><tr><th>#</th><th>Section</th><th>Issue</th><th>Prod</th><th>Stage</th><th>AEM topic (GUID)</th>"
+           "<th>Description</th></tr>"]
+    for s, f in gen:
+        pa, pc = where(f)
+        out.append(f"<tr><td>{f['id']}</td><td>{escape(s['title'])}</td>"
+                   f"<td><b>{escape(f['issue'])}</b><br/><span class='muted'>{escape(f.get('why', ''))}</span></td>"
+                   f"<td>{pa or '—'}</td><td>{pc or '—'}</td><td>{_guid_cell(f.get('aem'))}</td>"
+                   f"<td>{escape(f['description'])}</td></tr>")
+    return "".join(out) + "</table>"
+
+
+def _topics_html(gen: list[tuple]) -> str:
+    """The AEM topics to open and fix, most genuine issues first."""
+    topics: dict[str, list] = {}
+    for _, f in gen:
+        if f.get("aem"):
+            topics.setdefault(f["aem"]["guid"], [f["aem"], 0])[1] += 1
+    if not topics:
+        return ""
+    rows = "".join(f"<tr><td>{_guid_cell(a)}</td><td>{n}</td></tr>"
+                   for a, n in sorted(topics.values(), key=lambda x: -x[1]))
+    return ("<h3>AEM topics to fix</h3><table class='grid'><tr><th>Topic · GUID (click to open in AEM)</th>"
+            f"<th>Genuine issues</th></tr>{rows}</table><h3>All genuine issues</h3>")
+
+
+def _guid_cell(a: dict | None) -> str:
+    if not a:
+        return "—"
+    g = escape(a["guid"])
+    link = f"<a href='{escape(a['url'])}'>{g}</a>" if a.get("url") else g
+    return f"{escape(a.get('topic') or '')}<br/><span class='muted'>{link}</span>"
+
+
 def select_issues(result: dict, flt: dict | None = None, severities: set[str] | None = None) -> list[tuple]:
     """(section, finding) pairs matching the report filter:
     categories / types / severities (lists; empty = all), critical_only, sections (section ids)."""
@@ -236,7 +293,8 @@ def select_issues(result: dict, flt: dict | None = None, severities: set[str] | 
         for f in sorted(s["findings"], key=lambda f: (not f.get("critical"), CAT_ORDER.get(f.get("category"), 9))):
             if f["severity"] not in sev or (cats and f.get("category") not in cats) \
                     or (types and not set(f.get("types") or []) & types) or (flt.get("critical_only") and not f.get("critical")) \
-                    or (q and q not in f["message"].lower() and q not in s["title"].lower()):
+                    or (q and q not in f["message"].lower() and q not in s["title"].lower()) \
+                    or (flt.get("genuine_only") and not f.get("genuine")):
                 continue
             out.append((s, f))
     return out
@@ -254,6 +312,8 @@ def describe(flt: dict | None, n: int) -> str:
         parts.append("severity: " + ", ".join(flt["severities"]))
     if flt.get("critical_only"):
         parts.append("critical only")
+    if flt.get("genuine_only"):
+        parts.append("genuine issues only")
     if flt.get("sections"):
         parts.append(f"{len(flt['sections'])} section(s)")
     if flt.get("q"):
@@ -277,6 +337,8 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
     writer = pymupdf.DocumentWriter(buf)
     page_rect = pymupdf.paper_rect("a4-l")
     blocks = _summary_html(result, inc, note)
+    if (opts.get("filter") or {}).get("genuine_only"):
+        blocks[0] = blocks[0].replace("PDF Parity Report", "Genuine Issues Report", 1)
     if inc["issues"]:
         blocks[-1] += f"<h2>Issues ({len(issues)}) follow on the next pages</h2>"
     for block in blocks:  # each block on fresh pages; a page cap guards against a layout loop
@@ -301,11 +363,13 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
         shots = f.get("shots", {}) if inc["screenshots"] else {}
         imgs = {side: _jpeg_bytes(out / shots[side]) if shots.get(side) else None for side in ("baseline", "candidate")}
         img_h = max((min(col_w * im[1], max_h) for im in imgs.values() if im), default=0)
-        msg_lines = c.wrap(re.sub(r"\.{4,}", " … ", f["message"]), 9)
+        text = f["description"] if f.get("genuine") and (opts.get("filter") or {}).get("genuine_only") else f["message"]
+        msg_lines = c.wrap(re.sub(r"\.{4,}", " … ", text), 9)
         if len(msg_lines) > 5:
             msg_lines = msg_lines[:5]
             msg_lines[-1] += " …"
-        need = 12 + len(msg_lines) * 12.2 + (img_h + 16 if img_h else 0) + 8
+        a = f.get("aem")
+        need = 12 + len(msg_lines) * 12.2 + (11 if a else 0) + (img_h + 16 if img_h else 0) + 8
         if s is not current:
             if not c.room(need + 40):
                 c.new_page()
@@ -320,11 +384,15 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
         pc = f"p.{f['candidate'][0]['page'] + 1}" if f["candidate"] else "—"
         c.runs(([("CRITICAL  ", "#b42318", True)] if f.get("critical") else [])
                + [(f["severity"].upper(), SEV_COLOR[f["severity"]], True), ("  ·  ", "#6a7282", False),
-                (f"{CAT_LABEL.get(f.get('category'), f['check'])} · {', '.join(f.get('types', []))}",
+                (f.get("issue") if f.get("genuine") else f"{CAT_LABEL.get(f.get('category'), f['check'])} · {', '.join(f.get('types', []))}",
                  CAT_COLOR.get(f.get("category"), "#333333"), True),
                 (f"  ·  #{f['id']}  ·  prod {pa} ↔ stage {pc}", "#6a7282", False)], 8)
         for line in msg_lines:
             c.runs([(line, "#1d2330", False)], 9)
+        if a:
+            near = f"  ·  near {a['element']}" + (f" “{a['element_title']}”" if a.get("element_title") else "") if a.get("element") else ""
+            c.runs([("AEM topic  ", "#6a7282", True), (a.get("topic") or "", "#1d2330", False), ("  ·  ", "#6a7282", False),
+                    (a["guid"] + ("  ↗" if a.get("url") else ""), "#0f766e", True, a.get("url")), (near, "#6a7282", False)], 8)
         if img_h:
             c.y += 2
             for col, (side, label) in enumerate((("baseline", "PROD"), ("candidate", "STAGE"))):

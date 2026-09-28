@@ -11,6 +11,9 @@ not by their order:
      different is reported as "content differs" (e.g. a replaced screenshot).
 One extra/missing image therefore never shifts every later comparison.
 
+A stage image or icon that failed to load (web page) or renders blank where
+prod has a picture is reported as broken.
+
 Paired images are compared for aspect ratio and width relative to the content
 box (independent of page size). Unpaired ones are reported as missing/extra,
 with the aligned position on the other side for the screenshot.
@@ -20,7 +23,7 @@ from __future__ import annotations
 import numpy as np
 import pymupdf
 from PIL import Image as PILImage
-from PIL import ImageChops
+from PIL import ImageChops, ImageFilter
 
 from ..model import Doc, Finding, Image, Loc
 from . import Aligner, Unit
@@ -140,6 +143,53 @@ def im_aspect(im: Image) -> float:
     return (im.bbox[3] - im.bbox[1]) / max(im.bbox[2] - im.bbox[0], 1e-6)
 
 
+_BLANK: dict[tuple, bool] = {}
+
+
+def blank(doc: Doc, im: Image) -> bool:
+    """Nothing visible: the placement box renders as one flat colour."""
+    key = (doc.path, im.page, im.bbox)
+    if key not in _BLANK:
+        g = _gray(doc, im.page, im.bbox, min(2.0, 64 / max(im.bbox[2] - im.bbox[0], 1)))
+        _BLANK[key] = g.size == 0 or float(g.std()) < 3.0
+    return _BLANK[key]
+
+
+def broken(a: Doc, x: Image | None, b: Doc, y: Image) -> bool:
+    """Stage image y failed to load, or is blank where prod image x shows a picture."""
+    return y.broken or (x is not None and blank(b, y) and not blank(a, x))
+
+
+def _thumb(doc: Doc, im: Image, n: int = 64, trim: bool = True) -> "np.ndarray":
+    """n x n grayscale of the visible picture (borders trimmed, as in visual()), slightly blurred
+    so a one-pixel shift between two renderings of the same picture does not count."""
+    pdf = _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+    r = pymupdf.Rect(im.bbox)
+    z = 200 / max(r.width, 1)
+    pix = pdf[im.page].get_pixmap(clip=r, matrix=pymupdf.Matrix(z, z), colorspace=pymupdf.csGRAY, alpha=False)
+    g = PILImage.frombytes("L", (pix.width, pix.height), pix.samples)
+    bg = PILImage.new("L", g.size, g.getpixel((1, 1)))
+    box = ImageChops.difference(g, bg).point(lambda v: 255 if v > 28 else 0).getbbox() if trim else None
+    if box:
+        g = g.crop(box)
+    return np.asarray(g.resize((n, n), PILImage.BILINEAR).filter(ImageFilter.GaussianBlur(1.2)), np.float64)
+
+
+def pixel_compare(a: Doc, x: Image, b: Doc, y: Image) -> tuple[float, float]:
+    """(structural similarity -1..1, share of the picture near-black in stage but not in prod).
+    The difference hash only sees brightness *steps*: a blacked-out area, or another picture with
+    a similar layout, can hash alike. This correlates the pixels themselves (brightness-independent)
+    and measures how much of the picture turned black."""
+    ta, tb = _thumb(a, x), _thumb(b, y)
+    ca, cb = ta - ta.mean(), tb - tb.mean()
+    sim = float((ca * cb).sum() / (np.sqrt((ca * ca).sum() * (cb * cb).sum()) + 1e-9))
+    # blackout on the whole placement box: trimming takes the corner colour as background, so a
+    # black block in a corner would be cut away as "padding"
+    fa, fb = _thumb(a, x, trim=False), _thumb(b, y, trim=False)
+    dark = float(((fb < 40) & (fa >= 80)).mean())
+    return sim, dark
+
+
 def visual_distance(a: Doc, x: Image, b: Doc, y: Image) -> float:
     """0 = identical look, ~0.5 = unrelated."""
     return bin(visual(a, x)[0] ^ visual(b, y)[0]).count("1") / 256
@@ -162,6 +212,11 @@ def _rel_width(doc: Doc, im: Image) -> float:
     return visual(doc, im)[1] / max(doc.right(im.page) - doc.left(im.page), 1)
 
 
+def icon_max(doc: Doc, im: Image, acfg: dict) -> bool:
+    """True for a small icon (narrower than assets.icon_max_width of the content box)."""
+    return _rel_width(doc, im) < acfg.get("icon_max_width", 0.08)
+
+
 def _aspect(doc: Doc, im: Image) -> float:
     _, w, h = visual(doc, im)
     return w / max(h, 1e-6)
@@ -182,7 +237,7 @@ def check(u: Unit) -> list[Finding]:
     same_look = acfg.get("visual_match_threshold", 0.25)
     same_spot = acfg.get("same_spot_words", 12)
     used: set[int] = set()
-    pairs, changed, missing = [], [], []
+    pairs, changed, missing, broken_ = [], [], [], []
     for x in ia:
         ax = anchor(u.a, u.a_range, x)
         exp = al.to_b(ax)
@@ -198,7 +253,10 @@ def check(u: Unit) -> list[Finding]:
             score = vis + 0.15 * dist / window  # appearance first, position breaks ties
             if best is None or score < best[0]:
                 best = (score, n, vis, dist)
-        if best and best[2] <= same_look:
+        if best and best[3] <= same_spot and broken(u.a, x, u.b, ib[best[1]]):
+            used.add(best[1])  # the picture is there in prod; stage has an empty/failed box at that spot
+            broken_.append((x, ib[best[1]], x_icon))
+        elif best and best[2] <= same_look:
             used.add(best[1])
             pairs.append((x, ib[best[1]], best[2]))
         elif best and best[3] <= same_spot and not x_icon:
@@ -207,6 +265,29 @@ def check(u: Unit) -> list[Finding]:
         else:
             missing.append((x, ax, x_icon))
 
+    # Second opinion from the pixels (pictures only; icons are often redrawn): a paired picture that
+    # is really another picture, or has a blacked-out area, and a "changed" one that is the same
+    # picture rendered differently (the hash is fooled by crops / flat areas both ways).
+    sim_same = acfg.get("same_picture_similarity", 0.8)
+    sim_diff = acfg.get("different_picture_similarity", 0.3)
+    black_share = acfg.get("blackout_fraction", 0.15)
+    min_pic = acfg.get("picture_min_width", 0.15)  # small logos lose detail when scaled: no "different" verdict
+    blacked = []
+    for item in list(pairs) + list(changed):
+        x, y, vis = item
+        if _rel_width(u.a, x) < icon_w:
+            continue
+        sim, dark = pixel_compare(u.a, x, u.b, y)
+        home = pairs if item in pairs else changed
+        if dark >= black_share:
+            home.remove(item)
+            blacked.append((x, y, dark))
+        elif home is pairs and sim < sim_diff and _rel_width(u.a, x) >= min_pic:
+            pairs.remove(item)
+            changed.append((x, y, vis))
+        elif home is changed and sim >= sim_same:
+            changed.remove(item)
+            pairs.append(item)
     # Icons are paired like any image (so a resized icon is a size finding, not
     # missing+extra); only *unpaired* icons are subject to the `icons` setting,
     # because note/tip/LED icons are often raster in one PDF and vector in the other.
@@ -233,10 +314,31 @@ def check(u: Unit) -> list[Finding]:
             f"{kind(icon)} missing in candidate (prod p.{x.page + 1}, {_rel_width(u.a, x):.0%} of content width)",
             [Loc(x.page, x.bbox)], [], {"kind": "missing", "icon": icon},
             candidate_at=at, critical=not icon))
+    for x, y, icon in broken_:
+        findings.append(Finding(
+            "assets", acfg.get("broken_severity", "error"),
+            f"{kind(icon)} broken in stage: it does not display (prod p.{x.page + 1} ↔ stage p.{y.page + 1})",
+            [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)], {"kind": "broken", "icon": icon}, critical=True))
+    for n, y in enumerate(ib):  # failed to load, with no counterpart found in prod
+        if n not in used and y.broken:
+            used.add(n)
+            icon = _rel_width(u.b, y) < icon_w
+            findings.append(Finding(
+                "assets", acfg.get("broken_severity", "error"),
+                f"{kind(icon)} broken in stage: it failed to load (stage p.{y.page + 1})",
+                [], [Loc(y.page, y.bbox)], {"kind": "broken", "icon": icon}, baseline_at=al.loc_in_a(anc_b[n]),
+                critical=True))
+    for x, y, dark in blacked:
+        findings.append(Finding(
+            "assets", acfg.get("broken_severity", "error"),
+            f"Image blacked out in stage: {dark:.0%} of the picture is black where prod shows content "
+            f"(prod p.{x.page + 1} ↔ stage p.{y.page + 1})",
+            [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)], {"kind": "blackout", "dark_share": round(dark, 3)}, critical=True))
     for x, y, vis in changed:
         findings.append(Finding(
-            "assets", acfg.get("changed_severity", "warning"),
-            f"Image content differs (prod p.{x.page + 1} ↔ stage p.{y.page + 1}, visual similarity {1 - vis:.0%})",
+            "assets", acfg.get("changed_severity", "error"),
+            f"Different image in stage: the picture at this spot is not the prod picture "
+            f"(prod p.{x.page + 1} ↔ stage p.{y.page + 1}, visual similarity {1 - vis:.0%})",
             [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)], {"kind": "changed", "visual_distance": round(vis, 3)}))
     for n, y in enumerate(ib):
         if n in used:
@@ -267,11 +369,18 @@ def check(u: Unit) -> list[Finding]:
         if max(rel_x, rel_y) >= icon_w and abs(rel_x - rel_y) > acfg["width_tolerance"]:
             problems.append(f"width {rel_x:.0%} → {rel_y:.0%} of content box")
         if problems:
+            # stretched = stage draws the picture out of its own pixel proportions and prod does not
+            # (a different measured aspect alone is usually another crop or frame of the same picture)
+            tol = 1 + acfg.get("distorted_tolerance", 0.25)
+            off = lambda im: max(im.stretch, 1 / max(im.stretch, 1e-6))
+            distorted = off(y) >= tol and off(x) < 1.1 and rel_x >= icon_w
             findings.append(Finding(
-                "assets", acfg.get("geometry_severity", "warning"),
-                f"{kind(rel_x < icon_w)} (prod p.{x.page + 1} ↔ stage p.{y.page + 1}): " + ", ".join(problems),
+                "assets", "error" if distorted else acfg.get("geometry_severity", "warning"),
+                ("Image distorted in stage (stretched or squashed)" if distorted else kind(rel_x < icon_w))
+                + f" (prod p.{x.page + 1} ↔ stage p.{y.page + 1}): " + ", ".join(problems),
                 [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
                 {"baseline_aspect": round(ar_x, 3), "candidate_aspect": round(ar_y, 3),
                  "baseline_width": round(rel_x, 3), "candidate_width": round(rel_y, 3)},
+                types=["image distorted"] if distorted else [],
             ))
     return findings

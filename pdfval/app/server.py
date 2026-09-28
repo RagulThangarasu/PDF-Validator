@@ -9,6 +9,7 @@ Standard library only (http.server + threads). Binds to 127.0.0.1.
 from __future__ import annotations
 
 import json
+import os
 import mimetypes
 import re
 import shutil
@@ -22,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .. import engine
+from .. import aem, engine
 from ..report import writer
 
 STATIC = Path(__file__).with_name("static")
@@ -39,6 +40,10 @@ class Jobs:
         (self.dir / "_uploads").mkdir(exist_ok=True)
         self.lock = threading.Lock()
         self.run_lock = threading.Lock()
+        # web-page passwords live in memory only (never in job.json), per (site, user),
+        # so Rerun works until the server restarts
+        self.passwords: dict[tuple[str, str], str] = {}
+        self.aem_password = os.environ.get("PDFVAL_AEM_PASSWORD", "")  # AEM login: memory only, never on disk
         for job in self.list():  # server restarted mid-run
             if job["status"] in ("queued", "running"):
                 self.update(job["id"], status="error", message="Interrupted (server restarted)")
@@ -74,6 +79,12 @@ class Jobs:
         if options.get("mode") == "html":
             if not re.match(r"^https?://\S+$", candidate or ""):
                 raise ValueError("Enter a full web address starting with http:// or https://")
+            from ..html_source import split_login
+            candidate, url_user, url_password = split_login(candidate)  # never store a login in the URL
+            options = {**options, "html_user": options.get("html_user") or url_user}
+            password = options.pop("html_password", "") or url_password
+            if options["html_user"] and password:
+                self.passwords[(urlparse(candidate).netloc, options["html_user"])] = password
         elif not Path(candidate).is_file():
             raise ValueError(f"File not found: {candidate}")
         jid = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
@@ -85,6 +96,56 @@ class Jobs:
         (self.path(jid) / "job.json").write_text(json.dumps(job, indent=1))
         threading.Thread(target=self._run, args=(jid,), daemon=True).start()
         return job
+
+    def aem_settings(self) -> dict:
+        """AEM link settings saved from the UI (author URL, link template, DAM folder per ditamap)."""
+        try:
+            return json.loads((self.dir / "aem-settings.json").read_text())
+        except (FileNotFoundError, ValueError):
+            return {}
+
+    def aem_config(self) -> dict:
+        """[aem] config + saved settings + the in-memory password."""
+        return {**aem.merge_settings(engine.load_config().get("aem", {}), self.aem_settings()),
+                "password": self.aem_password}
+
+    def save_aem_settings(self, req: dict) -> dict:
+        if req.get("password"):
+            self.aem_password = str(req["password"])
+        keep = {k: str(req[k]).strip() for k in ("author", "link", "dam_root", "user", "search_root") if k in req}
+        keep["products"] = {str(k).strip(): str(v).strip() for k, v in (req.get("products") or {}).items()
+                            if str(k).strip() and str(v).strip()}
+        (self.dir / "aem-settings.json").write_text(json.dumps(keep, indent=1))
+        return keep
+
+    def aem_login(self, req: dict) -> dict:
+        """Check an AEM user/password against AEM; keep them (password in memory only) when accepted."""
+        cfg = {**self.aem_config(), "user": str(req.get("user", "")).strip(),
+               "password": str(req.get("password") or "") or self.aem_password}
+        ok, msg = aem.check_login(cfg)
+        if ok:
+            self.aem_password = cfg["password"]
+            self.save_aem_settings({**self.aem_settings(), "user": cfg["user"]})
+        return {"ok": ok, "message": msg, "user": cfg["user"]}
+
+    def relink(self, jid: str) -> dict:
+        """Apply the current AEM settings to a finished run: results.json, the CSV and the genuine-issues PDF."""
+        from ..report import pdf_report
+        run_dir = self.path(jid)
+        result = json.loads((run_dir / "results.json").read_text())
+        acfg = self.aem_config()
+        if not result.get("aem") and Path(result["meta"]["candidate"].get("path", "")).is_file():
+            aem.annotate(result, {"aem": acfg})  # a run made before GUIDs were traced
+        if aem.relink(result, acfg):
+            (run_dir / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
+            writer.write_genuine_csv(result, run_dir / "genuine-issues.csv")
+            writer.write_viewer(result, run_dir)
+            pdf_report.build(result, run_dir, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
+            if (run_dir / "report.pdf").exists():
+                from ..report import shots as shotmod
+                sev = shotmod.SEVERITIES.get(result["meta"].get("screenshots", "all")) or None
+                pdf_report.build(result, run_dir, severities=sev)
+        return result.get("aem") or {}
 
     def delete(self, jid: str) -> None:
         shutil.rmtree(self.path(jid), ignore_errors=True)
@@ -99,11 +160,17 @@ class Jobs:
                                                    "of the document as the candidate.")
                 cfg = engine.load_config()
                 _apply_options(cfg, job["options"])
+                cfg["aem"] = {**aem.merge_settings(cfg.get("aem", {}), self.aem_settings()), "password": self.aem_password}
                 o = job["options"]
                 step = lambda f, m: self.update(jid, progress=round(0.45 * f, 3), message=m)
                 if o.get("mode") == "html":
                     result = engine.compare_url(job["baseline"], job["candidate"], str(self.path(jid)), cfg, progress=step,
                                                 html={"root": o.get("html_root", ""), "exclude": o.get("html_exclude", ""),
+                                                      "user": o.get("html_user", ""),
+                                                      "crawl": o.get("html_crawl", True),
+                                                      "max_pages": o.get("html_max_pages") or 0,
+                                                      "password": self.passwords.get(
+                                                          (urlparse(job["candidate"]).netloc, o.get("html_user", "")), ""),
                                                       "width": o.get("html_width") or 1280, "wait_ms": o.get("html_wait") or 1500})
                 else:
                     result = engine.compare(job["baseline"], job["candidate"], cfg, progress=step)
@@ -143,8 +210,7 @@ def _apply_options(cfg: dict, o: dict) -> None:
             cfg["content"][k] = bool(o[k])
     if "case_sensitive" in o:
         cfg["content"]["case_sensitive"] = bool(o["case_sensitive"])
-    if "front_matter" in o:
-        cfg["sections"]["front_matter"] = bool(o["front_matter"])
+    # the cover (front matter) is never validated from the UI: [sections] front_matter in the config
     if o.get("skip"):
         cfg["sections"]["skip"] = [s.strip() for s in o["skip"].splitlines() if s.strip()]
     if o.get("ignore"):
@@ -212,6 +278,9 @@ def make_handler(jobs: Jobs, root: Path):
                     return self._json(jobs.list())
                 if m := re.fullmatch(r"/api/runs/([\w-]+)", p):
                     return self._json(jobs.get(m[1]))
+                if p == "/api/aem":
+                    c = jobs.aem_config()
+                    return self._json({**{k: v for k, v in c.items() if k != "password"}, "has_password": bool(c["password"])})
                 if p == "/api/files":
                     return self._json(_list_pdfs(root, jobs.dir))
                 if m := re.fullmatch(r"/runs/([\w-]+)/(.+)", p):
@@ -238,6 +307,12 @@ def make_handler(jobs: Jobs, root: Path):
                     dest = jobs.dir / "_uploads" / f"{uuid.uuid4().hex[:8]}_{name}"
                     dest.write_bytes(data)
                     return self._json({"path": str(dest), "name": name, "size": len(data)})
+                if p.path == "/api/aem":
+                    return self._json(jobs.save_aem_settings(json.loads(self._body() or b"{}")))
+                if p.path == "/api/aem/login":
+                    return self._json(jobs.aem_login(json.loads(self._body() or b"{}")))
+                if m := re.fullmatch(r"/api/runs/([\w-]+)/relink", p.path):
+                    return self._json(jobs.relink(m[1]))
                 if m := re.fullmatch(r"/api/runs/([\w-]+)/rerun", p.path):
                     return self._rerun(m[1])
                 if m := re.fullmatch(r"/api/runs/([\w-]+)/report", p.path):

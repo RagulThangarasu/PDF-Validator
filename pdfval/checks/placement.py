@@ -14,11 +14,20 @@ works for any graphic and any wording, with no special cases:
   * inline in both, but after a different word
   * a block figure placed after different text
 Reported in the images category (type 'placement').
+
+Containment: the box a graphic is drawn inside (a note / tip / warning panel, a
+framed callout – any filled or framed shape that also holds text) is identified on
+each side by the text in it. "Inside the note with “NOTE: …” in prod, outside it in
+stage" (or the reverse) is reported as type 'image outside box'.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
+import pymupdf
+
 from ..model import Doc, Finding, Image, Loc
-from . import Aligner, Unit, locs
+from . import Aligner, Unit, locs, snippet
 
 
 def relation(doc: Doc, rng: tuple[int, int], im: Image) -> tuple[str, int | None, int | None]:
@@ -108,4 +117,106 @@ def check(u: Unit) -> list[Finding]:
                 [Loc(x.page, x.bbox)] + locs(u.a, a_ctx), [Loc(y.page, y.bbox)] + locs(u.b, b_ctx),
                 {"kind": "placement", "property": "placement", "baseline": kind_a, "candidate": kind_b},
                 types=["placement"]))
+    findings += _containment(u, al, sev)
     return findings
+
+
+@lru_cache(maxsize=64)
+def _shapes(path: str, page: int) -> tuple[tuple[float, float, float, float], ...]:
+    """Tinted panels drawn on a page (note / tip / warning boxes, callouts): shapes filled
+    with a colour other than the white page. Table cells and frames (white or outline
+    only) are not boxes - tables are compared by the tables check. Empty for a page
+    without text (a web page screenshot)."""
+    try:
+        pg = pymupdf.open(path)[page]
+    except Exception:
+        return ()
+    if not pg.get_text("text").strip():
+        return ()
+    tinted, white = [], []
+    for d in pg.get_drawings():
+        r = d["rect"]
+        fill = d.get("fill")
+        if fill is None or r.width <= 1 or r.height <= 1:
+            continue
+        (tinted if any(round(c, 2) < 1 for c in fill) else white).append((r.x0, r.y0, r.x1, r.y1))
+    area = lambda b: max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    cover = lambda t: sum(area((max(t[0], w[0]), max(t[1], w[1]), min(t[2], w[2]), min(t[3], w[3]))) for w in white)
+    # a tinted shape mostly covered by white shapes is a table grid (the tint shows only as
+    # the lines between white cells), not a note panel
+    return tuple(t for t in tinted if cover(t) < 0.5 * area(t))
+
+
+def _center_in(b: tuple, box) -> bool:
+    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    return b[0] - 1 <= cx <= b[2] + 1 and b[1] - 1 <= cy <= b[3] + 1
+
+
+def _panels(doc: Doc, page: int, rng: tuple[int, int]) -> list[tuple[tuple, list[int]]]:
+    """Tinted panels on a page with the section's words inside them. A panel holding every
+    word of the page is the page background, not a note."""
+    page_words = [k for k in range(*rng) if doc.words[k].page == page and doc.words[k].norm]
+    out = []
+    for b in _shapes(doc.path, page):
+        words = [k for k in page_words if _center_in(b, doc.words[k].bbox)]
+        if words and len(words) < len(page_words):
+            out.append((b, words))
+    return out
+
+
+def _region(doc: Doc, words: list[int], page: int, rng: tuple[int, int]) -> tuple[tuple, bool] | None:
+    """Where a note's text is on this side: (the tinted panel holding most of it, True), or
+    else (the area its lines cover, False) for a note drawn with rules or no frame at all.
+    For the text area only the vertical extent counts: an icon or picture level with the
+    note's lines (beside them, or in a table's image column) belongs to it."""
+    on_page = [k for k in words if doc.words[k].page == page]
+    if not on_page:
+        return None
+    for b, inside in _panels(doc, page, rng):
+        if sum(k in set(inside) for k in on_page) >= 0.5 * len(on_page):
+            return b, True
+    boxes = [doc.lines[doc.words[k].line].bbox for k in on_page]
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)), False
+
+
+def _containment(u: Unit, al: Aligner, sev: str) -> list[Finding]:
+    """A graphic inside a note / box on one side but outside the same note on the other.
+    The note is known by its text: a tinted panel's words on one side, found through the
+    content alignment on the other side, where the note may be drawn differently (a panel,
+    rules above and below, or no frame) - so only the graphic's membership counts, not the
+    note's styling."""
+    out, done = [], set()
+    # the same words on both sides, including those that differ only in case / punctuation
+    # ("Tip" / "TIP:"), so a note's label line counts as part of the note
+    a2b = {**dict(u.style_pairs), **al.a2b}
+    b2a = {j: i for i, j in a2b.items()}
+    sides = ((u.a, u.b, a2b, u.a_range, u.b_range, "prod", "stage"),
+             (u.b, u.a, b2a, u.b_range, u.a_range, "stage", "prod"))
+    for x, y in u.image_pairs:
+        for k, (S, O, to_o, rs, ro, ns, no) in enumerate(sides):
+            im_s, im_o = (x, y) if k == 0 else (y, x)
+            for panel, words in _panels(S, im_s.page, rs):
+                mapped = [to_o[w] for w in words if w in to_o]
+                if not mapped or (id(x), id(y)) in done:
+                    continue
+                found = _region(O, mapped, im_o.page, ro)
+                region = found[0] if found else None
+                if found and not found[1]:  # text area: vertical extent only
+                    region = (float("-inf"), region[1], float("inf"), region[3])
+                in_s, in_o = _center_in(panel, im_s.bbox), region is not None and _center_in(region, im_o.bbox)
+                if in_s == in_o:
+                    continue
+                done.add((id(x), id(y)))
+                note = snippet(S, words, 10)
+                stage_in = in_s if ns == "stage" else in_o
+                msg = (f"Image moved into the note / box in stage: “{note}” – in prod the image is outside it"
+                       if stage_in else
+                       f"Image outside its note / box in stage: in prod it is inside the note “{note}”, in stage it is not")
+                box_s = [Loc(im_s.page, panel)]
+                box_o = [Loc(im_o.page, found[0])] if found else []
+                a_box, b_box = (box_s, box_o) if k == 0 else (box_o, box_s)
+                out.append(Finding(
+                    "assets", sev, msg, [Loc(x.page, x.bbox)] + a_box, [Loc(y.page, y.bbox)] + b_box,
+                    {"kind": "outside-box", "property": "placement"}, types=["image outside box"],
+                    links=[(Loc(x.page, x.bbox), Loc(y.page, y.bbox))]))
+    return out

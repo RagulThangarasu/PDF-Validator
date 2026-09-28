@@ -26,7 +26,7 @@
   .chip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 3px 10px; cursor: pointer; font: inherit; display: inline-flex; align-items: center; gap: 6px; }
   .chip[aria-pressed="false"] { opacity: .45; }
   .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
-  main { display: grid; grid-template-columns: 290px 1fr 1fr 360px; min-height: 0; }
+  main { display: grid; grid-template-columns: 290px minmax(0, 1fr) minmax(0, 1fr) 360px; min-height: 0; }
   aside, section.pane-wrap, #side { min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--panel); }
   .toolbar { padding: 8px 10px; border-bottom: 1px solid var(--line); display: flex; gap: 6px; align-items: center; }
   .toolbar input { flex: 1; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
@@ -49,7 +49,7 @@
   body.synced .guide { display: block; }
   .chip.sync[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
   .pane { overscroll-behavior: contain; }
-  .pane { position: relative; overflow: auto; flex: 1; background: #d9dce1; padding: 12px 16px; }
+  .pane { position: relative; overflow: auto; flex: 1; min-width: 0; background: #d9dce1; padding: 12px 16px; }
   .page { position: relative; margin: 0 auto 12px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
   .page canvas { position: absolute; inset: 0; }
   .page .pno { position: absolute; right: -2px; top: -2px; transform: translate(100%, 0); font-size: 10px; color: #555; padding-left: 3px; }
@@ -67,6 +67,8 @@
   @keyframes pulse { 50% { outline-color: transparent; } }
   .sec-marker { position: absolute; left: -10px; right: -10px; border-top: 2px solid var(--accent); z-index: 1; pointer-events: none; }
   .sec-marker span { position: absolute; left: 0; top: -18px; background: var(--accent); color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 3px 3px 0 0; white-space: nowrap; }
+  .out-scope { position: absolute; left: 0; right: 0; background: repeating-linear-gradient(135deg, rgba(0,0,0,.05) 0 8px, rgba(0,0,0,.09) 8px 16px); z-index: 1; pointer-events: none; }
+  .out-scope span { position: absolute; left: 8px; top: 6px; font-size: 11px; color: #555; background: #fff; padding: 1px 6px; border-radius: 3px; }
   .sec-end { position: absolute; left: -10px; right: -10px; border-top: 2px dashed var(--accent); opacity: .5; z-index: 1; pointer-events: none; }
   #side .tabs { display: flex; border-bottom: 1px solid var(--line); }
   #side .tabs button { flex: 1; padding: 9px; border: 0; background: none; font: inherit; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
@@ -84,6 +86,7 @@
   .finding .sev { font-weight: 700; text-transform: uppercase; font-size: 10px; }
   .sev.error { color: var(--fail); } .sev.warning { color: var(--warn); } .sev.info { color: var(--info); }
   .finding .msg { word-break: break-word; }
+  .finding .aem { font: 11px ui-monospace, Menlo, monospace; color: var(--muted); margin-top: 3px; word-break: break-all; }
   .finding.content { border-left-color: var(--c-content); } .finding.style { border-left-color: var(--c-style); }
   .finding.layout { border-left-color: var(--c-layout); } .finding.assets { border-left-color: var(--c-assets); }
   .finding.structure { border-left-color: var(--c-structure); }
@@ -102,6 +105,8 @@
   <span id="result" class="badge"></span>
   <div class="stats" id="stats"></div>
   <button class="chip sync" id="sync" aria-pressed="true" title="Scroll both PDFs together, aligned by matching text (s)">⇅ Sync scroll</button>
+  <label class="chip" title="Fit width: each document's pages fill their pane. Same text size: stage is drawn so its body text is as big as prod's (never wider than the pane)">Scale
+    <select id="scale" style="border:0;background:none;font:inherit"><option value="fit">Fit width</option><option value="text">Same text size</option></select></label>
   <div class="toggles" id="check-toggles"></div>
 </header>
 <main>
@@ -140,16 +145,22 @@ const state = { status: 'all', q: '', cats: new Set(CATS.map(c => c[0])), curren
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
 class Pane {
-  constructor(el, url) { this.el = el; this.url = url; this.pages = []; }
+  // range: [first, last] 0-based pages to show (a web page covers one chapter of the PDF)
+  // textScale(pdfPage viewport) -> scale: draw at a given text size instead of fitting the width
+  constructor(el, url, range = null) { this.el = el; this.url = url; this.range = range; this.pages = []; this.textScale = null; }
   async load() {
-    this.pdf = await pdfjsLib.getDocument({ url: this.url }).promise;
+    this.pdf = this.pdf || await pdfjsLib.getDocument({ url: this.url }).promise;
+    this.el.querySelectorAll('.page').forEach(n => n.remove());  // re-layout (scale changed)
+    this.pages = [];
     const width = this.el.clientWidth - 40;
     const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting && this.render(+e.target.dataset.index)),
                                         { root: this.el, rootMargin: '900px 0px' });
+    const [first, last] = this.range || [0, this.pdf.numPages - 1];
     for (let i = 0; i < this.pdf.numPages; i++) {
+      if (i < first || i > last) { this.pages.push(null); continue; }
       const p = await this.pdf.getPage(i + 1);
       const vp = p.getViewport({ scale: 1 });
-      const scale = width / vp.width;
+      const scale = this.textScale ? this.textScale(vp) : width / vp.width;
       const div = document.createElement('div');
       div.className = 'page'; div.dataset.index = i;
       div.style.width = vp.width * scale + 'px'; div.style.height = vp.height * scale + 'px';
@@ -172,6 +183,14 @@ class Pane {
       pg.div.classList.add('rendered');
     })();
     return pg.rendered;
+  }
+  shade(pos, before, label) {  // hatch the part of a page before/after `pos` (outside what is compared)
+    const pg = this.pages[pos.page]; if (!pg) return;
+    const d = document.createElement('div'), y = pos.y * pg.scale;
+    d.className = 'out-scope';
+    Object.assign(d.style, before ? { top: 0, height: y + 'px' } : { top: y + 'px', bottom: 0 });
+    d.innerHTML = `<span>${esc(label)}</span>`;
+    pg.div.appendChild(d);
   }
   clear() { this.el.querySelectorAll('.hl,.sec-marker,.sec-end').forEach(n => n.remove()); }
   box(loc, cls, fi, title) {
@@ -209,7 +228,8 @@ class Pane {
   }
 }
 
-const A = new Pane($('#pane-a'), 'baseline.pdf');
+const SCOPE = DATA.meta.baseline.scope;  // web page run: the chapter of the PDF the page covers
+const A = new Pane($('#pane-a'), 'baseline.pdf', SCOPE ? SCOPE.pages : null);
 const B = new Pane($('#pane-b'), 'candidate.pdf');
 
 // ---- synchronised scrolling ------------------------------------------------
@@ -221,6 +241,12 @@ const FOCUS = 0.35;
 const SYNC = { on: true, paused: 0, xa: [], xb: [], raf: 0 };
 
 function buildSync() {
+  // room after the last page on both sides, so either pane can bring its end up to the
+  // focus line: a short document (one web page) scrolls along instead of standing still
+  [A, B].forEach(P => {
+    P.tail = P.tail || P.el.appendChild(Object.assign(document.createElement('div'), { className: 'tail' }));
+    P.tail.style.height = P.el.clientHeight * (1 - FOCUS) + 'px';
+  });
   const xa = [], xb = [];
   for (const [pa, ya, pb, yb] of DATA.sync || []) {
     const a = A.pos(pa, ya), b = B.pos(pb, yb);
@@ -286,6 +312,40 @@ function setSync(on) {
 }
 $('#sync').onclick = () => setSync(!SYNC.on);
 
+// ---- scale: both panes at a comparable size ----------------------------------
+// fit:  each document's pages fill their pane (prod and stage alike, whatever their page size)
+// text: stage drawn so its body text is as large as prod's, never wider than its pane; used only
+//       when both body sizes are plausible, otherwise it falls back to fit width
+let SCALE_MODE = 'fit';
+async function layout() {
+  A.textScale = B.textScale = null;
+  await A.load();
+  let note = 'Each document fits its pane width';
+  if (SCALE_MODE === 'text') {
+    const a = A.pages.find(Boolean), ra = DATA.meta.baseline.body_size, rb = DATA.meta.candidate.body_size;
+    if (a && ra >= 5 && rb >= 5 && ra / rb > 0.4 && ra / rb < 2.5) {
+      const fitB = vp => (B.el.clientWidth - 40) / vp.width;
+      B.textScale = vp => Math.min(a.scale * ra / rb, fitB(vp));
+      note = `Stage body text drawn at prod's size (${rb}pt → ${ra}pt), never wider than the pane`;
+    } else {
+      note = 'Same text size is not available for this run (text sizes could not be measured): fit width';
+    }
+  }
+  await B.load();
+  if (SCOPE) {
+    A.shade(SCOPE.start, true, 'Not part of this web page');
+    A.shade(SCOPE.end, false, 'Not part of this web page');
+  }
+  $('#scale').parentElement.title = note;
+}
+$('#scale').onchange = async e => {
+  SCALE_MODE = e.target.value;
+  try { localStorage.setItem('pdfval.scale', SCALE_MODE); } catch (err) { /* storage blocked */ }
+  await layout();
+  buildSync();
+  if (state.current) await goto(state.current.id);
+};
+
 function header() {
   const s = DATA.summary;
   $('#result').textContent = s.result; $('#result').className = 'badge ' + s.result;
@@ -340,7 +400,8 @@ function renderSide() {
       const pa = f.baseline[0] ? 'p.' + (f.baseline[0].page + 1) : '—', pb = f.candidate[0] ? 'p.' + (f.candidate[0].page + 1) : '—';
       return `<div class="finding ${f.check} ${i === state.finding ? 'active' : ''}" data-f="${i}">
         <div class="top">${f.critical ? '<span class="crit">critical</span>' : ''}<span class="sev ${f.severity}">${f.severity}</span><span>${f.category} · ${esc((f.types || []).join(', '))}</span><span style="margin-left:auto">${pa} ↔ ${pb}</span></div>
-        <div class="msg">${esc(f.message)}</div></div>`;
+        <div class="msg">${esc(f.message)}</div>${f.aem ? `<div class="aem">${esc(f.aem.topic)} · ${f.aem.url
+          ? `<a href="${esc(f.aem.url)}" target="_blank" rel="noopener" title="Open the topic in AEM (new tab)">${esc(f.aem.guid)} ↗</a>` : esc(f.aem.guid)}</div>` : ''}</div>`;
     }).join('') || '<div class="empty">No findings for the selected checks. ✓</div>');
 }
 
@@ -414,7 +475,9 @@ window.pdfval = { ready: false, data: DATA, sections: () => DATA.sections.map(s 
 (async () => {
   header(); renderList(); renderSide();
   try {
-    await Promise.all([A.load(), B.load()]);
+    try { SCALE_MODE = localStorage.getItem('pdfval.scale') || 'fit'; } catch (e) { /* storage blocked */ }
+    $('#scale').value = SCALE_MODE;
+    await layout();
   } catch (err) {
     $('#loading').innerHTML = `Could not load PDFs (${esc(err.message)}).<br>Open this report through <code>python -m pdfval serve &lt;report-dir&gt;</code>, not file://`;
     return;
