@@ -378,11 +378,19 @@ def make_handler(jobs: Jobs, root: Path):
             from ..report import pdf_report
             run_dir = jobs.path(jid)
             result = json.loads((run_dir / "results.json").read_text())
+            label = re.sub(r"[^\w.-]+", "-", opts.get("label") or "custom").strip("-")[:40] or "custom"
+            if opts.get("format") == "csv":  # the same selection as a spreadsheet
+                from ..report import writer
+                path = run_dir / f"_custom_{uuid.uuid4().hex[:8]}.csv"
+                writer.write_issues_csv(result, pdf_report.select_issues(result, opts.get("filter") or {}), path)
+                try:
+                    return self._file(path, download=f"parity-issues-{jid}-{label}.csv")
+                finally:
+                    path.unlink(missing_ok=True)
             name = f"_custom_{uuid.uuid4().hex[:8]}.pdf"
             path = pdf_report.build(result, run_dir, options={"include": opts.get("include") or {},
                                                               "filter": opts.get("filter") or {}}, filename=name)
             try:
-                label = re.sub(r"[^\w.-]+", "-", opts.get("label") or "custom").strip("-")[:40] or "custom"
                 return self._file(path, download=f"parity-report-{jid}-{label}.pdf")
             finally:
                 path.unlink(missing_ok=True)

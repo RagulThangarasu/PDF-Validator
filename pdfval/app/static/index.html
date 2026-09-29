@@ -9,7 +9,7 @@
     --bg: #f4f5f7; --panel: #fff; --ink: #1b2130; --muted: #667085; --line: #e4e7ec; --soft: #f9fafb;
     --accent: #0f766e; --accent-ink: #fff; --accent-soft: #e6f4f2;
     --fail: #d92d20; --warn: #b54708; --pass: #067647; --info: #475467;
-    --c-structure: #2563eb; --c-content: #e11d48; --c-style: #7c3aed; --c-layout: #ea580c; --c-assets: #0d9488; --c-tables: #0284c7; --c-integrity: #b91c1c; --k-content: #e11d48; --k-images: #0d9488; --k-tables: #0284c7; --k-structure: #2563eb; --k-links: #b91c1c; --k-css: #7c3aed; --k-toc: #9333ea; --crit: #b42318;
+    --c-structure: #2563eb; --c-content: #dc2626; --c-style: #7c3aed; --c-layout: #ea580c; --c-assets: #0d9488; --c-tables: #0284c7; --c-integrity: #b91c1c; --k-content: #dc2626; --k-images: #0d9488; --k-tables: #0284c7; --k-structure: #2563eb; --k-links: #b91c1c; --k-css: #7c3aed; --k-toc: #9333ea; --crit: #b42318;
     --radius: 10px; --shadow: 0 1px 2px rgb(16 24 40 / .06), 0 1px 3px rgb(16 24 40 / .08);
   }
   /* theme: light by default (same as the report viewer); dark when chosen, or when
@@ -108,6 +108,24 @@
   figure { margin: 0; }
   figcaption { font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; }
   .shot { width: 100%; border: 1px solid var(--line); border-radius: 6px; cursor: zoom-in; background: #fff; display: block; min-height: 60px; }
+  /* report picker: choose the issue types / severities / parts before downloading */
+  dialog.rpt { border: 0; border-radius: 12px; padding: 0; width: min(960px, 96vw); max-height: 90vh; background: var(--panel); color: var(--ink); box-shadow: 0 24px 64px rgb(0 0 0 / .3); }
+  dialog.rpt::backdrop { background: rgb(10 12 16 / .55); }
+  .rpt form { display: flex; flex-direction: column; max-height: 90vh; margin: 0; }
+  .rpt .rh, .rpt .rf { padding: 14px 18px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .rpt .rh { border-bottom: 1px solid var(--line); } .rpt .rh h2 { margin: 0; font-size: 17px; flex: 1; }
+  .rpt .rf { border-top: 1px solid var(--line); justify-content: flex-end; }
+  .rpt .rf .count { margin-right: auto; font-weight: 700; }
+  .rpt .rb { overflow: auto; padding: 14px 18px; display: grid; gap: 12px; }
+  .rpt fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px 10px; margin: 0; }
+  .rpt legend { padding: 0 4px; font-weight: 700; }
+  .rpt legend label { font-size: 14px; }
+  .rpt .types { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 3px 16px; margin-top: 4px; }
+  .rpt label { display: flex; gap: 7px; align-items: center; font-size: 13px; cursor: pointer; }
+  .rpt .n { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .rpt .row { display: flex; flex-wrap: wrap; gap: 6px 20px; }
+  .rpt .muted { color: var(--muted); font-size: 12px; }
+  .rpt select { font: inherit; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
   .lightbox { position: fixed; inset: 0; background: rgb(10 12 16 / .96); z-index: 20; display: flex; flex-direction: column; padding: 18px; gap: 12px; }
   .lightbox .lb-head { color: #fff; display: flex; gap: 12px; align-items: center; }
   .lightbox .lb-head .msg { flex: 1; }
@@ -243,20 +261,6 @@
   @media (max-width: 900px) { .tocsum { grid-template-columns: 1fr; } .toc .tochead, .toc .tocrow { grid-template-columns: 30px 1fr; } .toc .status { grid-column: 2; } }
   .warnbox { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 12px 0 0; padding: 12px 14px; border-radius: var(--radius);
              border: 1px solid color-mix(in srgb, var(--warn) 50%, var(--line)); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); }
-  .rdlg { border: 1px solid var(--line); border-radius: 12px; padding: 0; width: min(920px, 94vw); background: var(--panel); color: var(--ink); box-shadow: 0 20px 60px rgb(0 0 0 / .25); }
-  .rdlg::backdrop { background: rgb(15 18 24 / .45); }
-  .rdlg form { padding: 18px 20px; display: grid; gap: 14px; }
-  .rdlg h2 { margin: 0; }
-  .rgrid { display: grid; grid-template-columns: 300px 1fr; gap: 16px; }
-  @media (max-width: 760px) { .rgrid { grid-template-columns: 1fr; } }
-  .rdlg fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin: 0; display: grid; gap: 2px; align-content: start; }
-  .rdlg legend { font-size: 12px; font-weight: 700; color: var(--muted); padding: 0 4px; text-transform: uppercase; letter-spacing: .04em; }
-  .rdlg .custom { display: none; gap: 6px; margin-top: 6px; padding-top: 8px; border-top: 1px dashed var(--line); }
-  .rdlg .custom.on { display: grid; }
-  .rdlg .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-  .rdlg .chips .chip { cursor: pointer; } .rdlg .chips input { margin: 0; }
-  .rdlg select[multiple] { width: 100%; }
-  .rfoot { display: flex; gap: 10px; align-items: center; border-top: 1px solid var(--line); padding-top: 12px; }
   .rnav { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
   .badge.mode { background: var(--soft); color: var(--muted); border: 1px solid var(--line); font-size: 10px; vertical-align: middle; }
   .modesw button { padding: 8px 16px; font-weight: 600; }
@@ -657,7 +661,7 @@ async function viewRun(id, qs) {
         <a class="btn primary" href="${base}index.html" target="_blank" rel="noopener">Side-by-side viewer ↗</a>
         ${s.genuine ? `<a class="btn ${s.genuine.total ? 'danger' : ''}" href="${base}genuine-issues.pdf?download=${encodeURIComponent('genuine-issues-' + id + '.pdf')}"
             title="Only the real problems: missing/duplicated sections, missing/broken/misplaced images, missing data, table and link problems — each with a description and prod/stage screenshots">⬇ Genuine issues (${s.genuine.total})</a>` : ''}
-        <button class="btn" data-report title="Choose what goes into the PDF report">⬇ PDF report…</button>
+        <button class="btn" data-report title="Choose the issue types, severities and parts, then download a PDF (with prod/stage screenshots) or CSV">⬇ Report…</button>
         <a class="btn" href="/api/runs/${id}/source?side=both" title="Everything in the prod${isWeb ? '' : ' and stage'} PDF: raw data (text with fonts and positions, tables, images, links, attachments, fonts) and the document rebuilt as AEM Guides DITA source${isWeb ? '' : '; stage also gets the real topic files from AEM when you are logged in'}. Building takes a few seconds.">⬇ Source${isWeb ? ' (prod)' : ' (prod + stage)'}</a>
         <details class="more"><summary class="btn" aria-label="More downloads">⋯</summary><div class="menu">
           ${s.genuine ? `<a href="${base}genuine-issues.pdf?download=${encodeURIComponent('genuine-issues-' + id + '.pdf')}">⬇ Genuine issues (PDF, with screenshots)</a>
@@ -665,8 +669,6 @@ async function viewRun(id, qs) {
           ${d.site?.rows ? `<a href="${base}site-navigation.csv?download=${encodeURIComponent('site-navigation-' + id + '.csv')}">⬇ Site navigation (CSV / Excel)</a>` : ''}
           <a href="/api/runs/${id}/source?side=baseline">⬇ Prod source (DITA + raw data)</a>
           ${isWeb ? '' : `<a href="/api/runs/${id}/source?side=candidate">⬇ Stage source (DITA + raw data + AEM files)</a>`}
-          <a href="${base}report.pdf?download=${encodeURIComponent('parity-report-' + id + '-full.pdf')}">⬇ Full PDF report (everything)</a>
-          <a href="${base}report.pdf" target="_blank" rel="noopener">View full PDF report ↗</a>
           <a href="${base}results.json?download=results.json">results.json</a>
           <a href="${base}junit.xml?download=junit.xml">junit.xml</a></div></details>
       </div></div>
@@ -694,7 +696,7 @@ async function viewRun(id, qs) {
     </div>
     <div id="tab"></div>`;
   app.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { R.tab = b.dataset.tab; writeState(); renderTab(); });
-  app.querySelector('[data-report]').onclick = openReportDialog;
+  app.querySelector('[data-report]').onclick = () => downloadReport();
   app.querySelectorAll('[data-kpi]').forEach(b => b.onclick = () => {
     const k = b.dataset.kpi;
     Object.assign(R, { tab: 'issues', types: new Set(), sevs: new Set(), section: '', q: '', shown: 60, open: new Set(), sel: 0,
@@ -1071,7 +1073,7 @@ function renderTocPages() {
         return `<div class="tpage"><img src="${base}${im.src}" alt="${label} TOC page ${im.page}" loading="lazy"><span class="tpno">p.${im.page}</span>${boxes}</div>`;
       }).join('') || outlineList(side)}</div></div>`;
   };
-  $('#tocbody').innerHTML = `<div class="tpages">${col('baseline', 'Prod TOC')}${col('candidate', R.data.meta.mode === 'html' ? 'Web page outline' : 'Stage TOC')}</div>`;
+  $('#tocbody').innerHTML = `<div class="tpages">${col('baseline', 'Prod TOC')}${col('candidate', t.source.candidate === 'navigation' ? 'Stage TOC (left navigation)' : R.data.meta.mode === 'html' ? 'Web page outline' : 'Stage TOC')}</div>`;
   // the two columns scroll together, aligned by entries present on both sides
   const [L, Rt] = [...document.querySelectorAll('.tscroll')];
   const pts = () => t.rows.filter(r => r.baseline && r.candidate).map(r => {
@@ -1097,11 +1099,17 @@ function renderTocPages() {
 }
 
 // a side without a printed TOC (a web page, or a PDF with bookmarks only): show its outline as a list
+// content differences: the quoted prod / stage words in red
+function msgHtml(f) {
+  return f.check !== 'content' ? esc(f.message)
+    : esc(f.message).replace(/“([^”]*)”/g, '“<b style="color:var(--c-content)">$1</b>”');
+}
+
 function outlineList(side) {
   const t = R.data.toc;
   const items = t.rows.map((r, k) => [r, k]).filter(([r]) => r[side]);
   if (!items.length) return '<div class="empty">No TOC on this side.</div>';
-  return `<div class="toutline"><div class="small muted" style="margin-bottom:8px">${t.source[side] === 'bookmarks' ? (R.data.meta.mode === 'html' ? 'Heading outline of the web page (h1–h6)' : 'PDF bookmarks (no printed TOC)') : ''}</div>
+  return `<div class="toutline"><div class="small muted" style="margin-bottom:8px">${t.source[side] === 'navigation' ? 'Left navigation of the web guide' : t.source[side] === 'bookmarks' ? (R.data.meta.mode === 'html' ? 'Heading outline of the web page (h1–h6)' : 'PDF bookmarks (no printed TOC)') : ''}</div>
     ${items.map(([r, k]) => { const e = r[side];
       return `<div class="tbox ts-${TOC_STATUS[r.status]} ${tocPass(r) ? '' : 'dim'}" data-trow="${k}" title="#${r.pos[side]} · L${e.level} · ${esc(r.status)}"
         style="position:relative;margin:3px 0 3px ${(e.level - 1) * 22 + 26}px;padding:4px 8px;background:#fff"><span class="tpos">${r.pos[side]}</span>
@@ -1184,11 +1192,11 @@ function renderIssues(keepScroll) {
       rows.push(`<article class="issue card-issue ${f.critical ? 'is-crit' : ''}" style="border-left-color:var(--k-${f.category})">
         <div class="meta">${tags}<span>${esc(s.title)}</span><span class="sp">prod ${pa} ⇆ stage ${pc}</span>
           <a href="${viewerLink(f, s)}" target="_blank" rel="noopener">viewer ↗</a></div>
-        <div class="msg">${esc(f.message)}</div>${sourceHtml(f)}${shotsHtml(f, i)}</article>`);
+        <div class="msg">${msgHtml(f)}</div>${sourceHtml(f)}${shotsHtml(f, i)}</article>`);
     } else {
       const open = R.open.has(i);
       rows.push(`<div class="issue-row ${open ? 'open' : ''} ${R.sel === i ? 'sel' : ''} ${f.critical ? 'is-crit' : ''}" data-idx="${i}" tabindex="-1" style="--kc:var(--k-${f.category})">
-        <div class="line"><span class="chev">${open ? '▾' : '▸'}</span>${tags}<span class="m">${esc(f.message)}</span>
+        <div class="line"><span class="chev">${open ? '▾' : '▸'}</span>${tags}<span class="m">${msgHtml(f)}</span>
           <span class="where">${esc(s.title)}</span><span class="pages">${pa} ⇆ ${pc}</span></div>
         ${open ? `<div class="detail">${sourceHtml(f)}${shotsHtml(f, i)}<div class="dactions"><a class="btn sm" href="${viewerLink(f, s)}" target="_blank" rel="noopener">Open this issue in the viewer ↗</a>
           <button class="btn sm" data-sec="${s.id}">Only this section</button><span class="muted small">#${f.id}</span></div></div>` : ''}
@@ -1216,99 +1224,112 @@ function onKeys(e) {
   }
 }
 
-// ---------------- PDF report with chosen options
-const REPORT_PARTS = [['summary', 'Summary (result, content %, issues by category)'], ['genuine', 'Genuine issues table (with descriptions)'],
-  ['critical', 'Critical issues table'],
-  ['sections', 'Sections table'], ['toc', 'TOC comparison (prod vs candidate)'], ['stylemap', 'Global style map (CSS)'],
-  ['issues', 'Issue details'], ['screenshots', 'Prod / candidate screenshots with each issue']];
+// ---------------- PDF / CSV report: pick the issue types, severities and parts first, then download
+const REPORT_PARTS = [['summary', 'Summary (documents, verdicts)'], ['genuine', 'Genuine issues overview'], ['critical', 'Critical issues table'],
+  ['sections', 'Per-section results'], ['toc', 'TOC comparison'], ['stylemap', 'Font / style map'], ['issues', 'Issue list'],
+  ['screenshots', 'Prod / stage screenshots']];
+const typesOf = f => f.types && f.types.length ? f.types : ['other'];
 
-function openReportDialog() {
-  const d = R.data, all = allIssues();
-  const hasFilters = R.cat !== 'all' || R.types.size || R.sevs.size || R.critOnly || R.section || R.q;
+function downloadReport() {
+  const all = allIssues();
+  const cats = CATS.map(([c, l]) => ({ c, l, xs: all.filter(x => x.f.category === c) })).filter(g => g.xs.length);
+  const cnt = (xs, pred) => xs.filter(pred).length;
+  const sevs = ['error', 'warning', 'info'];
+  const box = (name, val, label, n, checked = true) =>
+    `<label><input type="checkbox" name="${name}" value="${esc(val)}" ${checked ? 'checked' : ''}>${esc(label)}${n != null ? `<span class="n">${n}</span>` : ''}</label>`;
   const dlg = document.createElement('dialog');
-  dlg.className = 'rdlg';
+  dlg.className = 'rpt';
   dlg.innerHTML = `<form method="dialog">
-    <h2>Download PDF report</h2>
-    <div class="rgrid">
-      <fieldset><legend>Include</legend>
-        ${REPORT_PARTS.map(([k, l]) => `<label class="chk"><input type="checkbox" name="inc" value="${k}" ${k !== 'stylemap' || d.style_map.length ? 'checked' : ''}><span>${l}</span></label>`).join('')}
-      </fieldset>
-      <fieldset><legend>Issues in the report</legend>
-        <label class="chk"><input type="radio" name="scope" value="all" ${hasFilters ? '' : 'checked'}><span>All issues</span><span class="n">${all.length}</span></label>
-        <label class="chk"><input type="radio" name="scope" value="genuine"><span>Genuine issues only</span><span class="n">${all.filter(x => x.f.genuine).length}</span></label>
-        <label class="chk"><input type="radio" name="scope" value="current" ${hasFilters ? 'checked' : ''} ${hasFilters ? '' : 'disabled'}><span>Current filters from the Issues tab</span><span class="n">${all.filter(x => matches(x)).length}</span></label>
-        <label class="chk"><input type="radio" name="scope" value="custom"><span>Choose…</span></label>
-        <div class="custom">
-          <div class="sh">Category</div>
-          <div class="chips">${CATS.map(([c, l]) => `<label class="chip opt"><input type="checkbox" name="cat" value="${c}"> ${l} <b>${all.filter(x => x.f.category === c).length}</b></label>`).join('')}</div>
-          <div class="sh">Severity</div>
-          <div class="chips">${SEVS.map(v => `<label class="chip opt"><input type="checkbox" name="sev" value="${v}"> ${v} <b>${all.filter(x => x.f.severity === v).length}</b></label>`).join('')}
-            <label class="chip opt"><input type="checkbox" name="crit"> critical only <b>${all.filter(x => x.f.critical).length}</b></label></div>
-          <div class="sh">Types <span class="muted small">(optional)</span></div>
-          <div class="chips" id="rtypes"></div>
-          <div class="sh">Sections</div>
-          <select name="secs" multiple size="6" aria-label="Sections (none selected = all)">${d.sections.map(s => `<option value="${s.id}">${esc(s.title)} (${s.findings.length})</option>`).join('')}</select>
-          <div class="small muted">None selected = all sections · Cmd/Ctrl-click to pick several</div>
-        </div>
-      </fieldset>
+    <div class="rh"><h2>Download report</h2>
+      <button type="button" class="btn sm" data-all>Select all</button><button type="button" class="btn sm" data-none>Clear</button>
+      <button type="button" class="btn sm" data-cur title="Tick what the Issues tab currently shows (category, types, severity, critical)">Use Issues tab filters</button></div>
+    <div class="rb">
+      <div class="muted">Pick the issue types to include. Each type shows how many issues it has in this run; the report holds exactly the issues counted below.</div>
+      ${cats.map(g => {
+        const types = [...new Set(g.xs.flatMap(x => typesOf(x.f)))].sort();
+        return `<fieldset data-cat="${g.c}"><legend>${box('cat', g.c, g.l, g.xs.length)}</legend>
+          <div class="types">${types.map(t => box('type', g.c + '|' + t, t, cnt(g.xs, x => typesOf(x.f).includes(t)))).join('')}</div></fieldset>`;
+      }).join('')}
+      <fieldset><legend>Severity and flags</legend><div class="row">
+        ${sevs.map(v => box('sev', v, v[0].toUpperCase() + v.slice(1), cnt(all, x => x.f.severity === v))).join('')}
+        ${box('crit', '1', 'Critical only', cnt(all, x => x.f.critical), false)}
+        ${box('gen', '1', 'Genuine issues only', cnt(all, x => x.f.genuine), false)}
+        ${box('shown', '1', 'Only issues matching the Issues tab search / section / topic', null, false)}</div></fieldset>
+      <fieldset><legend>Include in the PDF</legend><div class="row">${REPORT_PARTS.map(([k, l]) => box('part', k, l, null)).join('')}</div></fieldset>
     </div>
-    <div class="rfoot"><span id="rcount" class="muted"></span><span class="spacer"></span><span id="rstatus" class="small muted"></span>
-      <button class="btn" value="cancel">Cancel</button><button class="btn primary" id="rgo" value="default">⬇ Download PDF</button></div>
-  </form>`;
+    <div class="rf"><span class="count"></span>
+      <label>Format <select name="format"><option value="pdf">PDF (with screenshots)</option><option value="csv">CSV / Excel</option></select></label>
+      <button type="button" class="btn" data-cancel>Cancel</button><button type="button" class="btn primary" data-go>⬇ Download</button></div></form>`;
   document.body.appendChild(dlg);
-  const f = dlg.querySelector('form');
-  const vals = n => [...f.querySelectorAll(`[name="${n}"]:checked`)].map(x => x.value);
-  const filter = () => {
-    const scope = f.scope.value;
-    if (scope === 'all') return {};
-    if (scope === 'genuine') return { genuine_only: true };
-    if (scope === 'current') return { categories: R.cat !== 'all' ? [R.cat] : [], types: [...R.types], severities: [...R.sevs],
-                                      critical_only: R.critOnly, sections: R.section ? [R.section] : [], q: R.q };
-    return { categories: vals('cat'), types: vals('type'), severities: vals('sev'), critical_only: f.crit.checked,
-             sections: [...f.secs.selectedOptions].map(o => o.value) };
+  const $$ = sel => [...dlg.querySelectorAll(sel)];
+  const on = name => new Set($$(`input[name="${name}"]:checked`).map(i => i.value));
+  const picked = () => {
+    const types = on('type'), sv = on('sev'), crit = on('crit').size, gen = on('gen').size, shown = on('shown').size;
+    return all.filter(x => sv.has(x.f.severity) && (!crit || x.f.critical) && (!gen || x.f.genuine)
+      && typesOf(x.f).some(t => types.has(x.f.category + '|' + t)) && (!shown || matches(x)));
   };
-  const count = flt => all.filter(({ f: x, s }) => (!flt.categories?.length || flt.categories.includes(x.category))
-    && (!flt.types?.length || x.types.some(t => flt.types.includes(t))) && (!flt.severities?.length || flt.severities.includes(x.severity))
-    && (!flt.critical_only || x.critical) && (!flt.genuine_only || x.genuine) && (!flt.sections?.length || flt.sections.includes(s.id))
-    && (!flt.q || x.message.toLowerCase().includes(flt.q.toLowerCase()) || s.title.toLowerCase().includes(flt.q.toLowerCase()))).length;
-  const refresh = () => {
-    f.querySelector('.custom').classList.toggle('on', f.scope.value === 'custom');
-    // type chips for the chosen categories
-    const cats = vals('cat'), keep = new Set(vals('type')), tc = {};
-    all.filter(x => !cats.length || cats.includes(x.f.category)).forEach(x => x.f.types.forEach(t => tc[t] = (tc[t] || 0) + 1));
-    $('#rtypes').innerHTML = Object.entries(tc).sort((a, b) => b[1] - a[1]).slice(0, 40)
-      .map(([t, n]) => `<label class="chip opt"><input type="checkbox" name="type" value="${esc(t)}" ${keep.has(t) ? 'checked' : ''}> ${esc(t)} <b>${n}</b></label>`).join('');
-    const inc = vals('inc');
-    const n = inc.includes('issues') ? count(filter()) : 0;
-    $('#rcount').textContent = inc.includes('issues') ? `${n} issue(s) will be included` + (inc.includes('screenshots') ? ' with screenshots' : '') : 'No issue details';
-    f.querySelector('[value="screenshots"]').disabled = !inc.includes('issues');
-    $('#rgo').disabled = !inc.length;
+  const sync = () => {  // category box = all / some / none of its types
+    $$('fieldset[data-cat]').forEach(fs => {
+      const ts = [...fs.querySelectorAll('input[name="type"]')], n = ts.filter(i => i.checked).length, c = fs.querySelector('input[name="cat"]');
+      c.checked = n === ts.length; c.indeterminate = n > 0 && n < ts.length;
+    });
+    const n = picked().length;
+    dlg.querySelector('.count').textContent = `${n} of ${all.length} issue(s) will be in the report`;
+    dlg.querySelector('[data-go]').disabled = !n;
   };
-  f.onchange = e => { if (e.target.name !== 'type') refresh(); else refresh(); };
-  refresh();
-  dlg.addEventListener('close', () => dlg.remove());
-  f.onsubmit = async e => {
-    if (e.submitter?.value === 'cancel') return;
-    e.preventDefault();
-    const include = Object.fromEntries(REPORT_PARTS.map(([k]) => [k, vals('inc').includes(k)]));
-    const flt = filter();
-    const label = f.scope.value === 'all' ? 'all' : f.scope.value === 'genuine' ? 'genuine' : [...(flt.categories || []), ...(flt.severities || []), flt.critical_only ? 'critical' : ''].filter(Boolean).join('-') || 'filtered';
-    $('#rgo').disabled = true; $('#rstatus').textContent = 'Building the report…';
-    try {
-      const res = await fetch(`/api/runs/${R.job.id}/report`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                                                  body: JSON.stringify({ include, filter: flt, label }) });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
-      const blob = await res.blob();
-      const name = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'parity-report.pdf';
-      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-      dlg.close();
-    } catch (err) {
-      $('#rstatus').textContent = 'Failed: ' + err.message; $('#rgo').disabled = false;
-    }
+  dlg.addEventListener('change', e => {
+    if (e.target.name === 'cat') e.target.closest('fieldset').querySelectorAll('input[name="type"]').forEach(i => { i.checked = e.target.checked; });
+    sync();
+  });
+  const setAll = v => { $$('input[name="type"], input[name="sev"]').forEach(i => { i.checked = v; }); sync(); };
+  dlg.querySelector('[data-all]').onclick = () => setAll(true);
+  dlg.querySelector('[data-none]').onclick = () => setAll(false);
+  dlg.querySelector('[data-cur]').onclick = () => {
+    $$('input[name="type"]').forEach(i => {
+      const [c, t] = i.value.split('|');
+      i.checked = (R.cat === 'all' || R.cat === c) && (!R.types.size || R.types.has(t));
+    });
+    $$('input[name="sev"]').forEach(i => { i.checked = !R.sevs.size || R.sevs.has(i.value); });
+    dlg.querySelector('input[name="crit"]').checked = !!R.critOnly;
+    dlg.querySelector('input[name="shown"]').checked = !!(R.q || R.section || R.topic);
+    sync();
+  };
+  const close = () => { dlg.close(); dlg.remove(); };
+  dlg.querySelector('[data-cancel]').onclick = close;
+  dlg.addEventListener('cancel', () => setTimeout(() => dlg.remove()));
+  dlg.querySelector('[data-go]').onclick = async e => {
+    const list = picked(), types = on('type'), totalTypes = $$('input[name="type"]').length;
+    const tnames = [...new Set([...types].map(v => v.split('|')[1]))];
+    const note = [types.size === totalTypes ? 'all issue types' : 'types: ' + tnames.join(', '),
+      on('sev').size === 3 ? '' : 'severity: ' + [...on('sev')].join(', '),
+      on('crit').size ? 'critical only' : '', on('gen').size ? 'genuine issues only' : '',
+      on('shown').size ? 'Issues tab search / section' : ''].filter(Boolean).join('; ');
+    const parts = on('part'), include = Object.fromEntries(REPORT_PARTS.map(([k]) => [k, parts.has(k)]));
+    const format = dlg.querySelector('select[name="format"]').value;
+    const label = types.size === totalTypes && !on('crit').size && !on('gen').size && on('sev').size === 3 && !on('shown').size ? 'all'
+      : tnames.length <= 3 ? tnames.join('-') : 'selected';
+    await sendReport(e.currentTarget, { include, filter: { ids: list.map(x => x.f.id), note }, label, format });
+    close();
   };
   dlg.showModal();
+  sync();
+}
+
+async function sendReport(btn, body) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = body.format === 'csv' ? 'Building the CSV…' : 'Building the report…';
+  try {
+    // built from this run's results, so a run made before the report order changed gets it too
+    const res = await fetch(`/api/runs/${R.job.id}/report`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                              body: JSON.stringify(body) });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    const blob = await res.blob();
+    const name = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'parity-report.pdf';
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (err) { alert('Report failed: ' + err.message); }
+  finally { btn.disabled = false; btn.textContent = label; }
 }
 
 const kindNote = k => k === 'aligned' ? ' · not present — aligned position' : k === 'section' ? ' · not present — section start'

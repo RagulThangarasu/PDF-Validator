@@ -69,7 +69,7 @@ CHROME_JS = r"""
       const active = a.getAttribute('aria-current') && a.getAttribute('aria-current') !== 'false' ||
                      ACTIVE.test(a.className || '') || (li && ACTIVE.test(li.className || '') && li.querySelector('a[href]') === a);
       const depth = minList < 99 && lists.some(n => n !== minList) ? lists[k] - minList : Math.round((xs[k] - minX) / 12) > 0 ? 1 : 0;
-      return { text: txt(a), href: a.href, raw: a.getAttribute('href'), depth, active: !!active, visible: visible(a) };
+      return { text: txt(a), href: a.href, raw: a.getAttribute('href'), depth, active: !!active, visible: visible(a), box: box(a) };
     });
   };
   // left navigation (table of contents)

@@ -9,7 +9,7 @@
   :root {
     --bg: #f5f6f8; --panel: #ffffff; --ink: #1d2330; --muted: #6a7282; --line: #e3e6eb;
     --fail: #d92d20; --warn: #dc8a00; --pass: #16a34a; --info: #64748b;
-    --c-content: #e11d48; --c-style: #7c3aed; --c-layout: #ea580c; --c-assets: #0d9488; --c-structure: #2563eb; --c-tables: #0284c7; --c-integrity: #b91c1c;
+    --c-content: #dc2626; --c-style: #7c3aed; --c-layout: #ea580c; --c-assets: #0d9488; --c-structure: #2563eb; --c-tables: #0284c7; --c-integrity: #b91c1c;
     --accent: #0f766e;
   }
   * { box-sizing: border-box; }
@@ -139,7 +139,10 @@ const DATA = JSON.parse($('#pdfval-data').textContent);
 const CHECKS = ['structure', 'content', 'tables', 'assets', 'integrity', 'style', 'layout'];
 const CATS = [['content', 'Content'], ['images', 'Images'], ['tables', 'Tables'], ['toc', 'TOC'], ['structure', 'Structure'],
               ['links', 'Links & rendering'], ['css', 'CSS / layout']];
-const CAT_COLOR = { toc: '#9333ea', content: '#e11d48', images: '#0d9488', tables: '#0284c7', structure: '#2563eb', links: '#b91c1c', css: '#7c3aed' };
+// content differences: the quoted prod / stage words in red
+const msgHtml = f => f.check !== 'content' ? esc(f.message)
+  : esc(f.message).replace(/“([^”]*)”/g, '“<b style="color:var(--c-content)">$1</b>”');
+const CAT_COLOR = { toc: '#9333ea', content: '#dc2626', images: '#0d9488', tables: '#0284c7', structure: '#2563eb', links: '#b91c1c', css: '#7c3aed' };
 const byId = Object.fromEntries(DATA.sections.map(s => [s.id, s]));
 const state = { status: 'all', q: '', cats: new Set(CATS.map(c => c[0])), current: null, finding: -1, tab: 'findings' };
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -400,7 +403,7 @@ function renderSide() {
       const pa = f.baseline[0] ? 'p.' + (f.baseline[0].page + 1) : '—', pb = f.candidate[0] ? 'p.' + (f.candidate[0].page + 1) : '—';
       return `<div class="finding ${f.check} ${i === state.finding ? 'active' : ''}" data-f="${i}">
         <div class="top">${f.critical ? '<span class="crit">critical</span>' : ''}<span class="sev ${f.severity}">${f.severity}</span><span>${f.category} · ${esc((f.types || []).join(', '))}</span><span style="margin-left:auto">${pa} ↔ ${pb}</span></div>
-        <div class="msg">${esc(f.message)}</div>${f.aem ? `<div class="aem">${esc(f.aem.topic)} · ${f.aem.url
+        <div class="msg">${msgHtml(f)}</div>${f.aem ? `<div class="aem">${esc(f.aem.topic)} · ${f.aem.url
           ? `<a href="${esc(f.aem.url)}" target="_blank" rel="noopener" title="Open the topic in AEM (new tab)">${esc(f.aem.guid)} ↗</a>` : esc(f.aem.guid)}</div>` : ''}</div>`;
     }).join('') || '<div class="empty">No findings for the selected checks. ✓</div>');
 }

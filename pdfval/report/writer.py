@@ -27,8 +27,8 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
     report(0.72, "Rendering TOC pages")
     _toc_images(result, out)
     report(0.75, "Building PDF report")
-    pdf_report.build(result, out, severities=shotmod.SEVERITIES.get(shots) or None,
-                     progress=lambda f, m: report(0.75 + 0.23 * f, m))
+    # every issue of every severity: the screenshot setting only decides which issues get pictures
+    pdf_report.build(result, out, progress=lambda f, m: report(0.75 + 0.23 * f, m))
     report(0.98, "Building genuine-issues report")
     pdf_report.build(result, out, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
     write_genuine_csv(result, out / "genuine-issues.csv")
@@ -67,6 +67,24 @@ def write_genuine_csv(result: dict, path: Path) -> Path:
                     w.writerow([f["id"], s["title"], f["issue"], f["severity"], pa, pc, a.get("topic", ""), guid,
                                 a.get("element", ""), a.get("url", ""), f["description"],
                                 f.get("why", ""), shots.get("baseline", ""), shots.get("candidate", "")])
+    return path
+
+
+def write_issues_csv(result: dict, issues: list[tuple], path: Path) -> Path:
+    """One row per selected issue (opens in Excel), in the report's order."""
+    from ..genuine import where
+    with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(["#", "Section", "Category", "Types", "Severity", "Critical", "Genuine", "Issue", "Prod pages",
+                    "Stage pages", "AEM topic", "GUID", "Open in AEM", "Prod screenshot", "Stage screenshot"])
+        for s, f in issues:
+            pa, pc = where(f)
+            shots, a = f.get("shots") or {}, f.get("aem") or {}
+            w.writerow([f["id"], s["title"], f.get("category", ""), ", ".join(f.get("types") or []), f["severity"],
+                        "yes" if f.get("critical") else "", "yes" if f.get("genuine") else "",
+                        f.get("description") if f.get("genuine") and f.get("description") else f["message"],
+                        pa, pc, a.get("topic", ""), a.get("guid", ""), a.get("url", ""),
+                        shots.get("baseline", ""), shots.get("candidate", "")])
     return path
 
 

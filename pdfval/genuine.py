@@ -20,6 +20,7 @@ from collections import Counter
 
 import pymupdf
 
+from . import ocr
 from .checks import Aligner, Unit, locs, snippet
 from .checks.assets import icon_max, pixel_compare, section_images, visual_distance
 from .checks.integrity import links as page_links
@@ -37,6 +38,8 @@ def cross_section(results: list[tuple[Unit, list[Finding]]], A: Doc, B: Doc, cfg
     _duplicate_images(results, A, B, cfg)
     _content(results, gcfg.get("moved_min_words", 5), gcfg.get("moved_overlap", 0.8))
     _duplicate_content(results, A, gcfg.get("moved_min_words", 5), gcfg.get("moved_overlap", 0.8))
+    _text_as_graphics(results, A, B, cfg)  # first: it finds the text at its own spot, OCR anywhere
+    _text_in_images(results, A, B, cfg)
     _image_labels(results, A, cfg)
     if cfg["integrity"].get("links", True):
         for u, findings in results:
@@ -150,6 +153,231 @@ def _duplicate_content(results, A: Doc, min_words: int, overlap: float) -> None:
                          f"from “{src.title}”, repeated in “{u.title}”")
             f.severity, f.types = "error", ["duplicate content"]
             f.detail = {**f.detail, "op": "duplicate", "baseline_section": src.title}
+
+
+def _figures(A: Doc, cfg: dict) -> dict[int, list[pymupdf.Rect]]:
+    """Where prod has figures, per page: its pictures (not icons) and its line drawings - vector
+    paths with curves (a lamp, a person, a hand), merged into one box per drawing. Table rules
+    and callout backgrounds are straight lines and fills, not figures."""
+    out: dict[int, list[pymupdf.Rect]] = {}
+    for im in A.images:
+        if not icon_max(A, im, cfg["assets"]):
+            out.setdefault(im.page, []).append(pymupdf.Rect(im.bbox))
+    try:
+        doc = pymupdf.open(A.path)
+    except Exception:
+        return out
+    with doc:
+        for pno, page in enumerate(doc):
+            boxes = [pymupdf.Rect(d["rect"]) for d in page.get_drawings()
+                     if d.get("color") is not None and any(it[0] in ("c", "qu") for it in d["items"])]
+            merged: list[pymupdf.Rect] = []
+            for r in boxes:  # merge strokes that touch (within 12 pt) into one figure box
+                r = pymupdf.Rect(r)
+                for m in [m for m in merged if (m + (-12, -12, 12, 12)).intersects(r)]:
+                    r |= m
+                    merged.remove(m)
+                merged.append(r)
+            out.setdefault(pno, []).extend(m for m in merged if m.width >= 30 and m.height >= 30)
+    return out
+
+
+def _text_in_images(results, A: Doc, B: Doc, cfg: dict) -> None:
+    """Missing prod text that stage draws inside a picture (figure labels, dimension callouts baked
+    into the image): read the stage pictures with OCR - the section's own pages and the pages next
+    to it first, then the rest of the document - and when the words are there, the text is not
+    missing: an info finding "Text in image", counted as present in the content %.
+    Only text that sits on or next to a prod figure is a label; missing body text is not looked for."""
+    ccfg = cfg["content"]
+    if not ccfg.get("ocr_images", True) or not ocr.available():
+        return
+    max_words, dpi = ccfg.get("ocr_max_words", 60), ccfg.get("ocr_dpi", 300)
+    min_pt = ccfg.get("ocr_min_image_pt", 40)
+    pics = [im for im in B.images if im.bbox[2] - im.bbox[0] >= min_pt and im.bbox[3] - im.bbox[1] >= min_pt * 0.5]
+    pad, figs = ccfg.get("ocr_label_distance_pt", 40), None  # a label sits on its figure or this close to it
+    for u, fs in results:
+        todo = [f for f in fs if f.check == "content" and "missing text" in (f.types or [])
+                and 0 < len(_tokens(f.detail.get("baseline_text"))) <= max_words and f.baseline]
+        if todo and figs is None:
+            figs = _figures(A, cfg)
+        # most of its lines on / next to a figure (dimension labels also sit by straight arrows)
+        on_fig = lambda l: any((r + (-pad, -pad, pad, pad)).contains(pymupdf.Rect(l.bbox)) for r in figs.get(l.page, []))
+        todo = [f for f in todo if 2 * sum(map(on_fig, f.baseline)) >= len(f.baseline)]
+        if not todo or not pics:
+            continue
+        pages = {B.words[k].page for k in range(*u.b_range)} if u.b_range[1] > u.b_range[0] else set()
+        near = {p + d for p in pages for d in (-1, 0, 1)}
+        order = [im for im in pics if im.page in near] + [im for im in pics if im.page not in near]
+        for f in todo:
+            text = f.detail.get("baseline_text", "")
+            # normal and 2x readings of every picture first; a sharper 3x reading only when needed
+            hit = next((im for scales in ((1, 2), (1, 2, 3)) for im in order
+                        if ocr.found(text, ocr.image_text(B.path, im.page, im.bbox, dpi, scales))), None)
+            if hit is None:
+                continue
+            n = len(_tokens(text))
+            f.severity, f.critical, f.types = "info", False, ["text in image"]
+            f.message = f"Text drawn in a picture in stage (read by OCR, stage p.{hit.page + 1}): “{snippet_text(text)}”"
+            f.candidate, f.candidate_at = [Loc(hit.page, hit.bbox)], None
+            f.detail = {**f.detail, "ocr_page": hit.page, "ocr_box": list(hit.bbox)}
+            _count_present(u, n)
+
+
+def _count_present(u: Unit, n: int) -> None:
+    """n words reported missing are there after all: count them as matched in the content %."""
+    c = u.content
+    if not c:
+        return
+    moved = min(n, c.get("missing_words", 0))
+    c["missing_words"] -= moved
+    c["matched_words"] += moved
+    denom = c["baseline_words"] + c["extra_words"]
+    c["match_pct"] = round(100.0 * max(c["matched_words"] - c.get("spacing_issues", 0)
+                                       - c.get("script_issues", 0), 0) / denom, 2) if denom else 100.0
+
+
+def _text_as_graphics(results, A: Doc, B: Doc, cfg: dict) -> None:
+    """Missing prod text that stage shows as a graphic instead of live text: figure badges
+    ("[Figure (A)]" with a white letter on a drawn circle in prod, an icon picture in stage) or a
+    label drawn into a diagram. Each missing prod line is rendered and searched for on the stage
+    page around the gap, with stage's own live text blanked out so only pictures and drawings can
+    match. When every line is found, the text is there - a presentation (CSS / layout) difference,
+    not missing data."""
+    ccfg = cfg["content"]
+    if not ccfg.get("graphic_text", True):
+        return
+    max_words, thr = ccfg.get("graphic_text_max_words", 12), ccfg.get("graphic_text_score", 0.72)
+    edge_thr = ccfg.get("graphic_text_edge_score", 0.65)
+    hays: dict[tuple, "np.ndarray"] = {}
+    for u, fs in results:
+        for f in [f for f in fs if f.check == "content" and "missing text" in (f.types or [])
+                  and f.detail.get("op") == "delete" and f.candidate_at and f.baseline
+                  and 0 < f.detail.get("words", 0) <= max_words]:
+            at = f.candidate_at
+            found = []
+            for loc in f.baseline:
+                ws = [w for w in A.words if w.page == loc.page and _in(w, pymupdf.Rect(loc.bbox))]
+                hit = _drawn(A, loc.bbox, loc.page, B, at, thr, edge_thr, hays)
+                if hit is None and len(ws) > 1:  # stage may wrap the line: look for each word on its own
+                    # a lone glyph ("~", "-") matches anywhere: it is not looked for, only the words around it
+                    words = [w for w in ws if (w.bbox[2] - w.bbox[0]) * (w.bbox[3] - w.bbox[1]) >= 20]
+                    hit = []
+                    for w in words:
+                        h = _drawn(A, w.bbox, loc.page, B, at, thr, edge_thr, hays)
+                        if h is None:
+                            hit = None
+                            break
+                        hit.append(h)
+                    hit = hit or None
+                if hit is None:
+                    break
+                found.extend(hit if isinstance(hit, list) else [hit])
+            else:
+                text = f.detail.get("baseline_text", "")
+                f.check, f.severity, f.critical = "layout", ccfg.get("graphic_text_severity", "warning"), False
+                f.types = ["text as graphic"]
+                f.message = (f"Text shown as a graphic in stage, not as live text: “{snippet_text(text)}” "
+                             f"(prod p.{f.baseline[0].page + 1} ↔ stage p.{at.page + 1})")
+                f.candidate, f.candidate_at = [Loc(at.page, r) for r in found], None
+                f.detail = {**f.detail, "kind": "text-as-graphic"}
+                _count_present(u, len(_tokens(text)))
+
+
+def _drawn(A: Doc, box, page: int, B: Doc, at: Loc, thr: float, edge_thr: float, hays: dict):
+    """Stage rect where the prod text in `box` appears as a picture / drawing near `at`, or None.
+    Normalised cross-correlation over a range of scales (stage pages and fonts are often larger)."""
+    import numpy as np
+    from PIL import Image as PILImage
+    from .checks.assets import _gray, _ncc
+
+    R = 4.0  # px per pt of the renders; each scale is area-averaged down from them
+    box = (box[0] - 1, box[1] - 1, box[2] + 1, box[3] + 1)
+    tpl = _gray(A, page, box, R)
+    if tpl.size == 0 or float(tpl.std()) < 8:
+        return None
+    tpl = PILImage.fromarray(tpl.astype(np.uint8))
+    pg = B.pages[at.page]
+    h, w = box[3] - box[1], box[2] - box[0]
+    # the gap's own lines first (an inline badge), then the figures around it: the same badge
+    # letter often appears in the figure too, and the nearer one is the one that replaced the text
+    for reach in (h * 3, 180):
+        y0, y1 = max(0.0, at.bbox[1] - reach), min(pg.height, at.bbox[3] + reach)
+        key = (at.page, round(y0), round(y1))
+        if key not in hays:
+            hays[key] = _graphics_only(B, at.page, (0, y0, pg.width, y1), R)
+        hay = hays[key]
+        best = None
+        for s in np.geomspace(0.8, 2.0, 9):
+            k = min(2.5, 16 / (h * s))  # the text ~16 px tall: enough to find it; _glyphs_match looks closer
+            tw, th = round(w * s * k), round(h * s * k)
+            H = np.asarray(hay.resize((max(1, round(hay.width * k / R)), max(1, round(hay.height * k / R))),
+                                      PILImage.BOX), np.float32)
+            if tw < 4 or th < 4 or tw >= H.shape[1] or th >= H.shape[0]:
+                continue
+            ncc = _ncc(H, np.asarray(tpl.resize((tw, th), PILImage.BOX), np.float32))
+            if ncc is None:
+                continue
+            iy, ix = np.unravel_index(int(ncc.argmax()), ncc.shape)
+            if best is None or ncc[iy, ix] > best[0]:
+                best = (float(ncc[iy, ix]), (ix / k, y0 + iy / k, (ix + tw) / k, y0 + (iy + th) / k))
+        if best and best[0] >= thr and (hit := _glyphs_match(A, page, box, B, at.page, best[1], edge_thr)):
+            return hit
+    return None
+
+
+def _graphics_only(B: Doc, page: int, rect, R: float):
+    """Stage page region at R px/pt with its live text blanked: the content check compares live
+    text, so only pictures and drawings may match here."""
+    import numpy as np
+    from PIL import Image as PILImage
+    from .checks.assets import _gray
+
+    x0, y0 = rect[0], rect[1]
+    hay = _gray(B, page, rect, R)
+    for w in B.words:
+        if w.page == page and w.bbox[3] > y0 and w.bbox[1] < rect[3] and w.bbox[2] > x0 and w.bbox[0] < rect[2]:
+            hay[max(0, int((w.bbox[1] - y0) * R)):max(0, int((w.bbox[3] - y0) * R) + 1),
+                max(0, int((w.bbox[0] - x0) * R)):max(0, int((w.bbox[2] - x0) * R) + 1)] = 255
+    return PILImage.fromarray(hay.astype(np.uint8))
+
+
+def _glyphs_match(A: Doc, a_page: int, box, B: Doc, page: int, near, edge_thr: float):
+    """Second look at a hit, sharper and on the edges only: a badge (A) and a badge (B) correlate
+    well as dark circles, but the strokes of the letters differ. Re-matches the text at ~48 px tall
+    around the hit over fine scale steps and compares the high-passed pictures at the best spot.
+    Returns the stage rect, or None when the glyphs are not the same."""
+    import numpy as np
+    from PIL import Image as PILImage
+    from PIL import ImageFilter
+    from .checks.assets import _gray, _ncc
+
+    R = 12.0
+    tpl = PILImage.fromarray(_gray(A, a_page, box, R).astype(np.uint8))
+    h, w = box[3] - box[1], box[2] - box[0]
+    m = max(near[2] - near[0], near[3] - near[1]) * 0.6
+    pg = B.pages[page]
+    rect = (max(0.0, near[0] - m), max(0.0, near[1] - m), min(pg.width, near[2] + m), min(pg.height, near[3] + m))
+    hay = _graphics_only(B, page, rect, R)
+    edges = lambda im, r: np.asarray(im, np.float32) - np.asarray(im.filter(ImageFilter.GaussianBlur(r)), np.float32)
+    best = None
+    for s in np.geomspace(0.8, 2.0, 25):
+        k = min(R, 48 / (h * s))
+        tw, th = round(w * s * k), round(h * s * k)
+        H = hay.resize((max(1, round(hay.width * k / R)), max(1, round(hay.height * k / R))), PILImage.BOX)
+        if tw < 4 or th < 4 or tw >= H.width or th >= H.height:
+            continue
+        T = tpl.resize((tw, th), PILImage.BOX)
+        ncc = _ncc(np.asarray(H, np.float32), np.asarray(T, np.float32))
+        if ncc is None:
+            continue
+        iy, ix = np.unravel_index(int(ncc.argmax()), ncc.shape)
+        if best is None or ncc[iy, ix] > best[0]:
+            r = max(1.0, th / 10)
+            pe, te = edges(H.crop((ix, iy, ix + tw, iy + th)), r).ravel(), edges(T, r).ravel()
+            pe, te = pe - pe.mean(), te - te.mean()
+            e = float((pe * te).sum() / (np.sqrt((pe * pe).sum() * (te * te).sum()) + 1e-9))
+            best = (float(ncc[iy, ix]), e, (rect[0] + ix / k, rect[1] + iy / k, rect[0] + (ix + tw) / k, rect[1] + (iy + th) / k))
+    return best[2] if best and best[1] >= edge_thr else None
 
 
 def _image_labels(results, A: Doc, cfg: dict) -> None:
@@ -368,10 +596,11 @@ _WHY = {
 }
 
 
-def tag(f: dict, genuine_types: set[str], data_min_words: int = 3) -> None:
+def tag(f: dict, genuine_types: set[str], data_min_words: int = 3, exclude_checks: set[str] = frozenset()) -> None:
     """Set f['genuine'] and, for genuine findings, f['issue'] (short name), f['description'] (what
-    exactly is wrong and where) and f['why'] (why it matters)."""
-    types = f.get("types") or []
+    exactly is wrong and where) and f['why'] (why it matters). Findings of `exclude_checks`
+    (e.g. "toc") are never genuine; they stay in the full report."""
+    types = [] if f.get("check") in exclude_checks else (f.get("types") or [])
     gt = [t for t in types if t in genuine_types]
     # text is data missing when its words are really absent from stage, not one changed or moved word
     if gt == ["missing text"] and f["check"] == "content" and not f.get("critical") \

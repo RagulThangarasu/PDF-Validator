@@ -102,4 +102,6 @@ def test_guid_opens_the_product_map_with_all_topics():
     assert aem.url_for(a, cfg) == "http://aem:4502/e?src=/content/dam/g/en/Education/Signage/SL04-and-SH04/Maps/sl04_and_sh04.ditamap&appMode=author"
     found = {**a, "path": "/content/dam/g/en/Education/Signage/SL04-and-SH04/Topics/Product overview.dita"}
     assert aem.url_for(found, cfg, "topic").endswith("/Topics/Product%20overview.dita")
+    assert aem.url_for(found, cfg).endswith("/Topics/Product%20overview.dita")  # default: the topic once it is found
+    assert aem.url_for(found, cfg, "map").endswith("/Maps/sl04_and_sh04.ditamap&appMode=author")
     assert aem.url_for({**a, "folder": ""}, cfg).startswith("http://aem:4502/libs/fmdita")  # no product folder: Explorer

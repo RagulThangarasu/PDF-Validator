@@ -110,12 +110,13 @@ def map_path(a: dict, cfg: dict) -> str:
 
 
 def url_for(a: dict, cfg: dict, open_in: str | None = None) -> str:
-    """The link a GUID opens in AEM. open_in = "map" (default, `[aem] open_in`): the product's map in
-    the editor, with every topic of the map; "topic": the topic file AEM reported for the GUID
-    (resolve()). Without a known map / file the link opens the editor's Explorer (`fallback_link`),
-    never a guessed file that does not exist."""
+    """The link a GUID opens in AEM. open_in = "topic" (default, `[aem] open_in`): the topic file AEM
+    reported for the GUID (resolve()), else the product's map in the editor; "map": always the map,
+    with every topic of the map. Without a known file / map the link opens the editor's Explorer
+    (`fallback_link`), never a guessed file that does not exist."""
     author = (cfg.get("author") or "").rstrip("/")
-    if (open_in or cfg.get("open_in", "map")) == "map" and author and (mp := map_path(a, cfg)):
+    mode = open_in or cfg.get("open_in", "topic")
+    if (mode == "map" or not a.get("path")) and author and (mp := map_path(a, cfg)):
         tmpl = cfg.get("map_link") or "{author}/libs/fmdita/clientlibs/xmleditor/page.html?src={path}&leftPanel=repository_panel&appMode=author"
         return tmpl.format(author=author, path=quote(mp, safe="/"), guid=a["guid"], map=a.get("map", ""))
     tmpl = cfg.get("link", "")

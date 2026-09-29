@@ -77,6 +77,33 @@ def _parts(tokens) -> Counter:
     return Counter(p for t in tokens for p in re.split(r"(?<=[-/–—])", t) if p)
 
 
+def _drop_moved_phrases(d, idx: list[int], relocated: Counter, min_words: int = 3) -> tuple[list[int], Counter]:
+    """Remove runs of >= min_words words that all sit unmatched on the other side (the phrase only
+    moved) from a diff block that also holds other text. Returns (what is left, relocated minus the
+    removed words). A block that is all moved text is handled by the caller."""
+    keep, run, left = [], [], Counter(relocated)
+
+    def flush():
+        nonlocal left
+        parts = _parts(d.words[i].norm for i in run)
+        if len(run) >= min_words and not parts - left:
+            left = left - parts
+        else:
+            keep.extend(run)
+        run.clear()
+
+    for i in idx:
+        if _parts([d.words[i].norm]) - left:  # this word did not move: ends a run
+            flush()
+            keep.append(i)
+        else:
+            run.append(i)
+    flush()
+    if not keep:  # all of it moved: leave the decision to the caller
+        return idx, relocated
+    return (keep, left) if len(keep) < len(idx) else (idx, relocated)
+
+
 def _repeated_header(d, idx: list[int]) -> list[int]:
     """The leading words of idx when they are the first row of a page and the same row
     text already appeared earlier in the document: a table header repeated on a
@@ -167,6 +194,7 @@ def check(u: Unit) -> list[Finding]:
     unmatched_a: Counter = Counter()
     findings = []
     moves: list[tuple[Finding, list[int], list[int]]] = []
+    words_of: dict[int, tuple[list[int], list[int]]] = {}  # finding -> (prod words, stage words)
     matched = moved_words = hyphen_matched = 0
     for n, (tag, i1, i2, j1, j2) in enumerate(ops):
         if tag == "equal":
@@ -230,6 +258,10 @@ def check(u: Unit) -> list[Finding]:
                 relocated_a, a_idx = relocated_a - ca, []
             if ctype == "changed text" and b_rel and len(b_idx) >= 2:
                 relocated_b, b_idx = relocated_b - cb, []
+            # a moved phrase glued to other text: "1 x Webcam accessory" (a list item read in another
+            # column order) + "NOTE:" - drop the phrase, report only what is left
+            a_idx, relocated_a = _drop_moved_phrases(u.a, a_idx, relocated_a)
+            b_idx, relocated_b = _drop_moved_phrases(u.b, b_idx, relocated_b)
         if not a_idx and not b_idx:
             continue
         if (a_idx, b_idx) != (ai[i1:i2], bi[j1:j2]):  # narrowed: describe what is left
@@ -247,7 +279,8 @@ def check(u: Unit) -> list[Finding]:
         # a short difference (one character in Chinese/Japanese, a word or two) is shown in its line,
         # so the reader can find it: “废” → “州” in “有关 China WEEE 州弃电器电子产品回收处理”
         ctx = _context(u.b, b_idx) if b_idx else _context(u.a, a_idx) if a_idx else ""
-        ctx = f" in “{ctx}”" if ctx and max(len(a_idx), len(b_idx)) <= 3 else ""
+        shown = snippet(u.b, b_idx) if b_idx else snippet(u.a, a_idx) if a_idx else ""
+        ctx = f" in “{ctx}”" if ctx and ctx != shown and max(len(a_idx), len(b_idx)) <= 3 else ""
         findings.append(Finding(
             "content", "error" if critical else sev,
             f"{label}: "
@@ -258,6 +291,7 @@ def check(u: Unit) -> list[Finding]:
              "words": max(len(a_idx), len(b_idx)), "absent_words": absent},
             baseline_at=a_at, candidate_at=b_at, critical=critical, types=[ctype],
         ))
+        words_of[id(findings[-1])] = (list(a_idx), list(b_idx))
 
     spacing = _spacing(u, findings) if ccfg.get("check_spacing", True) else 0
     spacing += _paragraphs(u, findings) if ccfg.get("check_paragraphs", False) else 0
@@ -270,7 +304,10 @@ def check(u: Unit) -> list[Finding]:
     total = len(at)
     in_place = {id(f) for f, a_idx, b_idx in moves if _visually_in_place(u, a_idx, b_idx)}
     findings = [f for f in findings if id(f) not in in_place]
+    findings = _split_unrelated(u, findings, words_of)
     findings = _pair_near(findings)
+    findings = _pair_parts(u, findings, words_of)
+    _house_style(u, findings, words_of)
     scripts = _scripts(u, sev)
     findings += scripts
     # every content difference counts: prod words missing or changed, words stage adds, spacing and
@@ -397,6 +434,149 @@ def _pair_near(findings: list[Finding]) -> list[Finding]:
             drop.add(id(e))
             break
     return [f for f in findings if id(f) not in drop]
+
+
+def _letters_alike(ta: list[str], tb: list[str]) -> float:
+    ka, kb = "".join(re.findall(r"\w", " ".join(ta).lower())), "".join(re.findall(r"\w", " ".join(tb).lower()))
+    return SequenceMatcher(None, ka, kb, autojunk=False).ratio() if ka and kb else 0.0
+
+
+def _split_unrelated(u: Unit, findings: list[Finding], words_of: dict) -> list[Finding]:
+    """A "changed text" whose two sides have nothing in common is two differences at one spot: prod
+    text missing and other stage text added ("Amplifier or speaker" → "NOTE:" where a figure label
+    of prod is drawn in the stage picture and a note follows). Split, each side is judged on its
+    own (a label in a picture, a house-style label, text that moved)."""
+    out = []
+    for f in findings:
+        a_idx, b_idx = words_of.get(id(f), ([], []))
+        na, nb = [u.a.words[i].norm for i in a_idx], [u.b.words[j].norm for j in b_idx]
+        # one side is only a callout label or list numbers ("NOTE:", "4."): the other side's text
+        # did not turn into it - a reworded sentence ("7 on page 10." → "Anti-theft security bar.")
+        # stays one change, and so does a renumbered item ("1." → "2.")
+        marker = lambda ns: bool(ns) and all(n.startswith("<label:") or re.fullmatch(r"\(?\w{1,3}[.):]", n) for n in ns)
+        if "changed text" not in f.types or not a_idx or not b_idx or marker(na) == marker(nb) \
+                or _letters_alike(na, nb) >= 0.3:
+            out.append(f)
+            continue
+        rcfg = u.cfg["report"]
+        miss = Finding("content", f.severity, f"Missing text: “{snippet(u.a, a_idx)}”",
+                       locs(u.a, a_idx, rcfg["max_locs"]), [],
+                       {"op": "delete", "baseline_text": snippet(u.a, a_idx, 200), "candidate_text": "",
+                        "words": len(a_idx), "absent_words": f.detail.get("absent_words", len(a_idx))},
+                       candidate_at=locs(u.b, b_idx[:1])[0], critical=f.critical, types=["missing text"])
+        extra = Finding("content", u.cfg["content"].get("severity", "warning"), f"Extra text: “{snippet(u.b, b_idx)}”",
+                        [], locs(u.b, b_idx, rcfg["max_locs"]),
+                        {"op": "insert", "baseline_text": "", "candidate_text": snippet(u.b, b_idx, 200),
+                         "words": len(b_idx), "absent_words": 0},
+                        baseline_at=locs(u.a, a_idx[:1])[0], types=["extra text"])
+        words_of[id(miss)], words_of[id(extra)] = (a_idx, []), ([], b_idx)
+        out += [miss, extra]
+    return out
+
+
+def _house_style(u: Unit, findings: list[Finding], words_of: dict) -> None:
+    """Differences that are the template's, not the content's (info, not genuine):
+    - a callout label on one side only: stage prints "NOTE:" where prod shows only the note icon
+      (labels are folded to <label:…> by normalize.fold_labels)
+    - a continuation header on one side only: "Lamp Control (continued)" repeated at the top of the
+      next page when a table or a list breaks across pages"""
+    for f in findings:
+        a_idx, b_idx = words_of.get(id(f), ([], []))
+        if not ({"missing text", "extra text"} & set(f.types)) or (a_idx and b_idx):
+            continue
+        d, idx, side, other = (u.a, a_idx, "prod", "stage") if a_idx else (u.b, b_idx, "stage", "prod")
+        norms = [d.words[i].norm for i in idx]
+        if norms and all(n.startswith("<label:") for n in norms):
+            f.severity, f.critical, f.types = "info", False, ["label only"]
+            f.message = (f"Callout label only in {side}: “{snippet(d, idx)}” "
+                         f"(the {other} note has no label, only its icon or box)")
+        elif len(norms) <= 8 and any(re.sub(r"\W", "", n.lower()) == "continued" for n in norms):
+            f.severity, f.critical, f.types = "info", False, ["continued header"]
+            f.message = (f"Continuation header only in {side}: “{snippet(d, idx)}” "
+                         f"(repeated at a page break; the page breaks differ)")
+
+
+def _pair_parts(u: Unit, findings: list[Finding], words_of: dict) -> list[Finding]:
+    """Stage text that is a stretch of unexplained prod text, apart from punctuation, spacing or case,
+    is that prod text: “supply’s” (stage) is “supply's” of the missing run “supply's projector's
+    40°C/”. The pieces come apart when the two PDFs read columns in another order - the diff then
+    meets each side at a different spot (as missing / extra text, or glued to an unrelated word as
+    “changed text”), and neither side's marker shows the other text. Each such stretch becomes one
+    change with both locations; what is left of the findings it came from is described again."""
+    rcfg = u.cfg["report"]
+    kinds = ("spacing", "punctuation", "case", "case + punctuation")
+    letters = lambda idx, d: sum(ch.isalnum() for i in idx for ch in d.words[i].norm)
+    loose = lambda f: id(f) in words_of and ("changed text" in f.types or f.detail.get("op") in ("delete", "insert")) \
+        and not f.critical
+    out = list(findings)
+    for e in [f for f in findings if loose(f)]:
+        b_idx = words_of[id(e)][1]
+        if not any(x is e for x in out) or letters(b_idx, u.b) < 3:  # "1." or ":" alone matches anything
+            continue
+        tb = [u.b.words[j].norm for j in b_idx]
+        for m in [f for f in out if f is not e and loose(f) and words_of[id(f)][0]]:
+            a_all = words_of[id(m)][0]
+            ta = [u.a.words[i].norm for i in a_all]
+            # a window of about the same length ("40°C/" is one word, "40°C /" two)
+            hit = next(((i, n) for n in sorted(range(max(1, len(tb) - 2), len(tb) + 3), key=lambda n: abs(n - len(tb)))
+                        for i in range(len(ta) - n + 1) if classify(ta[i:i + n], tb) in kinds
+                        and _same_neighbour(u, a_all[i:i + n], b_idx)), None)
+            if not hit:
+                continue
+            i, n = hit
+            a_idx = a_all[i:i + n]
+            kind = classify(ta[i:i + n], tb)
+            la, lb = locs(u.a, a_idx, rcfg["max_locs"]), locs(u.b, b_idx, rcfg["max_locs"])
+            ctx = _context(u.b, b_idx)
+            ctx = f" in “{ctx}”" if ctx and ctx != snippet(u.b, b_idx) and len(b_idx) <= 3 else ""
+            pair = Finding("content", e.severity, f"{_TYPE_LABEL[kind]}: “{snippet(u.a, a_idx)}” → “{snippet(u.b, b_idx)}”{ctx}",
+                           la, lb, {"op": "replace", "baseline_text": snippet(u.a, a_idx, 200),
+                                    "candidate_text": snippet(u.b, b_idx, 200), "words": max(len(a_idx), len(b_idx)),
+                                    "absent_words": 0},
+                           types=[kind], links=list(zip(la, lb)) if len(la) == len(lb) else [(la[0], lb[0])])
+            words_of[id(pair)] = (a_idx, b_idx)
+            out.insert(next(k for k, x in enumerate(out) if x is e), pair)
+            for donor, a_rest, b_rest in ((m, a_all[:i] + a_all[i + n:], words_of[id(m)][1]),
+                                          (e, words_of[id(e)][0], [])):
+                _redescribe(u, donor, a_rest, b_rest, words_of, out)
+            break
+    return out
+
+
+def _same_neighbour(u: Unit, a_idx: list[int], b_idx: list[int]) -> bool:
+    """The word before or after the stretch is the same on both sides ("power supply's power" /
+    "power supply’s power"): the same passage, not a common word met somewhere else."""
+    key = lambda d, k: re.sub(r"[^\w]", "", d.words[k].norm).lower() if 0 <= k < len(d.words) else None
+    before = key(u.a, a_idx[0] - 1), key(u.b, b_idx[0] - 1)
+    after = key(u.a, a_idx[-1] + 1), key(u.b, b_idx[-1] + 1)
+    return any(x == y and x for x, y in (before, after))
+
+
+def _redescribe(u: Unit, f: Finding, a_idx: list[int], b_idx: list[int], words_of: dict, out: list) -> None:
+    """Rewrite finding f for the words it has left (or remove it when none are left)."""
+    if not a_idx and not b_idx:
+        del out[next(k for k, x in enumerate(out) if x is f)]
+        return
+    rcfg = u.cfg["report"]
+    words_of[id(f)] = (a_idx, b_idx)
+    ta, tb = [u.a.words[i].norm for i in a_idx], [u.b.words[j].norm for j in b_idx]
+    tag = "replace" if a_idx and b_idx else "delete" if a_idx else "insert"
+    ctype = classify(ta, tb) if tag == "replace" else "missing text" if a_idx else "extra text"
+    # the other side's marker: where the words that were paired away sat
+    if not b_idx and f.candidate:
+        f.candidate_at = f.candidate_at or f.candidate[0]
+    if not a_idx and f.baseline:
+        f.baseline_at = f.baseline_at or f.baseline[0]
+    f.baseline, f.candidate = locs(u.a, a_idx, rcfg["max_locs"]), locs(u.b, b_idx, rcfg["max_locs"])
+    ctx = _context(u.b, b_idx) if b_idx else _context(u.a, a_idx)
+    shown = snippet(u.b, b_idx) if b_idx else snippet(u.a, a_idx)
+    ctx = f" in “{ctx}”" if ctx and ctx != shown and max(len(a_idx), len(b_idx)) <= 3 else ""
+    f.message = (f"{_TYPE_LABEL.get(ctype, _KIND[tag])}: " + (f"“{snippet(u.a, a_idx)}”" if a_idx else "")
+                 + (" → " if a_idx and b_idx else "") + (f"“{snippet(u.b, b_idx)}”" if b_idx else "") + ctx)
+    f.types, f.links = [ctype], []
+    f.detail = {**f.detail, "op": tag, "baseline_text": snippet(u.a, a_idx, 200), "candidate_text": snippet(u.b, b_idx, 200),
+                "words": max(len(a_idx), len(b_idx)),
+                "absent_words": min(f.detail.get("absent_words", len(a_idx)), len(a_idx))}
 
 
 _SUP = str.maketrans("0123456789+-=()nia", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱᵃ")

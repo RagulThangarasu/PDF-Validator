@@ -442,12 +442,17 @@ def test_list_numbers_missing_in_a_table_cell(tmp_path, cfg):
     assert f[0]["genuine"]
 
 
-def test_toc_wrong_page_number_is_genuine(tmp_path, cfg):
+def test_toc_issues_stay_out_of_the_genuine_report(tmp_path, cfg):
+    """A wrong TOC page number is reported (full report, TOC tab) but is not a genuine issue,
+    unless `[genuine] exclude_checks` no longer lists "toc"."""
     heads = ["Overview", "Setup", "Mounting", "Settings"]
     a = make_toc_pdf(tmp_path / "a.pdf", [(1, "Overview", 2), (1, "Setup", 3), (1, "Mounting", 4), (1, "Settings", 5)], heads)
     b = make_toc_pdf(tmp_path / "b.pdf", [(1, "Overview", 2), (1, "Setup", 3), (1, "Mounting", 9), (1, "Settings", 5)], heads)
+    toc = lambda r: [f for s in r["sections"] for f in s["findings"] if f["check"] == "toc" and "Mounting" in f["message"]]
     r = compare(a, b, cfg)
-    assert [f for s in r["sections"] for f in s["findings"] if f.get("issue") == "TOC page number wrong" and "Mounting" in f["message"]]
+    assert toc(r) and not any(f["genuine"] for s in r["sections"] for f in s["findings"] if f["check"] == "toc")
+    cfg["genuine"]["exclude_checks"] = []
+    assert [f for f in toc(compare(a, b, cfg)) if f.get("issue") == "TOC page number wrong"]
 
 
 def test_genuine_issues_are_never_capped(tmp_path, cfg):
@@ -459,3 +464,194 @@ def test_genuine_issues_are_never_capped(tmp_path, cfg):
     full = count(compare(a, b, cfg))
     cfg["report"]["max_findings_per_check"] = 1
     assert full >= 3 and count(compare(a, b, cfg)) == full
+
+
+def _two_column_list(path, rows_a, rows_b, gap, note):
+    """A package-contents list in two columns: "• 1 x ..." items, bullet `gap` pt before the text."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 60), "Package Contents", fontsize=18)
+    p.insert_text((72, 84), "The package should include the following items.", fontsize=11)
+    for x, ys, items in ((72, rows_a, ["ScreenBar lamp with cord", "Wireless controller", "Quick Start Guide"]),
+                         (300, rows_b, ["Warranty information", "Power adapter", "Webcam accessory"])):
+        for y, t in zip(ys, items):
+            p.insert_text((x, y), "•", fontsize=11)
+            p.insert_text((x + 5 + gap, y), f"1 x {t}", fontsize=11)
+    y = max(rows_a + rows_b) + 30
+    if note:
+        p.insert_text((72, y), "NOTE:", fontsize=11)
+    p.insert_text((72 + (40 if note else 0), y), "The illustrations are for your reference only.", fontsize=11)
+    doc.save(path)
+    return str(path)
+
+
+def test_two_column_list_read_in_another_order(tmp_path, cfg):
+    """Prod's two columns have different line spacing, so reading by height interleaves them
+    ("Webcam accessory" before "Quick Start Guide"); stage reads it last, just before "NOTE:".
+    The moved item is not extra content, and the bullet gap is compared on all six items."""
+    a = _two_column_list(tmp_path / "a.pdf", [110, 129, 140], [110, 121, 132], gap=0, note=False)
+    b = _two_column_list(tmp_path / "b.pdf", [110, 127, 144], [110, 127, 144], gap=6, note=True)
+    r = compare(a, b, cfg)
+    content = [f["message"] for f in checks(r, "content") if "reordered" not in (f.get("types") or [])]
+    assert not [m for m in content if "Webcam" in m], content
+    assert [m for m in content if "NOTE:" in m], content
+    gap = [f for f in checks(r, "layout") if f["detail"].get("kind") == "bullet gap"]
+    assert gap and gap[0]["detail"]["lines"] == 6 and "Webcam" not in gap[0]["message"].split("e.g.")[0]
+
+
+def _figure_pdf(path, labels_as_text: bool, labels=("50 cm", "60±10 cm")):
+    """A section with a figure whose labels are text over the drawing (prod) or drawn into the
+    picture itself (stage), on the next page and at another size."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 60), "Presence Detection", fontsize=18)
+    p.insert_text((72, 90), "The function turns the light on when the user enters the area.", fontsize=11)
+    if labels_as_text:  # a line drawing (curves, like the lamp art) with its labels as text
+        p.draw_oval(pymupdf.Rect(72, 120, 372, 300), color=(0, 0, 0))
+        for k, t in enumerate(labels):
+            p.insert_text((90 + 150 * k, 200), t, fontsize=8)
+    else:
+        art = pymupdf.open()
+        a = art.new_page(width=400, height=220)
+        a.draw_rect(pymupdf.Rect(10, 10, 390, 210), color=(0, 0, 0))
+        for k, t in enumerate(labels):
+            a.insert_text((40 + 190 * k, 110), t, fontsize=14, fontname="helv")
+        png = a.get_pixmap(dpi=200).tobytes("png")
+        p = doc.new_page()  # the picture lands on the next page
+        p.insert_image(pymupdf.Rect(72, 60, 472, 280), stream=png)
+    doc.save(path)
+    return str(path)
+
+
+@pytest.mark.skipif(not __import__("shutil").which("tesseract"), reason="needs tesseract")
+def test_labels_drawn_in_the_stage_picture_are_not_missing(tmp_path, cfg):
+    a = _figure_pdf(tmp_path / "a.pdf", True)
+    b = _figure_pdf(tmp_path / "b.pdf", False)
+    r = compare(a, b, cfg)
+    fs = [f for f in checks(r, "content") if "cm" in f["message"]]
+    assert fs and all("text in image" in f["types"] and not f["genuine"] for f in fs), [f["message"] for f in fs]
+    # a label the stage picture does not have stays missing
+    b2 = _figure_pdf(tmp_path / "b2.pdf", False, labels=("50 cm", "Ultrasonic"))
+    missing = [f for f in checks(compare(a, b2, cfg), "content") if "missing text" in f["types"]]
+    assert missing and any("60±10" in f["message"] for f in missing)
+
+
+def test_ocr_match_rules():
+    from pdfval.ocr import found
+    ocr = "/ /, 50cm: ;— Vy bO#l0 cm\n(ee V 60210 c m See 0.43cm ~6cm 4 1 A B"
+    assert found("50 cm 60±10 cm", ocr)            # "±" misread, a digit read as a letter
+    assert found("0.43cm ~ 6cm B 2", ocr)           # circled "❷" is not readable: ignored
+    assert not found("A B 1", ocr)                  # single characters are in any picture
+    assert not found("Ultrasonic sensor", ocr)
+
+
+def _badge_pdf(path, badge_as_picture: bool, letter="A"):
+    """“Extend the clip as shown in [Figure (A)].” – the badge is a white letter on a drawn circle
+    (prod) or a picture of the badge (stage), which has no live text."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 60), "Installing the Lamp", fontsize=18)
+    p.insert_text((72, 100), "1. Extend the clip of the lamp as shown in [Figure", fontsize=11)
+    x = 72 + pymupdf.get_text_length("1. Extend the clip of the lamp as shown in [Figure", fontsize=11) + 3
+    if badge_as_picture:
+        art = pymupdf.open()
+        a = art.new_page(width=14, height=12)
+        a.draw_oval(pymupdf.Rect(0, 0, 14, 12), color=(0, 0, 0), fill=(0, 0, 0))
+        a.insert_text((3.6, 9.8), letter, fontsize=10, color=(1, 1, 1))
+        p.insert_image(pymupdf.Rect(x, 91, x + 14, 103), stream=a.get_pixmap(dpi=400).tobytes("png"))
+    else:
+        p.draw_oval(pymupdf.Rect(x, 91, x + 14, 103), color=(0, 0, 0), fill=(0, 0, 0))
+        p.insert_text((x + 3.6, 100.8), letter, fontsize=10, color=(1, 1, 1))
+    p.insert_text((x + 16, 100), "].", fontsize=11)
+    p.insert_text((72, 130), "2. Rest the lamp on the monitor bezel so there is no visible gap.", fontsize=11)
+    doc.save(path)
+    return str(path)
+
+
+def test_badge_drawn_as_a_picture_is_a_layout_issue_not_missing_text(tmp_path, cfg):
+    a = _badge_pdf(tmp_path / "a.pdf", False)
+    r = compare(a, _badge_pdf(tmp_path / "b.pdf", True), cfg)
+    assert not [f for f in checks(r, "content") if "missing text" in f["types"]]
+    fs = [f for f in checks(r, "layout") if "text as graphic" in f["types"]]
+    assert len(fs) == 1 and not fs[0]["genuine"] and "“A”" in fs[0]["message"]
+    # another letter in the stage badge: the prod text really is not there
+    r2 = compare(a, _badge_pdf(tmp_path / "b2.pdf", True, letter="W"), cfg)
+    assert [f for f in checks(r2, "content") if "missing text" in f["types"]]
+
+
+def _safety_pdf(path, edited: bool, order=(0, 1, 2)):
+    """Three numbered safety items; stage drops an apostrophe, spaces out “40°C/” and lays the items
+    out in another order (another column order), so each change is met out of reading order."""
+    q, t = ("", "40°C / 104°F") if edited else ("'", "40°C/ 104°F")
+    items = [f"16. If the projector does become wet, disconnect it from the power supply{q}s power outlet and call BenQ.",
+             "17. This product is capable of displaying inverted images for ceiling mount installation today.",
+             f"20. Do not place it in locations with an ambient temperature above {t} or near fire alarms."]
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 60), "Important safety instructions", fontsize=18)
+    for k, n in enumerate(order):
+        p.insert_textbox(pymupdf.Rect(72, 90 + 70 * k, 540, 150 + 70 * k), items[n], fontsize=10)
+    doc.save(path)
+    return str(path)
+
+
+def test_punctuation_change_in_reordered_text_is_one_paired_finding(tmp_path, cfg):
+    a = _safety_pdf(tmp_path / "a.pdf", False)
+    r = compare(a, _safety_pdf(tmp_path / "b.pdf", True, order=(2, 1, 0)), cfg)
+    fs = [f for f in checks(r, "content") if "supply" in f["message"] or "40°C" in f["message"]]
+    assert len(fs) == 2 and all(f["types"] in (["punctuation"], ["spacing"]) and f["baseline"] and f["candidate"]
+                                for f in fs), [(f["types"], f["message"]) for f in fs]
+    assert not [f for f in checks(r, "content") if {"missing text", "extra text"} & set(f["types"])]
+
+
+CHAPTERS = [("Package contents", 1, "Check that all the items are in the package before you start."),
+            ("Port overview", 1, "The ports are on the front and on the rear of the unit."),
+            ("Front", 2, "The front has the antenna port and two USB ports for devices."),
+            ("Initial setup", 1, "Secure the two antennas to the front of the unit before use."),
+            ("Mounting the unit", 2, "Insert the unit into the slot of the display until it clicks.")]
+
+
+def _guide_pdf(path):
+    """A printed manual: cover, printed TOC, chapters (no bookmarks: levels from font sizes), back cover."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 200), "User Manual", fontsize=40)
+    p.insert_text((72, 260), "BenQ Chromebox OPS", fontsize=24)
+    p = doc.new_page()
+    p.insert_text((72, 80), "Table of contents", fontsize=22)
+    for k, (t, lvl, _) in enumerate(CHAPTERS):
+        p.insert_text((72 + 20 * (lvl - 1), 120 + 20 * k), f"{t} {'.' * 40} {k + 3}", fontsize=11)
+    for t, lvl, body in CHAPTERS:
+        p = doc.new_page()
+        p.insert_text((72, 90), t, fontsize=22 if lvl == 1 else 16)
+        p.insert_text((72, 130), body, fontsize=11)
+    p = doc.new_page()
+    for k, t in enumerate(("Shape", "the Future")):
+        p.insert_text((72, 300 + 40 * k), t, fontsize=30)
+    doc.save(path)
+    return str(path)
+
+
+def _site_doc(path, cfg):
+    """The web guide as the crawl builds it: one page per chapter, page title = level-1 heading."""
+    from pdfval.extract import load
+    doc = pymupdf.open()
+    toc = []
+    for t, lvl, body in CHAPTERS:
+        p = doc.new_page() if lvl == 1 else doc[-1]
+        y = 90 if lvl == 1 else 200
+        p.insert_text((72, y), t, fontsize=22 if lvl == 1 else 16)
+        p.insert_text((72, y + 40), body, fontsize=11)
+        toc.append([lvl, t, doc.page_count])
+    doc.set_toc(toc)
+    doc.save(path)
+    return load(str(path), "candidate", cfg)
+
+
+def test_web_guide_skips_print_only_pages_and_compares_heading_depth(tmp_path, cfg):
+    a = _guide_pdf(tmp_path / "a.pdf")
+    b = _site_doc(tmp_path / "b.pdf", cfg)
+    r = compare(a, b.path, cfg, candidate_doc=b, candidate_meta={"mode": "html", "page_title": "Package contents"})
+    msgs = [f["message"] for f in checks(r, "structure")]
+    assert not [m for m in msgs if "not found in candidate" in m], msgs  # cover, TOC page, back cover
+    assert not [m for m in msgs if m.startswith("Outline level")], msgs  # H2/H3 in the PDF = h1/h2 on the web

@@ -13,7 +13,7 @@ from typing import Callable
 import pymupdf
 from PIL import Image, ImageDraw, ImageFont
 
-COLORS = {"content": (225, 29, 72), "style": (124, 58, 237), "layout": (234, 88, 12),
+COLORS = {"content": (220, 38, 38), "style": (124, 58, 237), "layout": (234, 88, 12),
           "assets": (13, 148, 136), "structure": (37, 99, 235),
           "tables": (2, 132, 199), "integrity": (185, 28, 28)}
 try:
@@ -99,6 +99,17 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 1
                 note = f"+ more on {others} other page(s)" if others else None
                 img = _crop(caches[side], page, boxes, color, note)
                 kind = "issue"
+            elif side == "baseline" and f["detail"].get("kind") == "spec":
+                # a design-spec finding: the reference is the Figma spec, not prod
+                page = 0
+                img = _spec_card(f["detail"].get("spec", ""), color)
+                kind = "spec"
+            elif side == "candidate" and f["detail"].get("stage_page_error"):
+                # the section's web page did not load: any crop of the pages that did would mislead
+                err = f["detail"]["stage_page_error"]
+                page = f["candidate_at"]["page"] if f.get("candidate_at") else 0
+                img = _error_card(err["url"], err["reason"], color)
+                kind = "page-error"
             elif f.get(side + "_at"):  # one-sided: show the aligned position on this side
                 at = f[side + "_at"]
                 page = at["page"]
@@ -156,6 +167,32 @@ def _crop_marker(pc: _PageCache, page: int, y: float, color, note: str) -> Image
     d.polygon([(0, my - 10), (14, my), (0, my + 10)], fill=color)
     d.rectangle([0, 0, img.width, 30], fill=(30, 35, 48))
     d.text((10, 6), note, fill=(255, 255, 255), font=_FONT)
+    return img
+
+
+def _spec_card(text: str, color) -> Image.Image:
+    """Stand-in for the prod side of a design-spec finding: the style the spec asks for."""
+    img = Image.new("RGB", (1280, 220), (248, 250, 252))
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, img.width, 30], fill=(30, 35, 48))
+    d.text((10, 6), "Design spec (Figma: Online User Manual) - checked against stage, not prod", fill=(255, 255, 255), font=_FONT)
+    d.rectangle([0, 30, 8, img.height], fill=color)
+    for k in range(0, len(text), 100):
+        d.text((30, 70 + 28 * (k // 100)), text[k:k + 100], fill=(51, 65, 85), font=_FONT)
+    return img
+
+
+def _error_card(url: str, reason: str, color) -> Image.Image:
+    """Stand-in for a stage page that failed to load: what was opened and what came back."""
+    img = Image.new("RGB", (1280, 220), (248, 250, 252))
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, img.width, 30], fill=(30, 35, 48))
+    d.text((10, 6), "Not in stage - the stage page for this section was not captured", fill=(255, 255, 255), font=_FONT)
+    d.rectangle([0, 30, 8, img.height], fill=color)
+    d.text((30, 70), f"Stage page not captured: {reason}", fill=color, font=_FONT)
+    url = url or "(no page to open: the left navigation has no entry for this section's chapter)"
+    for k in range(0, len(url), 110):  # long URLs wrap
+        d.text((30, 110 + 26 * (k // 110)), url[k:k + 110], fill=(51, 65, 85), font=_FONT)
     return img
 
 

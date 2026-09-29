@@ -18,15 +18,29 @@ from PIL import Image
 
 SEV_COLOR = {"error": "#d92d20", "warning": "#b45309", "info": "#64748b"}
 STATUS_COLOR = {"fail": "#d92d20", "warn": "#b45309", "pass": "#16a34a"}
-CHECK_COLOR = {"toc": "#9333ea", "structure": "#2563eb", "content": "#e11d48", "tables": "#0284c7", "assets": "#0d9488",
+CHECK_COLOR = {"toc": "#9333ea", "structure": "#2563eb", "content": "#dc2626", "tables": "#0284c7", "assets": "#0d9488",
                "integrity": "#b91c1c", "style": "#7c3aed", "layout": "#ea580c"}
 PCT_COLOR = {"pass": "#16a34a", "warn": "#b45309", "fail": "#d92d20"}
 CATS = [("content", "Content"), ("images", "Images"), ("tables", "Tables"), ("toc", "TOC"), ("structure", "Structure"),
         ("links", "Links & rendering"), ("css", "CSS / layout")]
 CAT_LABEL = dict(CATS)
-CAT_COLOR = {"toc": "#9333ea", "content": "#e11d48", "images": "#0d9488", "tables": "#0284c7", "structure": "#2563eb",
+CAT_COLOR = {"toc": "#9333ea", "content": "#dc2626", "images": "#0d9488", "tables": "#0284c7", "structure": "#2563eb",
              "links": "#b91c1c", "css": "#7c3aed"}
 CAT_ORDER = {c: k for k, (c, _) in enumerate(CATS)}
+# the report lists the issues in this order, each group on its own pages
+GROUPS = [("content", "Content", "text: missing, extra, changed words, case, punctuation, spacing"),
+          ("links", "Links", "links, attachments, broken characters, text off the page"),
+          ("formatting", "Formatting", "sections and headings, tables, images, TOC, layout, bullets and lists"),
+          ("css", "CSS", "fonts, sizes, weights and colours")]
+GROUP_ORDER = {g: k for k, (g, _, _) in enumerate(GROUPS)}
+
+
+def group_of(f: dict) -> str:
+    """Report group of a finding: content, links, formatting or css (style only; layout is formatting)."""
+    if f.get("check") == "style":
+        return "css"
+    cat = f.get("category")
+    return cat if cat in ("content", "links") else "formatting"
 CSS = """
 * { font-family: sans-serif; font-size: 9px; color: #1d2330; }
 h1 { font-size: 20px; margin: 0 0 2px 0; } h2 { font-size: 13px; margin: 14px 0 2px 0; }
@@ -286,23 +300,35 @@ def select_issues(result: dict, flt: dict | None = None, severities: set[str] | 
     sev = set(flt.get("severities") or []) or severities or {"error", "warning", "info"}
     secs = set(flt.get("sections") or [])
     q = (flt.get("q") or "").lower()
+    ids = set(flt["ids"]) if flt.get("ids") is not None else None  # exactly the issues picked in the UI
     out = []
     for s in result["sections"]:
         if secs and s["id"] not in secs:
             continue
-        for f in sorted(s["findings"], key=lambda f: (not f.get("critical"), CAT_ORDER.get(f.get("category"), 9))):
+        for f in s["findings"]:
+            if ids is not None:
+                if f["id"] in ids:
+                    out.append((s, f))
+                continue
             if f["severity"] not in sev or (cats and f.get("category") not in cats) \
                     or (types and not set(f.get("types") or []) & types) or (flt.get("critical_only") and not f.get("critical")) \
                     or (q and q not in f["message"].lower() and q not in s["title"].lower()) \
                     or (flt.get("genuine_only") and not f.get("genuine")):
                 continue
             out.append((s, f))
+    # content first, then links, formatting and CSS last; in each group the document's section
+    # order, critical issues first within a section
+    pos = {id(s): k for k, s in enumerate(result["sections"])}
+    out.sort(key=lambda sf: (GROUP_ORDER[group_of(sf[1])], pos[id(sf[0])], not sf[1].get("critical"),
+                             CAT_ORDER.get(sf[1].get("category"), 9)))
     return out
 
 
 def describe(flt: dict | None, n: int) -> str:
     """Human-readable filter note for the report's first page."""
     flt = flt or {}
+    if flt.get("note"):  # the UI describes its own selection
+        return f"{n} issue(s) · {flt['note']}"
     parts = []
     if flt.get("categories"):
         parts.append("categories: " + ", ".join(CAT_LABEL.get(c, c) for c in flt["categories"]))
@@ -340,7 +366,16 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
     if (opts.get("filter") or {}).get("genuine_only"):
         blocks[0] = blocks[0].replace("PDF Parity Report", "Genuine Issues Report", 1)
     if inc["issues"]:
-        blocks[-1] += f"<h2>Issues ({len(issues)}) follow on the next pages</h2>"
+        n_by = Counter(group_of(f) for _, f in issues)
+        capped = sum(n for s in result["sections"] for c, v in s.get("checks", {}).items()
+                     for n in [v.get("truncated", 0)] if n)
+        blocks[-1] += (f"<h2>Issues ({len(issues)}) follow on the next pages, in this order</h2>"
+                       "<table class='grid'><tr><th>#</th><th>Group</th><th>What it covers</th><th class='n'>Issues</th></tr>"
+                       + "".join(f"<tr><td>{k + 1}</td><td><b>{escape(l)}</b></td><td>{escape(d)}</td><td class='n'>{n_by[g]}</td></tr>"
+                                 for k, (g, l, d) in enumerate(GROUPS)) + "</table>"
+                       + (f"<p class='muted'>{capped} further CSS / layout findings of kinds already listed are not "
+                          f"repeated (report.max_findings_per_check per check and section); every critical and genuine "
+                          f"issue is listed.</p>" if capped else ""))
     for block in blocks:  # each block on fresh pages; a page cap guards against a layout loop
         story = pymupdf.Story(block, user_css=CSS)
         more, pages = 1, 0
@@ -356,8 +391,16 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
     # --- issues: direct drawing, prod | stage screenshots side by side
     c = _Canvas(doc)
     col_w, gap, max_h = (c.width - 16) / 2, 16, 230
-    current = None
+    current = group = None
     for k, (s, f) in enumerate(issues):
+        if group_of(f) != group:  # each group starts on a new page with its heading
+            group = group_of(f)
+            gk = GROUP_ORDER[group]
+            c.new_page()
+            n_g = sum(1 for _, x in issues if group_of(x) == group)
+            c.runs([(f"{gk + 1}. {GROUPS[gk][1]}", "#1d2330", True), (f"   {n_g} issue(s) · {GROUPS[gk][2]}", "#6a7282", False)], 14)
+            c.y += 6
+            current = None
         if progress and k % 50 == 0:
             progress(k / max(len(issues), 1), f"PDF report: issue {k}/{len(issues)}")
         shots = f.get("shots", {}) if inc["screenshots"] else {}

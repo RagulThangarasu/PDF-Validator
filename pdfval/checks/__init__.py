@@ -142,8 +142,9 @@ def snippet(doc: Doc, idxs, n: int = 18) -> str:
     return s + (" …" if len(idxs) > n else "")
 
 
-from . import assets, content, integrity, layout, placement, style, tables  # noqa: E402
+from . import assets, content, integrity, layout, placement, style, tables, typography  # noqa: E402
 
 # content must run first: it produces the word pairs every other check relies on;
 # placement needs the image pairs from assets
-PIPELINE = [content.check, style.check, layout.check, tables.check, assets.check, placement.check, integrity.check]
+PIPELINE = [content.check, style.check, typography.check, layout.check, tables.check, assets.check, placement.check,
+            integrity.check]

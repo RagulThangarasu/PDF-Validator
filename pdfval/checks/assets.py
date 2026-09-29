@@ -80,37 +80,55 @@ def find_artwork(img_doc: Doc, im: Image, other: Doc, at, min_score: float, max_
     pw = other.pages[at.page].width
     ph = other.pages[at.page].height
     y0, y1 = max(0.0, at.bbox[1] - 220), min(ph, at.bbox[1] + 220)
-    tpl_full = _gray(img_doc, im.page, im.bbox, 1.0)
+    tpl_full = PILImage.fromarray(_gray(img_doc, im.page, im.bbox, 1.0).astype(np.uint8))
     base_w = (other.right(at.page) - other.left(at.page)) * _rel_width(img_doc, im)
-    best = None
+    # render once at 1 px/pt and area-average down: rendering straight at a low zoom drops
+    # thin lines, so line-art drawn as vectors would not correlate with its bitmap
+    hay_full = _gray(other, at.page, (0, y0, pw, y1), 1.0)
+    for pg, r in claimed or []:
+        if pg == at.page:
+            hay_full[max(0, int(r[1] - y0)):max(0, int(r[3] - y0)), int(r[0]):int(r[2])] = 255
+    hay_img = PILImage.fromarray(hay_full.astype(np.uint8))
     hay_cache: dict[float, "np.ndarray"] = {}
-    for s in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.3, 1.5):
-        # correlate at a resolution where the picture is ~48 px wide: enough to recognise
-        # a label or logo, and cheap (the cost grows with template area x search area)
-        k = round(min(0.6, 48 / max(base_w * s, 1)), 3)
+
+    def at_scale(s: float) -> tuple[float, tuple] | None:
+        # correlate at a resolution where the picture is ~48 px wide (and, for a wide banner,
+        # ~20 px tall): enough to recognise a label, logo or strip of illustrations, and cheap
+        # (the cost grows with template area x search area)
+        w_pt = max(base_w * s, 1)
+        k = round(min(0.6, max(96 / w_pt, 20 / max(w_pt * im_aspect(im), 1))), 3)
         if k not in hay_cache:
-            hay = _gray(other, at.page, (0, y0, pw, y1), k)
-            for pg, r in claimed or []:
-                if pg == at.page:
-                    hay[max(0, int((r[1] - y0) * k)):max(0, int((r[3] - y0) * k)), int(r[0] * k):int(r[2] * k)] = 255
-            hay_cache[k] = hay
+            size = (max(1, round(hay_img.width * k)), max(1, round(hay_img.height * k)))
+            hay_cache[k] = np.asarray(hay_img.resize(size, PILImage.BOX), np.float32)
         hay = hay_cache[k]
-        tw = int(base_w * s * k)
-        th = int(tw * im_aspect(im))
+        tw = round(base_w * s * k)
+        th = round(base_w * s * k * im_aspect(im))
         if tw < 12 or th < 8 or tw >= hay.shape[1] or th >= hay.shape[0]:
-            continue
-        tpl = np.asarray(PILImage.fromarray(tpl_full.astype(np.uint8)).resize((tw, th), PILImage.BILINEAR), np.float32)
-        ncc = _ncc(hay, tpl)
+            return None
+        ncc = _ncc(hay, np.asarray(tpl_full.resize((tw, th), PILImage.BOX), np.float32))
         if ncc is None:
-            continue
+            return None
         iy, ix = np.unravel_index(int(ncc.argmax()), ncc.shape)
-        score = float(ncc[iy, ix])
-        if best is None or score > best[0]:
-            x0, yy0 = ix / k, y0 + iy / k
-            best = (score, (x0, yy0, x0 + tw / k, yy0 + th / k))
+        x0, yy0 = ix / k, y0 + iy / k
+        return float(ncc[iy, ix]), (x0, yy0, x0 + tw / k, yy0 + th / k)
+
+    best, best_s = None, 1.0
+    for s in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.3, 1.5):
+        hit = at_scale(s)
+        if hit and (best is None or hit[0] > best[0]):
+            best, best_s = hit, s
+    # the correlation peak of a large picture is narrow in scale: refine between the grid steps
+    for f in (0.92, 0.96, 1.04, 1.08):
+        hit = at_scale(best_s * f)
+        if hit and (best is None or hit[0] > best[0]):
+            best = hit
     if not best or best[0] < min_score:
         return None
-    if visual_distance(img_doc, im, other, Image(at.page, best[1])) > max_dist:
+    hit = Image(at.page, best[1])
+    # second signal: the visual hash, or - for a strong correlation, where the hash is too strict
+    # for line art re-drawn with other stroke widths - the pixel similarity of the two pictures
+    if visual_distance(img_doc, im, other, hit) > max_dist and \
+            (best[0] < 0.75 or pixel_compare(other, hit, img_doc, im)[0] < 0.8):
         return None
     if claimed is not None:
         claimed.append((at.page, best[1]))
@@ -222,6 +240,98 @@ def _aspect(doc: Doc, im: Image) -> float:
     return w / max(h, 1e-6)
 
 
+def _repair_by_look(u: Unit, ia, ib, used: set, pairs: list, changed: list, missing: list, anchor,
+                    icon_w: float, same_look: float, sim_same: float, min_pic: float) -> None:
+    """Pictures the text could not place: when the pages lay the pictures out in another order (a
+    two-column page read the other way, items flowing onto the next page), each prod picture
+    looks for its partner at the wrong spot, takes whatever picture is there ("different image",
+    or a look-alike line drawing) and leaves its real partner over ("extra image"). Here the
+    missing, "different" and weakly paired prod pictures (outline alike, pixels not the same
+    picture) are matched again with the leftover, "different" and weakly paired stage pictures
+    of the section, wherever they are: a pair needs the same look and the same pixels. What is
+    left stays missing / extra / different. Mutates the lists."""
+    idx_b = {id(y): n for n, y in enumerate(ib)}
+    big = lambda x: _rel_width(u.a, x) >= min_pic
+    same = {}  # (id x, n) -> pixel similarity, computed once
+
+    def sim(x, n):
+        if (id(x), n) not in same:
+            same[(id(x), n)] = pixel_compare(u.a, x, u.b, ib[n])[0]
+        return same[(id(x), n)]
+
+    weak = [p for p in pairs if big(p[0]) and sim(p[0], idx_b[id(p[1])]) < sim_same]
+    held = list(changed) + weak  # prod pictures that hold a stage picture they may not own
+    pool_a = [m for m in missing if not m[2]] + held
+    pool_b = {n for n in range(len(ib)) if n not in used} | {idx_b[id(h[1])] for h in held}
+    cands = []
+    for k, item in enumerate(pool_a):
+        x = item[0]
+        for n in pool_b:
+            y = ib[n]
+            if (item in held and y is item[1]) or _rel_width(u.b, y) < icon_w:
+                continue  # its own picture was judged already; icons are not pictures
+            # a picture: its pixels decide (the hash of a line drawing is fooled by crops and
+            # margins, 0.99 pixel-alike pictures can hash 0.28 apart); an icon: its look
+            vis = visual_distance(u.a, x, u.b, y)
+            if big(x) and sim(x, n) >= sim_same:
+                cands.append((1 - sim(x, n), k, n))
+            elif not big(x) and vis <= same_look:
+                cands.append((vis, k, n))
+    taken_a: dict[int, tuple[int, float]] = {}
+    taken_b: set[int] = set()
+    for vis, k, n in sorted(cands):
+        if k not in taken_a and n not in taken_b:
+            taken_a[k] = (n, vis)
+            taken_b.add(n)
+    if not taken_a:
+        return
+    for k, item in enumerate(pool_a):
+        own = idx_b[id(item[1])] if item in held else None
+        home = changed if item in changed else pairs if item in held else missing
+        if k in taken_a:
+            n, vis = taken_a[k]
+            home.remove(item)
+            if own is not None and own not in taken_b:
+                used.discard(own)  # not the picture of this spot after all: an extra one
+            pairs.append((item[0], ib[n], visual_distance(u.a, item[0], u.b, ib[n])))
+            used.add(n)
+        elif own is not None and own in taken_b:
+            home.remove(item)  # its stage picture belongs to another prod picture
+            missing.append((item[0], anchor(u.a, u.a_range, item[0]), False))
+
+
+def _combined(u: Unit, ib, used: set, missing: list, changed: list, art_score: float, same_look: float,
+              min_pic: float) -> list[tuple[Image, Image, tuple]]:
+    """Missing / "different" prod pictures found inside a stage picture of the section that is at
+    least 1.5x their area (stage combined several prod pictures into one). Returns
+    [(prod picture, stage picture, (score, rect))] and takes them out of `missing` / `changed`;
+    the stage picture counts as placed. Mutates the lists."""
+    area = lambda im: (im.bbox[2] - im.bbox[0]) * (im.bbox[3] - im.bbox[1])
+    bigs = [y for y in ib if _rel_width(u.b, y) >= min_pic]
+    out = []
+
+    def inside(x):
+        for y in bigs:
+            if area(y) < 1.5 * area(x):
+                continue
+            top = y.bbox[1] + 200  # find_artwork searches 220 pt above and below its spot
+            while top - 220 < y.bbox[3]:
+                hit = find_artwork(u.a, x, u.b, Loc(y.page, (y.bbox[0], top, y.bbox[2], top + 1)), art_score, same_look)
+                r = hit[1] if hit else None
+                if r and r[0] >= y.bbox[0] - 4 and r[2] <= y.bbox[2] + 4 and r[1] >= y.bbox[1] - 4 and r[3] <= y.bbox[3] + 4:
+                    return y, hit
+                top += 400
+        return None
+
+    for item in [m for m in missing if not m[2]] + list(changed):  # pictures, not icons
+        found = inside(item[0])
+        if found:
+            (missing if item in missing else changed).remove(item)
+            used.add(next(n for n, y in enumerate(ib) if y is found[0]))
+            out.append((item[0], *found))
+    return out
+
+
 def check(u: Unit) -> list[Finding]:
     acfg = u.cfg["assets"]
     al = Aligner(u)
@@ -288,6 +398,7 @@ def check(u: Unit) -> list[Finding]:
         elif home is changed and sim >= sim_same:
             changed.remove(item)
             pairs.append(item)
+    _repair_by_look(u, ia, ib, used, pairs, changed, missing, anchor, icon_w, same_look, sim_same, min_pic)
     # Icons are paired like any image (so a resized icon is a size finding, not
     # missing+extra); only *unpaired* icons are subject to the `icons` setting,
     # because note/tip/LED icons are often raster in one PDF and vector in the other.
@@ -298,6 +409,13 @@ def check(u: Unit) -> list[Finding]:
     art_score = acfg.get("artwork_match_score", 0.6)
     claimed_a: list = []
     claimed_b: list = []
+    # prod pictures that stage shows as part of one bigger picture (several views of the product
+    # combined into one image): found inside it, so neither missing nor a different picture
+    for x, y, hit in _combined(u, ib, used, missing, changed, art_score, same_look, min_pic):
+        findings.append(Finding(
+            "assets", vec_sev, f"Picture combined in stage: the prod picture is part of a larger stage picture "
+                               f"(prod p.{x.page + 1} ↔ stage p.{y.page + 1}, match {hit[0]:.0%})",
+            [Loc(x.page, x.bbox)], [Loc(y.page, hit[1])], {"kind": "combined"}, types=["image combined"]))
     for x, ax, icon in missing:
         if icon and icons == "ignore":
             continue

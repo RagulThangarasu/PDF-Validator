@@ -1,5 +1,40 @@
 # pdfval — section-by-section PDF parity (prod baseline vs stage)
 
+## Setup and run (start here)
+
+You need **Python 3.11 or newer**. The Python that comes with macOS is 3.9 and does not work: it fails with `ModuleNotFoundError: No module named 'tomllib'`. The VS Code Python extension does not install Python.
+
+**1. Install (once).** Open a terminal (bash or zsh) in this folder:
+
+```bash
+# get Python 3.12 without admin rights (uv downloads it into your home folder)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+
+rm -rf .venv                                   # remove an old venv, if any
+uv venv --python 3.12 .venv
+.venv/bin/python --version                     # must print Python 3.12.x
+uv pip install --python .venv/bin/python -r requirements.txt
+.venv/bin/playwright install chromium          # browser for web-page (AEM site) runs
+```
+
+If you already have Python 3.11+ (e.g. `python3.12 --version` works), use it instead of uv:
+`python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/playwright install chromium`
+
+Optional: `brew install tesseract` for OCR of text drawn inside pictures.
+
+**2. Start the UI (every time).**
+
+```bash
+.venv/bin/python -m pdfval ui          # opens http://localhost:8700 - keep the terminal open
+```
+
+To restart after updating the code: press **Ctrl+C** in that terminal (or run `pkill -f "pdfval ui"`), then start it again.
+
+**3. Run a comparison.** In the browser: pick the **prod PDF**, then the **stage PDF** or a stage **URL** (tick **Crawl** to follow every page of the left navigation; add the site login if needed), and click **Run**. Open the result, or download **⬇ Genuine issues** (PDF + CSV). Runs are saved in `runs/<run-id>/`.
+
+In VS Code: **Cmd+Shift+P → Python: Select Interpreter → `./.venv/bin/python`**.
+
 Validates a **candidate** PDF (stage) against a **baseline** PDF (prod) section by section for:
 
 | Check | What is compared | Example finding |
@@ -31,7 +66,7 @@ Most findings are differences you can live with (CSS, wrapping, case/punctuation
 | Link broken / not a link in stage / pointing to the wrong section / to a different address | `Link points to the wrong section: “For details, see …” goes to “Setup” in prod but to “Maintenance” in stage` |
 | Attachment missing, broken characters, text cut off | |
 
-**Nothing genuine is dropped.** Each check keeps at most `report.max_findings_per_check` findings per section, but that cap only thins presentation findings (CSS, layout). Critical and genuine issues are always kept, however many a section has. Presentation findings stay out of the genuine report: fonts, colours, indent, alignment, line height, line-wrap, graphic placement, same artwork drawn as vector vs image, bookmark-only differences and reordered-only text. Everything else is in: the level-1 TOC (missing, extra or renamed entries, level, page number, heading); extra sections and heading levels; extra, distorted, different, blacked-out and duplicated images and missing image labels; and every table-structure change (extra table or row, rows split, cells merged or split, table turned into text and back). An image counts as *distorted* when stage draws it at least 25 % out of its own pixel proportions and prod does not.
+**Nothing is dropped.** Every finding is reported (`report.max_findings_per_check = 0`, no cap); if you set a cap it only thins presentation findings (CSS, layout). The PDF report lists every issue of every severity in four groups, each starting on a new page: **1. Content** (text), **2. Links** (links, attachments, broken characters, text off the page), **3. Formatting** (sections and headings, tables, images, TOC, layout, bullets and lists) and **4. CSS** last (fonts, sizes, weights, colours); in each group the document's section order. Critical and genuine issues are always kept, however many a section has. Presentation findings stay out of the genuine report: fonts, colours, indent, alignment, line height, line-wrap, graphic placement, same artwork drawn as vector vs image, bookmark-only differences and reordered-only text. TOC findings stay out too (they come from the ditamap and the PDF template; they are in the full report and the TOC tab, `[genuine] exclude_checks`). Template differences are info findings, not genuine issues: a callout label on one side only (stage prints “NOTE:” where prod shows only the note icon), a “(continued)” header repeated at a page break, a cross-reference page number (`see "Title" on page 12.` vs `see "Title".`, `content.ignore_xref_page_numbers`), and a prod picture that stage shows as part of one larger combined picture. Arrow keys drawn with the Wingdings 3 font (the letters p q t u) are compared as ▲ ▼ ◄ ►. Pictures laid out in another order (two columns, items flowing onto the next page) are paired by their pixels, wherever they are in the section. Everything else is in: extra sections and heading levels; extra, distorted, different, blacked-out and duplicated images and missing image labels; and every table-structure change (extra table or row, rows split, cells merged or split, table turned into text and back). An image counts as *distorted* when stage draws it at least 25 % out of its own pixel proportions and prod does not.
 
 Every run writes `genuine-issues.pdf` (overview table with a description and why it matters, then each issue with prod/stage screenshots) and `genuine-issues.csv` (opens in Excel). In the UI: **⬇ Genuine issues (N)**, or *PDF report… → Genuine issues only*. CLI: `--fail-on genuine` exits 1 when there is any genuine issue.
 
@@ -64,7 +99,7 @@ A stage PDF published by AEM Guides has a named destination for every topic (`GU
 - **Reports**: `genuine-issues.pdf` starts with *AEM topics to fix*, and every issue in it has a clickable GUID. `genuine-issues.csv` has *AEM topic*, *GUID* (an Excel `HYPERLINK`), *Element* and *Open in AEM* columns. `summary.md` and the side-by-side viewer show the links too.
 - TOC issues have no GUID. They come from the ditamap and the PDF template, not from a topic.
 
-**What a GUID opens** (`[aem] open_in`): by default the product's **map** in the author editor, with all of its topics, from `<product folder>/Maps/<map file>`. The map file is named in the stage PDF (e.g. `sl04_and_sh04.ditamap`), and the product folder comes from the product settings, e.g. `sl04_and_sh04` = `/content/dam/benq-aem-guides/en/Education/Signage/SL04-and-SH04`. With the AEM login, the map is looked up in AEM (so the product folder is found automatically), topic files are searched inside that product folder, and the AEM topics tab also offers each topic file directly. `open_in = "topic"` opens the topic file instead.
+**What a GUID opens** (`[aem] open_in`): by default the **topic file** the GUID belongs to. The file is looked up in AEM, so this needs the AEM login; without it (or when AEM does not find the file) the link opens the product's **map** in the author editor, from `<product folder>/Maps/<map file>`. The map file is named in the stage PDF (e.g. `sl04_and_sh04.ditamap`), and the product folder comes from the product settings, e.g. `sl04_and_sh04` = `/content/dam/benq-aem-guides/en/Education/Signage/SL04-and-SH04`. With the AEM login, the map is looked up in AEM too (so the product folder is found automatically) and topic files are searched inside that product folder. `open_in = "map"` always opens the map instead.
 
 **Link settings** (AEM topics tab → *AEM link settings*, saved in `runs/aem-settings.json`, or `[aem]` in the config):
 
@@ -209,7 +244,7 @@ Every issue's prod and stage screenshots come from the **content alignment**. Th
 
 ```bash
 cd pdf_validator
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/playwright install chromium
+# one-time setup: see "Setup and run" at the top (needs Python 3.11+)
 
 # 1. compare  (exit code 1 when any section has an error; --fail-on warning|never;
 #    --screenshots all|warnings|errors|none controls which issues get screenshots in report.pdf)

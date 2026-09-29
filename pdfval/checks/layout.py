@@ -160,14 +160,16 @@ def _wrap_links(A: Doc, B: Doc, a: list[int], b: list[int]) -> list:
 
 def _marker_test(lcfg: dict):
     """Is a word a list marker? An enumerator matching `list_marker` (1. 2) a. (iv)),
-    or a run of characters whose Unicode categories are all in `list_symbol_categories`
+    or one character (maybe repeated) whose Unicode category is in `list_symbol_categories`
     (bullets are punctuation / other symbols: • * - ▪ ✓; math symbols such as × + | are
     not, so "32.8 × 55.6" wrapped after 32.8 does not start a list)."""
     import unicodedata
     enum = re.compile(lcfg["list_marker"]) if lcfg.get("list_marker") else None
     cats = set(lcfg.get("list_symbol_categories", []))
+    # a bullet is one glyph, maybe repeated ("•", "--"): "◄/►" starting a wrapped line is not a bullet
     return lambda t: bool(t) and ((enum is not None and enum.match(t) is not None)
-                                  or (bool(cats) and all(unicodedata.category(c) in cats for c in t)))
+                                  or (bool(cats) and len(set(t)) == 1 and len(t) <= 3
+                                      and all(unicodedata.category(c) in cats for c in t)))
 
 
 def _list_items(doc: Doc, rng: tuple[int, int], is_marker, tol_em: float, max_gap_em: float) -> dict[int, dict]:
@@ -197,13 +199,16 @@ def _list_items(doc: Doc, rng: tuple[int, int], is_marker, tol_em: float, max_ga
         """The nearest marker-only line on the same visual row, left of word f, with no
         other text between them (a "/" between two icons in another table cell is not
         the bullet of the text in the next cell)."""
+        # a marker printed with no gap ("10.Do not ...") ends where the text starts, give or take
+        # a fraction of a point: `touch` of slack both ways
+        touch = 1.5
         left = [m for m in lone_by_page.get(doc.words[f].page, [])
-                if same_row(doc, m, f) and doc.words[m].bbox[2] <= doc.words[f].bbox[0]]
+                if same_row(doc, m, f) and doc.words[m].bbox[2] <= doc.words[f].bbox[0] + touch]
         m = max(left, key=lambda m: doc.words[m].bbox[2], default=None)
         if m is None:
             return None
         a, b = doc.words[m].bbox[2], doc.words[f].bbox[0]
-        between = any(a <= doc.lines[li].bbox[0] < b and same_row(doc, doc.lines[li].first_word, f)
+        between = any(a - touch <= doc.lines[li].bbox[0] < b - touch and same_row(doc, doc.lines[li].first_word, f)
                       for li in row_lines[doc.words[f].page])
         return None if between else m
 
@@ -343,6 +348,35 @@ def _numbering(doc: Doc, items: dict[int, dict]) -> None:
             prev = v if v is not None else prev
 
 
+def _item_pairs(u: Unit, ia: dict, ib: dict, min_words: int = 3) -> list[tuple[int, int]]:
+    """The text diff's word pairs, with list items paired right when the lists are read in another
+    order (a two-column list read row by row on one side, column by column on the other): the
+    diff then pairs one item's "1 x" with another item's. Two item starts are paired only when
+    their first lines have the same words (the shorter line when one side wraps earlier); items
+    left over are paired by that text when it names one item on each side."""
+    def text(d, k):
+        out = []
+        for w in d.words[k:]:
+            if w.line != d.words[k].line:
+                break
+            if w.norm:
+                out.append(w.norm)
+        return tuple(out)
+
+    same = lambda x, y: min(len(x), len(y)) >= min_words and x[:len(y)] == y[:len(x)]
+    pairs = [(i, j) for i, j in u.pairs if not (i in ia and j in ib) or same(text(u.a, i), text(u.b, j))]
+    done_a, done_b = {i for i, _ in pairs}, {j for _, j in pairs}
+    ta = {i: text(u.a, i) for i in ia if i not in done_a}
+    tb = {j: text(u.b, j) for j in ib if j not in done_b}
+    out = pairs
+    for i, x in ta.items():
+        hits = [j for j, y in tb.items() if same(x, y)]
+        if len(hits) == 1 and sum(1 for z in ta.values() if same(z, tb[hits[0]])) == 1:
+            out.append((i, hits[0]))
+            del tb[hits[0]]
+    return out
+
+
 def _bullets(u: Unit) -> list[Finding]:
     """Bullet / numbered list alignment, compared on items whose text matched."""
     lcfg, rcfg = u.cfg["layout"], u.cfg["report"]
@@ -359,7 +393,7 @@ def _bullets(u: Unit) -> list[Finding]:
     line_start = lambda d, k: d.words[k].line_start
     kind_of = lambda d, x: (f"numbered {x['style']}" if x.get("style") else f"bullet “{d.words[x['marker']].text}”")
     groups: dict[tuple, list] = defaultdict(list)
-    for i, j in u.pairs:
+    for i, j in _item_pairs(u, ia, ib):
         xa, xb = ia.get(i), ib.get(j)
         if not xa and not xb:
             continue
@@ -417,8 +451,7 @@ def _bullets(u: Unit) -> list[Finding]:
         # where it should be (the item's first word), so both screenshots show the same item
         pairs = [p for xa, xb, i, j in items
                  for p in [(xa["marker"] if xa else i, xb["marker"] if xb else j), (i, j)]]
-        eg = "; ".join(f"“{A.words[i].text} {A.words[i + 1].text if i + 1 < len(A.words) else ''}”".replace(" ”", "”")
-                       for _, _, i, _ in items[:3])
+        eg = "; ".join(f"“{_item_start(A, i)}”" for _, _, i, _ in items[:3])
         text = f"[{role}] {prop} ({what[prop]}): {x} → {y} ({len(items)} items, e.g. {eg})"
         if prop == "bullet marker" and "none" in (x, y):
             side, d, key = ("stage", A, 0) if y == "none" else ("prod", B, 1)
@@ -434,6 +467,16 @@ def _bullets(u: Unit) -> list[Finding]:
             types=["indent", "bullet"], links=paired_locs(A, B, pairs, rcfg["max_locs"]),
         ))
     return findings
+
+
+def _item_start(d: Doc, i: int, n: int = 4) -> str:
+    """The first words of a list item, on its first line: “1 x Webcam accessory”, not just “1 x”."""
+    out = []
+    for w in d.words[i:i + n]:
+        if w.line != d.words[i].line:
+            break
+        out.append(w.text)
+    return " ".join(out)
 
 
 def _label(style: str | None, v: int | None) -> str | None:

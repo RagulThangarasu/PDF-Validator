@@ -93,6 +93,29 @@ def fold_labels(doc, labels: list[str]) -> int:
     return n
 
 
+_CLOSE_QUOTE = ('"', "”", "’", "'", "»")
+
+
+def fold_xref_pages(doc) -> int:
+    """Cross-reference page numbers are the PDF template's: InDesign writes
+    `see "Controls and functions" on page 12.` where AEM Guides writes `see "Controls and
+    functions".` - and the number shifts with every layout change anyway (like TOC page numbers).
+    After a quoted cross-reference, "on page N" is taken out of the comparison; the punctuation
+    after N stays with the reference. Returns the number folded."""
+    ws, n = doc.words, 0
+    for k in range(1, len(ws) - 2):
+        prev, on, page, num = ws[k - 1], ws[k], ws[k + 1], ws[k + 2]
+        if not (on.norm and page.norm and num.norm) or on.norm.lower() != "on" or page.norm.lower() != "page":
+            continue
+        m = re.fullmatch(r"(\d{1,4})([.,;:)]*)", num.norm)
+        if not m or not prev.norm or not prev.norm.rstrip(".,;:").endswith(_CLOSE_QUOTE):
+            continue
+        prev.norm += m.group(2)
+        on.norm = page.norm = num.norm = ""
+        n += 1
+    return n
+
+
 def title(text: str) -> str:
     t = clean(text)
     t = _LEADER.sub("", t)

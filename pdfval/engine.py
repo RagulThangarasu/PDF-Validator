@@ -9,9 +9,11 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 from . import aem, extract, genuine, normalize, sections, toc as tocmod
 from .checks import PIPELINE, Aligner, Unit, insertion_loc, locs
+from .checks import typography as checks_typography
 from .model import SEVERITY_RANK, Anchor, Doc, Finding, Loc
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config" / "default.toml"
@@ -20,6 +22,10 @@ DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config" / "default.to
 def load_config(path: str | None = None) -> dict:
     with open(DEFAULT_CONFIG, "rb") as f:
         cfg = tomllib.load(f)
+    typo = Path(DEFAULT_CONFIG).with_name("typography.toml")  # the design spec (Figma), its own file
+    if typo.exists():
+        with open(typo, "rb") as f:
+            _merge(cfg, tomllib.load(f))
     if path:
         with open(path, "rb") as f:
             _merge(cfg, tomllib.load(f))
@@ -69,6 +75,8 @@ def _reset_caches() -> None:
                   integrity._OFFPAGE, integrity._NAMES, tables._DOCS, tables._RAW, tables._RULES):
         cache.clear()
     placement._shapes.cache_clear()
+    from . import ocr
+    ocr.reset()
 
 
 def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str | None = None,
@@ -88,10 +96,20 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     if labels:  # "Tips" -> "TIPS:", "Note" -> "NOTE:" is house style, not a content change
         normalize.fold_labels(A, labels)
         normalize.fold_labels(B, labels)
+    if cfg["content"].get("ignore_xref_page_numbers", True):  # `"Title" on page 12` vs `"Title"`: template
+        normalize.fold_xref_pages(A)
+        normalize.fold_xref_pages(B)
     report(0.4, "Matching sections")
     # the printed table of contents is compared on its own (levels, entries, page numbers);
     # its text is taken out of the content diff (page numbers shift with every layout change)
     toc_a, toc_b = tocmod.detect(A, cfg), tocmod.detect(B, cfg)
+    nav_toc = ((candidate_meta or {}).get("capture") or {}).get("nav_toc")
+    if nav_toc:  # a web guide's table of contents is its left navigation, not the pages' heading outline
+        toc_b = tocmod.Toc("navigation", entries=[
+            tocmod.TocEntry(e["title"], normalize.title(e["title"]), e["level"], None, e["toc_page"],
+                            tuple(e["bbox"]), e["bbox"][0]) for e in nav_toc])
+        toc_b.pages = sorted({e.toc_page for e in toc_b.entries if e.toc_page >= 0})
+        toc_b.page_sizes = {p: (B.pages[p].width, B.pages[p].height) for p in toc_b.pages}
     for d, t in ((A, toc_a), (B, toc_b)):
         for li in t.lines:
             for w in d.words[d.lines[li].first_word:]:
@@ -178,11 +196,38 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     # a section missing in stage belongs where the next section present on both sides starts in stage
     # (or at the end of the one before): not where look-alike text (repeated notes, table rows) aligns
     missing_spans: list[tuple[tuple, tuple, Loc | None, str]] = []  # prod (page, y) start, end, stage spot, title
+    # web capture: guide pages that failed to load (HTTP 5xx, login form), by their file name slug.
+    # A section of such a page is missing because its page is broken, not because the text was left out.
+    # (matched by the page's left-navigation title, else by its file name)
+    failed_pages = {}
+    for s in ((candidate_meta or {}).get("capture") or {}).get("skipped", []):
+        for name in (s.get("title", ""), urlsplit(s["url"]).path.rsplit("/", 1)[-1].rsplit(".", 1)[0]):
+            if name:
+                failed_pages.setdefault(_slug(name), s)
+    top_level = min((a.level for a in anA), default=1)
+
+    def failed_page_of(i: int) -> dict | None:
+        """The failed stage page holding prod section i: its own, or its chapter's."""
+        for k in range(i, -1, -1):
+            hit = failed_pages.get(_slug(anA[k].title))
+            if hit or anA[k].level <= top_level:
+                return hit
+        return None
+
     by_a = sorted((anA[i].word, anB[j].word) for i, j, _ in pairs)
     pos_a = lambda k: (A.words[k].page, A.words[k].bbox[1]) if k < len(A.words) else (len(A.pages), 0.0)
+    # web guide: the PDF's printed-only pages - cover, the TOC page, back cover - have no web page.
+    # A heading the PDF's own TOC does not list, before its first chapter or after its last one's page.
+    html = (candidate_meta or {}).get("mode") == "html"
+    in_toc = {e.norm for e in toc_a.entries}
+    toc_pages = [an.page for an in anA if an.norm in in_toc]
+    print_only = lambda an: (html and toc_pages and an.norm not in in_toc
+                             and (an.page < min(toc_pages) or an.page > max(toc_pages)))
     for i, an in enumerate(anA):
         if scope and (not scope.contains(an.word) or i in scope.title_chapters):
             continue  # outside the part of the PDF this web page covers / matched by the page title
+        if i not in matched_a and print_only(an):
+            continue
         if i not in matched_a:
             nxt = next(((aw, bw) for aw, bw in by_a if aw > an.word), None)
             prv = next(((aw, bw) for aw, bw in reversed(by_a) if aw < an.word), None)
@@ -195,18 +240,23 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 spot = None
             end = min((x.word for x in anA if x.word > an.word), default=len(A.words))
             missing_spans.append((pos_a(an.word), pos_a(end), spot, an.title))
+            broken = failed_page_of(i)
             struct[unit_for("a", an.word).id].append(Finding(
                 "structure", cfg["sections"].get("missing_severity", "error"),
-                f"Section “{an.title}” (baseline p.{an.page + 1}) not found in candidate",
+                f"Section “{an.title}” (baseline p.{an.page + 1}) not found in candidate"
+                + (f" - its stage page was not captured ({broken['reason']})" if broken else ""),
                 [locs(A, [an.word])[0]] if an.located else [Loc(an.page, (0, an.y, A.pages[an.page].width, an.y + 20))],
-                detail={"heading": an.title, "anchor_side": "baseline", "anchor_word": an.word if an.located else None},
+                detail={"heading": an.title, "anchor_side": "baseline", "anchor_word": an.word if an.located else None,
+                        **({"stage_page_error": {"url": broken["url"], "reason": broken["reason"]}} if broken else {})},
                 candidate_at=spot, critical=True))
     count_a = Counter(an.norm for an in anA)
     count_b = Counter(an.norm for an in anB)
     pos_b = lambda k: (B.words[k].page, B.words[k].bbox[1]) if k < len(B.words) else (len(B.pages), 0.0)
     dup_spans: list[tuple[tuple, tuple, Finding]] = []  # stage (page, y) start, end of a duplicate copy
     for j, an in enumerate(anB):
-        if j not in matched_b and count_b[an.norm] > count_a[an.norm] and count_b[an.norm] >= 2:
+        # a duplicate copies a prod section: a heading prod does not have (e.g. "Structure" repeated
+        # under every menu chapter in stage, plain text in prod) is an extra section, not a duplicate
+        if j not in matched_b and count_b[an.norm] > count_a[an.norm] >= 1 and count_b[an.norm] >= 2:
             first = next(x for x in anB if x.norm == an.norm)
             struct[unit_for("b", an.word).id].append(Finding(
                 "structure", cfg["sections"].get("duplicate_severity", "error"),
@@ -224,6 +274,17 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 [], [locs(B, [an.word])[0]] if an.located else [],
                 detail={"heading": an.title, "anchor_side": "candidate", "anchor_word": an.word if an.located else None}))
     in_order = _increasing(pairs)
+    if html and not scope:
+        # a whole guide vs the PDF: compare heading depth, not the H number. The PDF's levels come
+        # from the cover title (H1) and font sizes (H2, H3, H5), the site's from h1/h2 per page:
+        # rank each side's levels among the matched headings (H2/H3/H5 -> 1/2/3, h1/h2 -> 1/2)
+        ranks_a = sorted({anA[i].level for i, _, _ in pairs})
+        ranks_b = sorted({anB[j].level for _, j, _ in pairs})
+        depth_a = lambda i: ranks_a.index(anA[i].level) + 1
+        depth_b = lambda j: ranks_b.index(anB[j].level) + 1
+    else:
+        depth_a = lambda i: anA[i].level
+        depth_b = lambda j: anB[j].level + (scope.level_offset if scope else 0)
     for i, j, s in pairs:
         u = unit_for("a", anA[i].word)
         if (i, j) not in in_order:
@@ -232,10 +293,11 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 f"Section order differs: “{anA[i].title}” is section #{i + 1} in prod but #{j + 1} in the candidate",
                 [locs(A, [anA[i].word])[0]], [locs(B, [anB[j].word])[0]],
                 {"kind": "order differs"}, types=["order differs"]))
-        if anA[i].level != anB[j].level + (scope.level_offset if scope else 0):
+        if depth_a(i) != depth_b(j):
             struct[u.id].append(Finding(
                 "structure", cfg["sections"].get("level_severity", "warning"),
-                f"Outline level: H{anA[i].level} → H{anB[j].level}",
+                f"Outline level: H{anA[i].level} → H{anB[j].level}"
+                + (f" (heading depth {depth_a(i)} in prod, {depth_b(j)} in stage)" if html and not scope else ""),
                 [locs(A, [anA[i].word])[0]], [locs(B, [anB[j].word])[0]]))
         if s < 1.0:
             struct[u.id].append(Finding(
@@ -248,11 +310,12 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                                          f"section starts at top of page"))
 
     doc_findings = _document_findings(A, B, cfg)
+    doc_findings += checks_typography.document(B, cfg)  # stage vs the design spec (config/typography.toml)
     genuine_types = set(cfg.get("genuine", {}).get("types", []))
 
     # --- run checks
     only_re = re.compile(only, re.I) if only else None
-    max_f = cfg["report"]["max_findings_per_check"]
+    max_f = cfg["report"].get("max_findings_per_check", 0) or None  # 0 = every finding (no cap)
     ccfg = cfg["content"]
     out_sections, style_map = [], defaultdict(lambda: {"words": 0, "sections": 0})
     sync_points: list[tuple] = []
@@ -275,7 +338,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             res.sort(key=lambda f: (not keep(f), -SEVERITY_RANK[f.severity]))
             must = [f for f in res if keep(f)]
             rest = [f for f in res if not keep(f)]
-            for f in rest[max_f:]:
+            for f in (rest[max_f:] if max_f else []):
                 truncated[f.check] += 1
             findings.extend(must + rest[:max_f])
         _resolve_one_sided(u, findings, cfg)
@@ -310,12 +373,13 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     report(0.97, "Relating sections")
     genuine.cross_section([(u, fs) for u, fs, _ in ran], A, B, cfg, (candidate_meta or {}).get("mode", "pdf"))
     data_min = cfg.get("genuine", {}).get("data_missing_words", 3)
+    genuine_skip = set(cfg.get("genuine", {}).get("exclude_checks", []))
     for u, findings, truncated in ran:
         per_check = {c: _check_summary([f for f in findings if f.check == c]) for c in CHECKS}
         for c, n in truncated.items():
             per_check[c]["truncated"] = n
         for f in findings:
-            if f.check == "style":
+            if f.check == "style" and f.detail.get("kind") != "spec":  # prod -> stage styles only
                 key = (f.detail["role"], f.detail["baseline_style"], f.detail["candidate_style"])
                 style_map[key]["words"] += f.detail["words"]
                 style_map[key]["sections"] += 1
@@ -349,7 +413,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                          for k, f in enumerate(findings)],
         })
         for f in out_sections[-1]["findings"]:
-            genuine.tag(f, genuine_types, data_min)
+            genuine.tag(f, genuine_types, data_min, genuine_skip)
         out_sections[-1]["genuine"] = sum(f["genuine"] for f in out_sections[-1]["findings"])
 
     status = Counter(s["status"] for s in out_sections)
@@ -667,6 +731,17 @@ def _doc_meta(d: Doc, anchors: list[Anchor]) -> dict:
     }
 
 
+def _toc_l1(baseline: str, cfg: dict) -> list[str]:
+    """The PDF's level-1 TOC titles: its bookmarks, else its printed table of contents."""
+    import pymupdf
+    l1 = [t.strip() for lvl, t, _ in pymupdf.open(baseline).get_toc() if lvl == 1]
+    if l1:
+        return l1
+    entries = tocmod.detect(extract.load(baseline, "baseline", cfg), cfg).entries
+    top = min((e.level for e in entries), default=1)
+    return [e.title for e in entries if e.level == top]
+
+
 def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, *, html: dict | None = None,
                 progress: Callable[[float, str], None] | None = None) -> dict:
     """Validate a PDF (baseline) against a web page (candidate), driven by the TOC.
@@ -684,13 +759,16 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
     hcfg = cfg.get("html", {})
     crawl = h.get("crawl", hcfg.get("crawl", True))
     max_pages = int(h.get("max_pages") or hcfg.get("max_pages", 0) or 0)
+    toc_l1 = _toc_l1(baseline, cfg) if crawl else []
     doc, info = html_source.capture(
         url, out_dir, root=h.get("root", ""), exclude=h.get("exclude") or html_source.DEFAULT_EXCLUDE,
         width=int(h.get("width") or 1280), wait_ms=int(h.get("wait_ms") or 1500),
         user=h.get("user", ""), password=h.get("password", ""), crawl=crawl, max_pages=max_pages,
-        site=cfg.get("site", {}) if cfg.get("site", {}).get("enabled", True) else None,
+        site=cfg.get("site", {}) if cfg.get("site", {}).get("enabled", True) else None, toc_l1=toc_l1,
         progress=lambda f, m: report(0.3 * f, m))
     site = info.pop("site", None)
+    if site is not None:
+        site.setdefault("toc_l1", toc_l1)
     if crawl:  # the whole guide against the whole PDF, not one chapter
         cfg["sections"]["page_scope"] = False
     cfg["layout"]["enabled"] = False

@@ -37,6 +37,18 @@ def parse_font(name: str, flags: int) -> tuple[str, int, bool]:
     return family, weight, italic
 
 
+# Symbol fonts store a picture under a letter: in Wingdings 3 the arrow keys ▲ ▼ ◄ ► are the
+# letters p q t u, so the text reads "Press p/q" where the page shows "Press ▲/▼". Compared as
+# the symbol the reader sees.
+_SYMBOL_FONTS = {
+    "wingdings3": {"p": "▲", "q": "▼", "t": "◄", "u": "►"},
+}
+
+
+def _symbol_map(font: str) -> dict | None:
+    return _SYMBOL_FONTS.get(re.sub(r"[^a-z0-9]", "", _SUBSET.sub("", font).lower()))
+
+
 def _style(span) -> Style:
     family, weight, italic = parse_font(span["font"], span["flags"])
     return Style(family, weight, italic, round(span["size"], 1), f"#{span['color']:06x}")
@@ -58,6 +70,7 @@ def _line_words(line) -> list[tuple[str, list[float], Style, int | None]]:
     gap = 0  # whitespace seen since the last word (-1 = a tab)
     for span in line["spans"]:
         st = _style(span)
+        symbols = _symbol_map(span["font"])
         size, oy = span["size"], span["origin"][1]
         # by geometry only: the PDF's own superscript flag is a guess and marks font-change spans
         smaller = size < 0.85 * base_size
@@ -65,6 +78,8 @@ def _line_words(line) -> list[tuple[str, list[float], Style, int | None]]:
               "_" if smaller and oy > base_y + 0.1 * base_size else "."
         for ch in span["chars"]:
             c = ch["c"]
+            if symbols:
+                c = symbols.get(c, c)
             if c.isspace():
                 if cur:
                     out.append(cur)

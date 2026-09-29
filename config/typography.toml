@@ -1,0 +1,77 @@
+# Typography and page layout of the user manual, from Figma:
+#   "📄 Online User Manual" (file w2fNXjO8YfpQooXDJkuQxx)
+#   - Topic Content Specification > Typography
+#   - PDF (View) / PDF (Print) Output & Pagination Specification
+# The stage PDF is validated against the format its page size matches (A4 = PDF View, A5 = PDF Print),
+# in addition to the prod-vs-stage comparison. Merged over default.toml; override like any other key.
+
+[typography]
+enabled = true
+format = "auto"               # auto (by the stage page size) | a4_view | a5_print
+size_tolerance = 0.25         # pt
+color_tolerance = 24          # euclidean RGB distance (0-441)
+line_height_tolerance = 1.0   # pt, top-to-top distance of consecutive lines of one paragraph
+margin_tolerance = 2.0        # pt
+page_size_tolerance = 0.02    # share of width / height
+table_note_gap = 40           # pt: small text this close below a table is its table note
+severity = "warning"          # font family / weight / size / line height off the spec
+layout_severity = "warning"   # page size, text inside the page margins
+
+[typography.fonts]            # the Figma font roles -> the font family in the PDF
+branding = "Poppins"
+default = "Roboto"
+
+[typography.weights]
+Regular = 400
+Medium = 500
+Bold = 700
+
+# Each style: font role, weight, size / line height (pt; px for html_web), text colour.
+# Colours are measured from the Figma samples (Inspect needs a Figma login): black text, hyperlink purple
+# #7231C6, table note grey #757575, table header white on the dark header bar (Topic sample table), and the
+# H1 purple #7231C6 as drawn in the "PDF (View) Layout" example (the web topic sample draws it black).
+[typography.formats.a4_view]
+label = "A4 PDF (View)"
+page = [595.28, 841.89]
+margins = { top = 24, bottom = 24, left = 24, right = 24 }
+footer_gap = 12               # content area to page number
+[typography.formats.a4_view.styles]
+h1            = { font = "branding", weight = "Bold",    size = 20, line_height = 24, color = "#7231C6" }
+h2            = { font = "branding", weight = "Bold",    size = 14, line_height = 16, color = "#000000" }
+h3            = { font = "branding", weight = "Bold",    size = 12, line_height = 16, color = "#000000" }
+body_default  = { font = "default",  weight = "Regular", size = 12, line_height = 16, color = "#000000" }
+body_strong   = { font = "default",  weight = "Bold",    size = 12, line_height = 16, color = "#000000" }
+body_hyperlink = { font = "default", weight = "Regular", size = 12, line_height = 16, underline = true, color = "#7231C6" }
+table_header  = { font = "default",  weight = "Medium",  size = 12, line_height = 16, color = "#FFFFFF" }
+table_default = { font = "default",  weight = "Regular", size = 12, line_height = 16, color = "#000000" }
+table_note    = { font = "default",  weight = "Regular", size = 10, line_height = 12, color = "#757575" }
+
+[typography.formats.a5_print]
+label = "A5 PDF (Print)"
+page = [419.53, 595.28]
+margins = { top = 12, bottom = 12, left = 24, right = 24 }
+footer_gap = 4
+[typography.formats.a5_print.styles]
+h1            = { font = "branding", weight = "Bold",    size = 10, line_height = 10, color = "#7231C6" }
+h2            = { font = "branding", weight = "Bold",    size = 7,  line_height = 7, color = "#000000" }
+h3            = { font = "branding", weight = "Bold",    size = 6,  line_height = 6, color = "#000000" }
+body_default  = { font = "default",  weight = "Regular", size = 5,  line_height = 5, color = "#000000" }
+body_strong   = { font = "default",  weight = "Bold",    size = 5,  line_height = 5, color = "#000000" }
+body_hyperlink = { font = "default", weight = "Regular", size = 5,  line_height = 5, underline = true, color = "#7231C6" }
+table_header  = { font = "default",  weight = "Medium",  size = 5,  line_height = 5, color = "#FFFFFF" }
+table_default = { font = "default",  weight = "Regular", size = 5,  line_height = 5, color = "#000000" }
+table_note    = { font = "default",  weight = "Regular", size = 4,  line_height = 4, color = "#757575" }
+
+[typography.formats.html_web]   # for reference (web pages are checked by their CSS, not this spec)
+label = "HTML Web"
+unit = "px"
+[typography.formats.html_web.styles]
+h1            = { font = "branding", weight = "Bold",    size = 32, line_height = 40, color = "#000000" }
+h2            = { font = "branding", weight = "Bold",    size = 28, line_height = 32, color = "#000000" }
+h3            = { font = "branding", weight = "Bold",    size = 20, line_height = 24, color = "#000000" }
+body_default  = { font = "default",  weight = "Regular", size = 16, line_height = 24, color = "#000000" }
+body_strong   = { font = "default",  weight = "Bold",    size = 16, line_height = 24, color = "#000000" }
+body_hyperlink = { font = "default", weight = "Regular", size = 16, line_height = 24, underline = true, color = "#7231C6" }
+table_header  = { font = "default",  weight = "Medium",  size = 14, line_height = 16, color = "#FFFFFF" }
+table_default = { font = "default",  weight = "Regular", size = 14, line_height = 16, color = "#000000" }
+table_note    = { font = "default",  weight = "Regular", size = 12, line_height = 16, color = "#757575" }

@@ -30,7 +30,14 @@ _EXTRACT_JS = r"""
   const root = (rootSel && document.querySelector(rootSel)) || document.querySelector('main') ||
                document.querySelector('article') || document.body;
   const sx = window.scrollX, sy = window.scrollY;
-  const excluded = el => !!(el && exclude && el.closest(exclude));
+  // site chrome is excluded - except a <header> inside the content that holds the page title
+  // (AEM topic pages: <main> ... <header class="topic-renderer__header"><h1>Port overview</h1>)
+  const titleHeader = x => x.tagName === 'HEADER' && x !== root && root.contains(x) && !!x.querySelector('h1');
+  const excluded = el => {
+    let x = el && exclude ? el.closest(exclude) : null;
+    while (x && titleHeader(x)) x = x.parentElement ? x.parentElement.closest(exclude) : null;
+    return !!x;
+  };
   const visible = el => el && (el.checkVisibility ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : el.offsetParent !== null);
   const BLOCK = new Set(['block', 'list-item', 'table-cell', 'table-caption', 'flex', 'grid', 'flow-root']);
   const blockIds = new Map();
@@ -88,9 +95,21 @@ _EXTRACT_JS = r"""
   });
   const links = [...root.querySelectorAll('a[href]')].filter(a => visible(a) && !excluded(a) && a.innerText.trim())
     .map(a => [a.href, ...rect(a)]);
+  // blocks a slice must not cut through: boxed blocks (callouts such as NOTE / WARNING, cards: a
+  // background or a border), figures, list items, paragraphs, code; a heading stays with what follows
+  const clear = c => !c || c === 'transparent' || /rgba\(.*,\s*0\)$/.test(c);
+  const keep = [];
+  for (const e of root.querySelectorAll('*')) {
+    if (excluded(e) || !/^(block|list-item|flex|grid|flow-root|table)$/.test(getComputedStyle(e).display)) continue;
+    const cs = getComputedStyle(e);
+    const boxed = !clear(cs.backgroundColor) || ['Top', 'Left'].some(k => parseFloat(cs['border' + k + 'Width']) > 0 && cs['border' + k + 'Style'] !== 'none');
+    if (!(boxed || /^(FIGURE|BLOCKQUOTE|PRE|LI|P|DL|DT|DD|H[1-6])$/.test(e.tagName) || e.getAttribute('role') === 'note') || !visible(e)) continue;
+    const r = rect(e);
+    if (r[3] - r[1] > 4) keep.push([r[1], /^H[1-6]$/.test(e.tagName) ? r[3] + 40 : r[3]]);
+  }
   const de = document.documentElement;
   return { title: document.title, width: Math.max(de.clientWidth, 320), height: Math.max(de.scrollHeight, document.body.scrollHeight),
-           words, headings, images, tables, links };
+           words, headings, images, tables, links, keep };
 }
 """
 _EXTRACT_JS = _EXTRACT_JS.replace("__NOSPACE__", normalize.NOSPACE)
@@ -170,13 +189,18 @@ def _goto(page, url: str, timeout: int):
 def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEFAULT_EXCLUDE,
             width: int = 1280, wait_ms: int = 1500, slice_h: int = 1800, progress=None,
             user: str = "", password: str = "", crawl: bool = False, max_pages: int = 0,
-            site: dict | None = None) -> tuple[Doc, dict]:
+            site: dict | None = None, toc_l1: list[str] | None = None) -> tuple[Doc, dict]:
     """Render `url`, extract its structure and write <out_dir>/candidate_source.pdf. Returns (Doc, info).
     user/password (or a login in the URL): sent as HTTP basic auth and, when the site
     shows a sign-in form instead of the page, typed into that form.
     crawl: also every page of the same guide the pages link to (same site, under the
     start page's folder), in reading order, joined into one document: each page's title
     becomes a level-1 heading with the page's own headings below it (max_pages: 0 = no limit).
+    toc_l1: the PDF's level-1 TOC titles. With crawl, they drive it: each is looked up in the
+    site's left navigation (found by site_nav, no site-specific selectors) and its page opened
+    in TOC order, followed by every page nested under it in the navigation (all levels). An L1
+    entry the navigation lacks is reported in info["skipped"]. Without a navigation (or no L1
+    entry in it), the crawl follows the guide's links under the start page's folder.
     site: the `[site]` config: also read each page's navigation chrome (site_nav) and open
     what it points to; info["site"] holds it. None: skip."""
     from playwright.sync_api import sync_playwright
@@ -198,32 +222,49 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
             report(0.02, f"Opening {url}")
             _open(page, url, user, password, timeout, wait_ms, report)
             queue, seen = [url], {_page_key(url)}
-            ordered = not crawl
+            titles: dict[str, str] = {}  # page key -> its left-navigation entry
+            nav_led, ordered = False, not crawl
+            not_in_nav: list[str] = []
+            nav_toc: list[dict] = []  # the left navigation of the first captured page: the stage TOC
             k = 0
             while k < len(queue) and (not max_pages or len(captured) < max_pages):
                 u = queue[k]
                 frac = 0.05 + 0.8 * k / max(len(queue), 1)
                 if _page_key(page.url) != _page_key(u):
-                    report(frac, f"Page {k + 1}/{len(queue)}: {u}")
+                    report(frac, f"Page {k + 1}/{len(queue)}: {titles.get(_page_key(u)) or u}")
                     resp = _goto(page, u, timeout)
+                    if resp is not None and resp.status >= 500:  # gateway hiccups are often transient: once more
+                        page.wait_for_timeout(2_000)
+                        resp = _goto(page, u, timeout)
                     if (resp is not None and resp.status >= 400) or _login_form(page):
                         bad = f"HTTP {resp.status}" if resp is not None and resp.status >= 400 else "login form"
-                        skipped.append({"url": u, "reason": bad})
+                        skipped.append({"url": u, "title": titles.get(_page_key(u), ""), "reason": bad})
                         visited[site_nav.key(u)] = {"status": resp.status if resp is not None else 0, "url": page.url,
                                                     "error": "" if resp is not None and resp.status >= 400 else bad, "crawled": True}
                         k += 1
                         continue
-                if crawl:
-                    links = _guide_links(page, url)
-                    if not ordered:  # first page: when it is listed in the guide's navigation, follow that order
-                        ordered = True
+                if crawl and not ordered:  # first page: decide which pages make up the guide, in which order
+                    ordered = True
+                    plan, not_in_nav = _nav_plan(page, site or {}, root, toc_l1 or [])
+                    if plan:  # the PDF's L1 TOC, looked up in the left navigation
+                        nav_led = True
+                        queue = [l for l, _ in plan]
+                    else:  # no navigation to go by: the guide's links, in their order
+                        not_in_nav = []
+                        links = _guide_links(page, url)
                         if _page_key(url) in {_page_key(l) for l in links}:
-                            queue, seen = links, {_page_key(l) for l in links}
-                            if _page_key(queue[0]) != _page_key(page.url):
-                                continue  # start with the navigation's first page
-                    new = [l for l in links if _page_key(l) not in seen]
-                    seen.update(_page_key(l) for l in new)
-                    queue[k + 1:k + 1] = new  # a page's sub-pages follow it (reading order)
+                            queue = links
+                    seen = {_page_key(l) for l in queue}
+                    titles = {_page_key(l): t for l, t in plan}
+                    skipped += [{"url": "", "title": t, "reason": "not in the left navigation"} for t in not_in_nav]
+                    if _page_key(queue[0]) != _page_key(page.url):
+                        continue  # start with the first page of the guide
+                if crawl:
+                    found = _nav_children(page, site or {}, root) if nav_led else [(l, "") for l in _guide_links(page, url)]
+                    new = [(l, t) for l, t in found if _page_key(l) not in seen]
+                    seen.update(_page_key(l) for l, _ in new)
+                    titles.update({_page_key(l): t for l, t in new if t})
+                    queue[k + 1:k + 1] = [l for l, _ in new]  # a page's sub-pages follow it (reading order)
                 data, slices = _read_page(page, root, exclude, wait_ms, slice_h, report, frac)
                 if site is not None:
                     ch = site_nav.read_chrome(page, site, root)
@@ -233,8 +274,11 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                         "ids": ch.get("ids") or [], "crawled": True}
                 if data["words"]:
                     captured.append((page.url, data, slices))
+                    if crawl and len(captured) == 1:  # it sits at the top of the joined document
+                        nav_toc = [{"title": it["text"], "level": it["depth"] + 1, "url": it["href"], "box": it.get("box")}
+                                   for it in _nav_items(page, site or {}, root) if it["visible"]]
                 else:
-                    skipped.append({"url": u, "reason": "no text"})
+                    skipped.append({"url": u, "title": titles.get(_page_key(u), ""), "reason": "no text"})
                 k += 1
             if site is not None and chromes:
                 report(0.86, "Checking the site navigation")
@@ -261,11 +305,17 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
     path = out / "candidate_source.pdf"
     pdf.save(path, garbage=3, deflate=True)
     doc = _to_doc(data, cuts, str(path))
+    for e in nav_toc:  # where each entry shows on the stage PDF (the first page's slices)
+        k = _slice_of(cuts, e["box"][1]) if e.get("box") else None
+        e["toc_page"] = k if k is not None else -1
+        e["bbox"] = [e["box"][0], e["box"][1] - cuts[k], e["box"][2], e["box"][3] - cuts[k]] if k is not None else [0, 0, 0, 0]
     first = captured[0][1]
     info = {"url": url, "title": first["title"], "width": W, "height": int(cuts[-1]), "pages": len(slices),
             "words": len(doc.words), "headings": len(data["headings"]), "tables": len(data["tables"]),
             "images": len(data["images"]), "links": len(data["links"]), "root": root or "auto (main / article / body)",
             "crawl": crawl, "web_pages": [{"url": u, "title": d["title"], "words": len(d["words"])} for u, d, _ in captured],
+            "nav_toc": nav_toc,
+            "crawl_by": "left navigation (PDF L1 TOC)" if nav_led else "guide links" if crawl else "",
             "skipped": skipped}
     if site_raw:
         for ch in site_raw["pages"]:
@@ -294,14 +344,70 @@ def _open(page, url: str, user: str, password: str, timeout: int, wait_ms: int, 
                            "Enter the user name and password under “Login” in the run form")
 
 
+def _nav_items(page, cfg: dict, root: str) -> list[dict]:
+    ch = site_nav.read_chrome(page, cfg, root) or {}
+    return [it for it in (ch.get("nav") or {}).get("items") or [] if it.get("href", "").startswith("http")]
+
+
+def _nav_plan(page, cfg: dict, root: str, toc_l1: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """Each L1 TOC title's left-navigation page, in TOC order: ([(url, nav text)], [titles not in the nav]).
+    ([], []) when the page has no navigation or none of the titles is in it."""
+    items = _nav_items(page, cfg, root)
+    plan, missing, used = [], [], set()
+    for t in toc_l1:
+        # a top-level entry first; the same title deeper down only when the top level lacks it
+        it = next((it for d in (True, False) for it in items
+                   if (it["depth"] == 0) == d and site_nav._same(t, it["text"]) and _page_key(it["href"]) not in used), None)
+        if it is None:
+            missing.append(t)
+            continue
+        used.add(_page_key(it["href"]))
+        plan.append((it["href"].split("#")[0], it["text"]))
+    return (plan, missing) if plan else ([], [])
+
+
+def _nav_children(page, cfg: dict, root: str) -> list[tuple[str, str]]:
+    """The pages nested under the open page in the left navigation, all levels, in order. Read on
+    every page: a navigation often expands only the branch of the page that is open."""
+    items = _nav_items(page, cfg, root)
+    here = _page_key(page.url)
+    at = [k for k, it in enumerate(items) if _page_key(it["href"]) == here]
+    if not at:
+        return []
+    k = next((k for k in at if items[k]["active"]), at[0])
+    out, seen = [], {here}
+    for it in items[k + 1:]:
+        if it["depth"] <= items[k]["depth"]:
+            break
+        if _page_key(it["href"]) not in seen:  # #fragment links into a page already listed are that page
+            seen.add(_page_key(it["href"]))
+            out.append((it["href"].split("#")[0], it["text"]))
+    return out
+
+
+# Scrolls the window and every scrollable panel to its end, following content that loads while
+# scrolling (lazy images, infinite sections), and opens collapsed <details>; then back to the top.
+_SCROLL_JS = r"""
+async (step) => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  document.querySelectorAll('details:not([open])').forEach(d => { d.open = true; });
+  const panels = [...document.querySelectorAll('body *')].filter(e =>
+    /(auto|scroll)/.test(getComputedStyle(e).overflowY) && e.scrollHeight > e.clientHeight + 20);
+  for (const el of [document.scrollingElement || document.documentElement, ...panels]) {
+    for (let y = 0, n = 0; y < el.scrollHeight + step && n < 500; y += step, n++) {  // scrollHeight grows as content loads
+      el.scrollTop = y;
+      await sleep(60);
+    }
+    el.scrollTop = 0;
+  }
+}
+"""
+
+
 def _read_page(page, root: str, exclude: str, wait_ms: int, slice_h: int, report, frac: float):
     """Structure + slice screenshots of the loaded page."""
-    # scroll through once so lazy-loaded images/sections render, then back to the top
-    total = page.evaluate("document.documentElement.scrollHeight")
-    for y in range(0, int(total) + 1000, 800):
-        page.evaluate(f"window.scrollTo(0, {y})")
-        page.wait_for_timeout(60)
-    page.evaluate("window.scrollTo(0, 0)")
+    report(frac, f"Scrolling through “{page.title()}”")
+    page.evaluate(_SCROLL_JS, 800)
     page.wait_for_timeout(wait_ms)
     report(frac, f"Reading “{page.title()}”")
     data = page.evaluate(_EXTRACT_JS, [root, exclude])
@@ -331,9 +437,14 @@ def _guide_links(page, start: str) -> list[str]:
     out, seen = [], set()
     for href in page.evaluate("[...document.querySelectorAll('a[href]')].map(a => a.href)"):
         h = urlsplit(href)
-        if h.scheme not in ("http", "https") or h.netloc != s.netloc or not h.path.startswith(folder) or _NON_PAGE.search(h.path):
+        path = h.path
+        # AEM navigation often links the repository path (/content/guide/<guide folder>/page.html),
+        # which the site redirects to the public one (/<guide folder>/page.html): the same page
+        if not path.startswith(folder) and folder in path:
+            path = path[path.index(folder):]
+        if h.scheme not in ("http", "https") or h.netloc != s.netloc or not path.startswith(folder) or _NON_PAGE.search(path):
             continue
-        u = urlunsplit((h.scheme, h.netloc, h.path, h.query or s.query, ""))
+        u = urlunsplit((h.scheme, h.netloc, path, h.query or s.query, ""))
         key = _page_key(u)
         if key in seen:
             continue
@@ -377,17 +488,24 @@ def _stack(captured: list, titled: bool) -> tuple[dict, list[int], list[bytes]]:
 
 
 def _cuts(data: dict, H: int, slice_h: int) -> list[int]:
-    """Slice boundaries every ~slice_h px, moved up so they don't cut through a table,
-    an image or a line of text (a cut there would split one element over two pages)."""
-    spans = [(t["box"][1], t["box"][3]) for t in data["tables"] if t["box"][3] - t["box"][1] < slice_h * 0.9]
-    spans += [(r[1], r[3]) for r in data["images"] if r[3] - r[1] < slice_h * 0.9]
+    """Slice boundaries every ~slice_h px, moved up so they don't cut through a table, an
+    image, a boxed block (NOTE / WARNING callout, list item, paragraph, figure), a line of
+    text, or between a heading and what follows (a cut there splits one element over two
+    pages). Blocks taller than a slice may be cut, but never through a line of text."""
+    spans = [(t["box"][1], t["box"][3]) for t in data["tables"]]
+    spans += [(r[1], r[3]) for r in data["images"]]
+    spans += [(k[0], k[1]) for k in data.get("keep", [])]
+    spans = [(a, b) for a, b in spans if b - a < slice_h * 0.9]
     spans += [(w[2], w[4]) for w in data["words"]]
     cuts, y = [0], 0
     while y + slice_h < H:
         c = y + slice_h
-        for a, b in spans:
-            if a < c < b and a > y + slice_h * 0.3:
-                c = min(c, int(a) - 2)
+        moved = True
+        while moved:  # moving the cut up can land it inside another block: repeat until it is clear
+            moved = False
+            for a, b in spans:
+                if a < c < b and a > y + slice_h * 0.3 and int(a) - 2 < c:
+                    c, moved = int(a) - 2, True
         cuts.append(int(c))
         y = int(c)
     cuts.append(H)

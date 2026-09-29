@@ -45,6 +45,7 @@ ignore_repeated_headers = true  # a table header row repeated at the top of a co
 check_paragraphs = false      # true = report text starting a new paragraph/line on one side only
 dehyphenate = true            # a word split by a hyphen at a line break is one word (line breaks are layout)
 ignore_toc_page_numbers = true  # "Title ...... 17": page numbers shift whenever the layout differs
+ignore_xref_page_numbers = true # `see "Title" on page 12.` vs `see "Title".`: the template's cross-reference format
 ignore_tokens = ["•", "●", "■", "▪", "◦"]   # bullet glyphs are list styling
 # Callout labels: "Tips" / "TIPS:", "Note" / "NOTE:", "Warning" / "WARNING:" are the same label (case,
 # colon and plural are house style). Every occurrence of these words is compared this way.
@@ -54,6 +55,17 @@ min_diff_words = 1
 severity = "warning"          # individual text diffs (they are counted in the %)
 spacing_severity = "warning"
 reorder_severity = "info"     # identical text that only moved (e.g. table reading order)
+ocr_images = true             # missing prod text is looked for inside the stage pictures (OCR, tesseract):
+                              # figure labels / dimension callouts baked into the image are not missing
+ocr_max_words = 60            # only for missing blocks up to this many words
+ocr_dpi = 300
+ocr_min_image_pt = 40         # pictures at least this wide (half as tall): not icons
+graphic_text = true           # missing prod text that stage shows as a graphic (a figure badge "(A)" as an icon,
+                              # a label drawn into a diagram) is found by its look: a CSS / layout finding, not missing data
+graphic_text_max_words = 12   # only for missing pieces up to this many words
+graphic_text_score = 0.72     # match needed (normalised cross-correlation of the rendered text, 0..1)
+graphic_text_edge_score = 0.65  # ... and of the letter strokes at the hit: badge (A) is not badge (B)
+graphic_text_severity = "warning"
 
 [tables]
 enabled = true
@@ -107,7 +119,8 @@ check_placement = true        # graphics: inline vs own line, and which word the
 check_wrap = false            # true = report the same text wrapping to the next line at a different word (line-wrap)
 check_bullets = true          # bullet / numbered list alignment, reported as indent issues (see list_marker)
 # a line's first word is a list marker when it is an enumerator (1. 2) a. (b) iv.) ...
-list_marker = '^\(?(?:\d{1,3}|[A-Za-z]|[ivxlcdmIVXLCDM]{1,4})[.)]$'
+# Roman numerals: i v x only ("(mm)" - millimetres - is not item 2000)
+list_marker = '^\(?(?:\d{1,3}|[A-Za-z]|[ivxIVX]{1,4})[.)]$'
 # ... or made only of characters of these Unicode categories: Po punctuation (• * ·), Pd dash (- –),
 # So other symbol (▪ ✓ ➢). Math symbols (Sm: × + |) are not bullets.
 list_symbol_categories = ["Po", "Pd", "So"]
@@ -146,7 +159,8 @@ artwork_match_score = 0.6      # min cross-correlation when searching the other 
 
 [report]
 max_locs = 40                 # highlight boxes per finding
-max_findings_per_check = 60   # per section
+max_findings_per_check = 0    # per check and section; 0 = no cap, every finding is reported (a cap only ever
+                              # thins CSS / layout findings: critical and genuine issues are always kept)
 
 [html]                        # web page (URL) as the candidate
 crawl = true                  # validate every page of the guide: follow the start page's links to the other
@@ -193,6 +207,8 @@ types = [
 data_missing_words = 1        # "missing text" is genuine when >= N of its words are absent from stage (1 = any)
 moved_min_words = 5           # content in the wrong section: blocks of >= N words ...
 moved_overlap = 0.8           # ... whose words are >= 80 % the same as extra text in another section
+exclude_checks = ["toc"]      # checks whose findings never go into the genuine report (still in the full
+                              # report and the TOC tab): the TOC comes from the ditamap / PDF template
 
 [aem]
 # AEM Guides source topics. A stage PDF published by AEM Guides names a destination after every
@@ -207,10 +223,10 @@ dam_root = "/content/dam/benq-aem-guides/en"   # {folder} when the product has n
 # The link. Placeholders: {author} {path} (topic file's DAM path: found in AEM, else {folder}/{guid}.dita)
 # {folder} {guid} {lang} {map} {product} {element} {q} (URL-encoded GUID).
 link = "{author}/libs/fmdita/clientlibs/xmleditor/page.html?src={path}&leftPanel=repository_panel&appMode=author"
-# What a GUID link opens: "map" = the product's map in the editor, with all of its topics
-# (<product folder>/<maps_folder>/<map file from the stage PDF>, or where AEM has it when logged in);
-# "topic" = the topic file itself (needs the AEM login to find it).
-open_in = "map"
+# What a GUID link opens: "topic" = the topic file itself (found with the AEM login), else the map;
+# "map" = always the product's map in the editor, with all of its topics
+# (<product folder>/<maps_folder>/<map file from the stage PDF>, or where AEM has it when logged in).
+open_in = "topic"
 maps_folder = "Maps"
 map_link = "{author}/libs/fmdita/clientlibs/xmleditor/page.html?src={path}&leftPanel=repository_panel&appMode=author"
 # When neither is known: open the editor's Explorer, never a guessed file.

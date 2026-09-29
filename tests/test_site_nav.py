@@ -96,3 +96,19 @@ def test_defects_are_reported(tmp_path, serve):
     assert any(r["item"] == "Next topic" and "overview" in r["page"] for r in failed(site, "pager"))
     assert any(r["item"] == "Mounting" for r in failed(site, "otp"))
     assert any(r["item"] == "Matches the prod PDF" for r in failed(site, "subtitle"))
+
+
+def test_crawl_follows_navigation_links_to_the_repository_path():
+    """AEM's left navigation links /content/guide/<guide folder>/page.html; the site redirects it to
+    /<guide folder>/page.html. The crawl must follow those links as pages of the same guide."""
+    from pdfval.html_source import _guide_links
+
+    class Page:
+        def evaluate(self, _js):
+            return ["https://site/content/guide/edu/tey1c/en/port-overview.html",
+                    "https://site/edu/tey1c/en/safety.html",
+                    "https://site/content/guide/edu/tey1c/en/port-overview.html#top",  # same page
+                    "https://site/content/guide/edu/other/en/intro.html",               # another guide
+                    "https://site/content/dam/edu/tey1c/en/manual.pdf"]                 # a download
+    assert _guide_links(Page(), "https://site/edu/tey1c/en/package-contents.html") == [
+        "https://site/edu/tey1c/en/port-overview.html", "https://site/edu/tey1c/en/safety.html"]
