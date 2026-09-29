@@ -215,7 +215,7 @@ exclude_checks = ["toc"]      # checks whose findings never go into the genuine 
 # topic's GUID, so each issue is traced to the topic (.dita file) it comes from and gets a link
 # that opens that topic in AEM in a new tab.
 enabled = true
-author = ""                   # AEM author URL, e.g. "http://139.59.13.139:4502"
+author = "http://139.59.13.139:4502"   # AEM author URL (pre-filled in the UI; change it there or here)
 user = ""                     # AEM user: with a password (UI, or env PDFVAL_AEM_PASSWORD) the tool asks AEM
                               # where each GUID's file is, so the link opens exactly that topic
 search_root = "/content/dam/benq-aem-guides"   # where AEM is searched for the topic files
@@ -234,3 +234,4 @@ fallback_link = "{author}/libs/fmdita/clientlibs/xmleditor/page.html?leftPanel=r
 
 [aem.products]                # ditamap name (without .ditamap, exact or regex) = DAM folder of that product
 # "sl04_and_sh04" = "/content/dam/benq-aem-guides/en/board/sl04-sh04"
+"sl04_and_sh04" = "/content/dam/benq-aem-guides/en/Education/Signage/SL04-and-SH04"

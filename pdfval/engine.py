@@ -371,7 +371,8 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
 
     # --- issues that span sections: image/content in the wrong section, links to the wrong section
     report(0.97, "Relating sections")
-    genuine.cross_section([(u, fs) for u, fs, _ in ran], A, B, cfg, (candidate_meta or {}).get("mode", "pdf"))
+    genuine.cross_section([(u, fs) for u, fs, _ in ran], A, B, cfg, (candidate_meta or {}).get("mode", "pdf"),
+                          progress=lambda m: report(0.97, f"Relating sections - {m}"))
     data_min = cfg.get("genuine", {}).get("data_missing_words", 3)
     genuine_skip = set(cfg.get("genuine", {}).get("exclude_checks", []))
     for u, findings, truncated in ran:

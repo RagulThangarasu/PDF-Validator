@@ -30,16 +30,20 @@ _TOKEN = re.compile(r"[\w%]+")
 _GOTO = (pymupdf.LINK_GOTO, pymupdf.LINK_NAMED)
 
 
-def cross_section(results: list[tuple[Unit, list[Finding]]], A: Doc, B: Doc, cfg: dict, mode: str = "pdf") -> None:
-    """Relate one-sided findings across sections (mutates the finding lists)."""
+def cross_section(results: list[tuple[Unit, list[Finding]]], A: Doc, B: Doc, cfg: dict, mode: str = "pdf",
+                  progress=None) -> None:
+    """Relate one-sided findings across sections (mutates the finding lists). progress(message): what it is doing."""
+    say = progress or (lambda m: None)
     gcfg = cfg.get("genuine", {})
     units = [u for u, _ in results]
     _images(results, A, B, cfg)
     _duplicate_images(results, A, B, cfg)
     _content(results, gcfg.get("moved_min_words", 5), gcfg.get("moved_overlap", 0.8))
     _duplicate_content(results, A, gcfg.get("moved_min_words", 5), gcfg.get("moved_overlap", 0.8))
+    say("Looking for missing text drawn as graphics")
     _text_as_graphics(results, A, B, cfg)  # first: it finds the text at its own spot, OCR anywhere
-    _text_in_images(results, A, B, cfg)
+    _text_in_images(results, A, B, cfg, say)
+    say("Checking links and image labels")
     _image_labels(results, A, cfg)
     if cfg["integrity"].get("links", True):
         for u, findings in results:
@@ -182,7 +186,7 @@ def _figures(A: Doc, cfg: dict) -> dict[int, list[pymupdf.Rect]]:
     return out
 
 
-def _text_in_images(results, A: Doc, B: Doc, cfg: dict) -> None:
+def _text_in_images(results, A: Doc, B: Doc, cfg: dict, progress=None) -> None:
     """Missing prod text that stage draws inside a picture (figure labels, dimension callouts baked
     into the image): read the stage pictures with OCR - the section's own pages and the pages next
     to it first, then the rest of the document - and when the words are there, the text is not
@@ -195,6 +199,9 @@ def _text_in_images(results, A: Doc, B: Doc, cfg: dict) -> None:
     min_pt = ccfg.get("ocr_min_image_pt", 40)
     pics = [im for im in B.images if im.bbox[2] - im.bbox[0] >= min_pt and im.bbox[3] - im.bbox[1] >= min_pt * 0.5]
     pad, figs = ccfg.get("ocr_label_distance_pt", 40), None  # a label sits on its figure or this close to it
+    if not pics:
+        return
+    work = []  # (unit, findings to look for, pictures on / next to the section's pages first)
     for u, fs in results:
         todo = [f for f in fs if f.check == "content" and "missing text" in (f.types or [])
                 and 0 < len(_tokens(f.detail.get("baseline_text"))) <= max_words and f.baseline]
@@ -203,16 +210,26 @@ def _text_in_images(results, A: Doc, B: Doc, cfg: dict) -> None:
         # most of its lines on / next to a figure (dimension labels also sit by straight arrows)
         on_fig = lambda l: any((r + (-pad, -pad, pad, pad)).contains(pymupdf.Rect(l.bbox)) for r in figs.get(l.page, []))
         todo = [f for f in todo if 2 * sum(map(on_fig, f.baseline)) >= len(f.baseline)]
-        if not todo or not pics:
+        if not todo:
             continue
         pages = {B.words[k].page for k in range(*u.b_range)} if u.b_range[1] > u.b_range[0] else set()
         near = {p + d for p in pages for d in (-1, 0, 1)}
-        order = [im for im in pics if im.page in near] + [im for im in pics if im.page not in near]
+        work.append((u, todo, [im for im in pics if im.page in near]))
+    if not work:
+        return
+    # read every picture once, in parallel: normal and 2x readings of all of them; the sharper 3x
+    # reading (tiny labels) only of the pictures next to a section that is missing text
+    say = progress or (lambda m: None)
+    close = {(im.page, tuple(im.bbox)) for _, _, ims in work for im in ims}
+    ocr.prefetch(B.path, [(im.page, im.bbox) for im in pics], dpi, (1, 2),
+                 lambda k, n: say(f"Reading text in pictures (OCR) {k}/{n}"))
+    ocr.prefetch(B.path, sorted(close), dpi, (3,), lambda k, n: say(f"Reading small labels in pictures (OCR) {k}/{n}"))
+    for u, todo, near_pics in work:
+        order = near_pics + [im for im in pics if im not in near_pics]
         for f in todo:
             text = f.detail.get("baseline_text", "")
-            # normal and 2x readings of every picture first; a sharper 3x reading only when needed
-            hit = next((im for scales in ((1, 2), (1, 2, 3)) for im in order
-                        if ocr.found(text, ocr.image_text(B.path, im.page, im.bbox, dpi, scales))), None)
+            hit = next((im for im in order if ocr.found(text, ocr.image_text(B.path, im.page, im.bbox, dpi, (1, 2)))), None) \
+                or next((im for im in near_pics if ocr.found(text, ocr.image_text(B.path, im.page, im.bbox, dpi, (1, 2, 3)))), None)
             if hit is None:
                 continue
             n = len(_tokens(text))

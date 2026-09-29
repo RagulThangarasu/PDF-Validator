@@ -20,7 +20,7 @@ _NAMES: dict[str, dict] = {}  # path -> named destinations
 
 
 def _pdf(doc: Doc) -> pymupdf.Document:
-    return _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+    return (_DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path)))
 
 
 def links(doc: Doc, page: int) -> list[dict]:

@@ -40,7 +40,7 @@ def visual(doc: Doc, im: Image) -> tuple[int, float, float]:
     matches, and geometry is measured on what is actually visible."""
     key = (doc.path, im.page, im.bbox)
     if key not in _VIS:
-        pdf = _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+        pdf = (_DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path)))
         r = pymupdf.Rect(im.bbox)
         z = 160 / max(r.width, 1)
         pix = pdf[im.page].get_pixmap(clip=r, matrix=pymupdf.Matrix(z, z), colorspace=pymupdf.csGRAY, alpha=False)
@@ -60,7 +60,7 @@ def visual(doc: Doc, im: Image) -> tuple[int, float, float]:
 
 
 def _gray(doc: Doc, page: int, rect, px_per_pt: float) -> "np.ndarray":
-    pdf = _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+    pdf = (_DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path)))
     pix = pdf[page].get_pixmap(clip=pymupdf.Rect(rect), matrix=pymupdf.Matrix(px_per_pt, px_per_pt),
                                colorspace=pymupdf.csGRAY, alpha=False)
     return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.stride)[:, :pix.width].astype(np.float32)
@@ -135,6 +135,25 @@ def find_artwork(img_doc: Doc, im: Image, other: Doc, at, min_score: float, max_
     return best
 
 
+_FAST: dict[int, int] = {}
+
+
+def _fast_len(n: int) -> int:
+    """Smallest m >= n whose only prime factors are 2, 3 and 5."""
+    if n not in _FAST:
+        m = n
+        while True:
+            k = m
+            for p in (2, 3, 5):
+                while k % p == 0:
+                    k //= p
+            if k == 1:
+                break
+            m += 1
+        _FAST[n] = m
+    return _FAST[n]
+
+
 def _ncc(hay: "np.ndarray", tpl: "np.ndarray") -> "np.ndarray | None":
     """Normalised cross-correlation of tpl over every position of hay (valid region).
     Correlation via FFT, window mean/variance via integral images – same result as a
@@ -146,7 +165,9 @@ def _ncc(hay: "np.ndarray", tpl: "np.ndarray") -> "np.ndarray | None":
     tn = float(np.sqrt((t * t).sum()))
     if tn < 1e-3 or th > H or tw > W:
         return None
-    shape = (H + th - 1, W + tw - 1)
+    # zero-padded to sizes made of 2s, 3s and 5s (any padding >= H+th-1 gives the same linear correlation;
+    # FFTs of such sizes are many times faster than of a large prime)
+    shape = (_fast_len(H + th - 1), _fast_len(W + tw - 1))
     corr = np.fft.irfft2(np.fft.rfft2(hay, shape) * np.fft.rfft2(t[::-1, ::-1], shape), shape)[th - 1:H, tw - 1:W]
     ii = np.pad(hay.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
     ii2 = np.pad((hay * hay).cumsum(0).cumsum(1), ((1, 0), (1, 0)))
@@ -181,7 +202,7 @@ def broken(a: Doc, x: Image | None, b: Doc, y: Image) -> bool:
 def _thumb(doc: Doc, im: Image, n: int = 64, trim: bool = True) -> "np.ndarray":
     """n x n grayscale of the visible picture (borders trimmed, as in visual()), slightly blurred
     so a one-pixel shift between two renderings of the same picture does not count."""
-    pdf = _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+    pdf = (_DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path)))
     r = pymupdf.Rect(im.bbox)
     z = 200 / max(r.width, 1)
     pix = pdf[im.page].get_pixmap(clip=r, matrix=pymupdf.Matrix(z, z), colorspace=pymupdf.csGRAY, alpha=False)

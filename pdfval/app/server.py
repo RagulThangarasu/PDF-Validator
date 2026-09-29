@@ -122,11 +122,15 @@ class Jobs:
         """Check an AEM user/password against AEM; keep them (password in memory only) when accepted."""
         cfg = {**self.aem_config(), "user": str(req.get("user", "")).strip(),
                "password": str(req.get("password") or "") or self.aem_password}
+        author = str(req.get("author") or "").strip().rstrip("/")
+        if author:  # typed on the New comparison page: saved like the one in the AEM topics tab
+            cfg["author"] = author
+            self.save_aem_settings({**self.aem_settings(), "author": author})
         ok, msg = aem.check_login(cfg)
         if ok:
             self.aem_password = cfg["password"]
             self.save_aem_settings({**self.aem_settings(), "user": cfg["user"]})
-        return {"ok": ok, "message": msg, "user": cfg["user"]}
+        return {"ok": ok, "message": msg, "user": cfg["user"], "author": cfg.get("author", "")}
 
     def relink(self, jid: str) -> dict:
         """Apply the current AEM settings to a finished run: results.json, the CSV and the genuine-issues PDF."""

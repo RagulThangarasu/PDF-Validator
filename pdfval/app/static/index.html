@@ -392,6 +392,8 @@ async function viewNew(qs) {
       <div class="row"><b>AEM login</b><span class="muted small">— so every issue links to its exact topic file in AEM (stage PDFs from AEM Guides)</span>
         <span class="spacer"></span><span id="aem-state" class="small"></span></div>
       <div class="aemcfg" style="margin-top:10px">
+        <div class="wide"><label class="f" for="n-aem-author">AEM author URL</label>
+          <input type="text" id="n-aem-author" placeholder="http://139.59.13.139:4502" autocomplete="url"></div>
         <div><label class="f" for="n-aem-user">AEM user</label><input type="text" id="n-aem-user" autocomplete="username"></div>
         <div><label class="f" for="n-aem-pass">AEM password</label><input type="password" id="n-aem-pass" autocomplete="current-password" placeholder="kept in memory only, never saved"></div>
         <div class="wide row"><button class="btn" id="aem-check" type="button">Check login</button>
@@ -457,6 +459,7 @@ async function aemLoad() {
   try { AEM = { ...AEM, ...(await api('/api/aem')) }; } catch (e) { return; }
   if (!$('#aem-card')) return;
   $('#n-aem-user').value = AEM.user || '';
+  $('#n-aem-author').value = AEM.author || '';
   AEM.ok = !!AEM.has_password;
   aemShow(AEM.ok ? `ready — logged in as ${AEM.user}` : (AEM.author ? 'not logged in' : 'no AEM author URL set'), AEM.ok ? 'pass' : 'warn');
 }
@@ -466,12 +469,14 @@ function aemShow(text, cls) {
 }
 async function aemLogin(explicit) {
   const user = $('#n-aem-user').value.trim(), password = $('#n-aem-pass').value;
+  const author = $('#n-aem-author').value.trim().replace(/\/+$/, '');
   const msg = $('#aem-msg');
-  if (!explicit && AEM.ok && !password && user === AEM.user) return true;  // already logged in this session
+  if (!explicit && AEM.ok && !password && user === AEM.user && author === AEM.author) return true;  // already logged in this session
   msg.classList.remove('err'); msg.textContent = 'Checking with AEM…';
   const r = await api('/api/aem/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                          body: JSON.stringify({ user, password }) });
+                                          body: JSON.stringify({ author, user, password }) });
   msg.textContent = r.message; msg.classList.toggle('err', !r.ok);
+  AEM.author = r.author || author;
   AEM.ok = r.ok; if (r.ok) { AEM.user = r.user; AEM.has_password = true; $('#n-aem-pass').value = ''; }
   aemShow(r.ok ? `ready — logged in as ${r.user}` : 'not logged in', r.ok ? 'pass' : 'fail');
   return r.ok;
@@ -530,7 +535,7 @@ async function start() {
   go.disabled = true; st.classList.remove('err');
   try {
     // log in to AEM first: the run looks up each GUID's topic file, so the links in every report work
-    if (MODE === 'pdf' && AEM.author) {
+    if (MODE === 'pdf' && (AEM.author || $('#n-aem-author').value.trim())) {
       const typed = $('#n-aem-user').value.trim() || $('#n-aem-pass').value;
       if (typed || AEM.ok) {
         if (!(await aemLogin(false))) { st.textContent = 'AEM login failed — fix it, or clear the AEM fields to run without links to the files.'; st.classList.add('err'); go.disabled = false; return; }

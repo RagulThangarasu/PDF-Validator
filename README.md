@@ -2,36 +2,31 @@
 
 ## Setup and run (start here)
 
-You need **Python 3.11 or newer**. The Python that comes with macOS is 3.9 and does not work: it fails with `ModuleNotFoundError: No module named 'tomllib'`. The VS Code Python extension does not install Python.
-
-**1. Install (once).** Open a terminal (bash or zsh) in this folder:
+**1. Get the latest code and set up (once, and again after every `git pull`):**
 
 ```bash
-# get Python 3.12 without admin rights (uv downloads it into your home folder)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
-
-rm -rf .venv                                   # remove an old venv, if any
-uv venv --python 3.12 .venv
-.venv/bin/python --version                     # must print Python 3.12.x
-uv pip install --python .venv/bin/python -r requirements.txt
-.venv/bin/playwright install chromium          # browser for web-page (AEM site) runs
+git clone https://github.com/RagulThangarasu/PDF-Validator.git   # first time only
+cd PDF-Validator
+git pull                     # later: get the latest fixes
+./setup.sh                   # creates .venv, installs everything, checks it works
 ```
 
-If you already have Python 3.11+ (e.g. `python3.12 --version` works), use it instead of uv:
-`python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/playwright install chromium`
+`setup.sh` needs **Python 3.11 or newer**. It uses one that is installed. If there is none, it downloads Python 3.12 into your home folder with `uv` (no admin rights needed). The Python that comes with macOS is 3.9 and does not work (`No module named 'tomllib'`), and the VS Code Python extension does not install Python. Never copy `.venv` from another computer: `setup.sh` replaces a copied or too-old one.
 
 Optional: `brew install tesseract` for OCR of text drawn inside pictures.
 
-**2. Start the UI (every time).**
+**2. Start the UI (every time):**
 
 ```bash
-.venv/bin/python -m pdfval ui          # opens http://localhost:8700 - keep the terminal open
+./start.sh                   # opens http://localhost:8700 - keep the terminal open
 ```
 
-To restart after updating the code: press **Ctrl+C** in that terminal (or run `pkill -f "pdfval ui"`), then start it again.
+To restart after updating the code: press **Ctrl+C** in that terminal, then run `./start.sh` again.
 
-**3. Run a comparison.** In the browser: pick the **prod PDF**, then the **stage PDF** or a stage **URL** (tick **Crawl** to follow every page of the left navigation; add the site login if needed), and click **Run**. Open the result, or download **⬇ Genuine issues** (PDF + CSV). Runs are saved in `runs/<run-id>/`.
+**3. Run a comparison.** In the browser:
+1. Pick the **prod PDF**, then the **stage PDF** or a stage **URL**. For a URL, tick **Crawl** to follow every page of the left navigation, and add the site login if needed.
+2. Enter your **AEM user and password** in the **AEM login** card. The AEM author URL is pre-filled (`[aem] author` in `config/default.toml`), and you can change it there.
+3. Click **Run comparison**, then open the result or download **⬇ Genuine issues** (PDF + CSV). Runs are saved in `runs/<run-id>/`.
 
 In VS Code: **Cmd+Shift+P → Python: Select Interpreter → `./.venv/bin/python`**.
 

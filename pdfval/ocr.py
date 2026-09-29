@@ -36,29 +36,91 @@ def image_text(path: str, page: int, bbox: tuple, dpi: int = 300, scales: tuple 
     return "\n".join(_read(path, page, bbox, dpi * k) for k in scales)
 
 
-def _read(path: str, page: int, bbox: tuple, dpi: int) -> str:
+def _cache_key(path: str, page: int, bbox: tuple, dpi: int) -> tuple:
+    return (path, page, tuple(round(v, 1) for v in bbox), dpi)
+
+
+def _render(path: str, page: int, bbox: tuple, dpi: int) -> bytes | None:
+    """The picture as a grayscale PNG with the contrast stretched (thin grey labels on a line drawing);
+    None when it is too large to read at this dpi (a page-size picture is read at lower scales only)."""
     import io
 
     from PIL import Image as PILImage, ImageOps
 
-    key = (path, page, tuple(round(v, 1) for v in bbox), dpi)
+    rect = pymupdf.Rect(bbox)
+    if max(rect.width, rect.height) * dpi / 72 > 7000:
+        return None
+    doc = _DOCS.get(path) or _DOCS.setdefault(path, pymupdf.open(path))
+    png = doc[page].get_pixmap(clip=rect, dpi=dpi).tobytes("png")
+    im = ImageOps.autocontrast(PILImage.open(io.BytesIO(png)).convert("L"), cutoff=1)
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _tesseract(png: bytes) -> str:
+    # --psm 11: sparse text - labels scattered over a drawing, not a paragraph
+    r = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "11"], input=png, capture_output=True, timeout=120)
+    return r.stdout.decode("utf-8", "replace")
+
+
+def _read(path: str, page: int, bbox: tuple, dpi: int) -> str:
+    key = _cache_key(path, page, bbox, dpi)
     if key not in _TEXT:
         _TEXT[key] = ""
         try:
-            rect = pymupdf.Rect(bbox)
-            if max(rect.width, rect.height) * dpi / 72 <= 7000:  # a page-size picture is read at lower scales only
-                doc = _DOCS.get(path) or _DOCS.setdefault(path, pymupdf.open(path))
-                png = doc[page].get_pixmap(clip=rect, dpi=dpi).tobytes("png")
-                im = ImageOps.autocontrast(PILImage.open(io.BytesIO(png)).convert("L"), cutoff=1)
-                buf = io.BytesIO()
-                im.save(buf, "PNG")
-                # --psm 11: sparse text - labels scattered over a drawing, not a paragraph
-                r = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "11"], input=buf.getvalue(),
-                                   capture_output=True, timeout=120)
-                _TEXT[key] = r.stdout.decode("utf-8", "replace")
+            png = _render(path, page, bbox, dpi)
+            if png:
+                _TEXT[key] = _tesseract(png)
         except Exception:
             pass
     return _TEXT[key]
+
+
+def prefetch(path: str, pictures: list[tuple[int, tuple]], dpi: int, scales: tuple, progress=None) -> None:
+    """Read many pictures at once: rendered one after another (pymupdf is not thread-safe), each
+    rendering handed to tesseract on its own core as soon as it is ready. Fills the cache that
+    image_text reads, so the per-finding lookups that follow cost nothing."""
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+
+    keys = []
+    for page, bbox in pictures:
+        for k in scales:
+            key = _cache_key(path, page, bbox, dpi * k)
+            if key not in _TEXT and key not in keys:
+                keys.append(key)
+    if not keys:
+        return
+    import threading
+
+    done, lock = [0], threading.Lock()
+
+    def finished(key, fut=None):
+        if fut is not None:
+            try:
+                _TEXT[key] = fut.result()
+            except Exception:
+                pass
+        with lock:
+            done[0] += 1
+            n = done[0]
+        if progress and (n % 5 == 0 or n == len(keys)):
+            progress(n, len(keys))
+
+    if progress:
+        progress(0, len(keys))
+    with ThreadPoolExecutor(max_workers=max(1, (os.cpu_count() or 2) - 1)) as pool:
+        for key in keys:
+            _TEXT[key] = ""
+            try:
+                png = _render(key[0], key[1], key[2], key[3])
+            except Exception:
+                png = None
+            if png:
+                pool.submit(_tesseract, png).add_done_callback(lambda fut, key=key: finished(key, fut))
+            else:
+                finished(key)
 
 
 _DIGITS = str.maketrans("oqdilzsbg", "000112569")  # what OCR reads for a digit in a label

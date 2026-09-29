@@ -65,7 +65,7 @@ def _raw(doc: Doc, page: int) -> list:
         return doc.raw_tables.get(page, [])
     key = (doc.path, page)
     if key not in _RAW:
-        pdf = _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+        pdf = (_DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path)))
         _RAW[key] = detect(pdf[page])
     return _RAW[key]
 
@@ -467,7 +467,7 @@ def _rules(doc: Doc, page: int) -> tuple[list, list]:
     Stroked lines and rectangle edges, and hairline filled rectangles (rules drawn as fills)."""
     key = (doc.path, page)
     if key not in _RULES:
-        pdf = _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+        pdf = (_DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path)))
         ver, hor = [], []
         try:
             drawings = pdf[page].get_drawings()
