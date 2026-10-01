@@ -84,6 +84,7 @@ def base(**over):
 @pytest.fixture
 def cfg():
     c = load_config()
+    c["typography"]["enabled"] = False  # prod vs stage only: these pages don't follow the design spec
     c["sections"]["front_matter"] = False
     return c
 
@@ -102,10 +103,12 @@ def test_identical_has_no_genuine_issue(tmp_path, cfg):
 
 
 def test_style_change_is_not_genuine(tmp_path, cfg):
+    cfg["genuine"]["everything"] = False  # the selective genuine report: only the listed types
     a = make(tmp_path / "a.pdf", base())
     secs = base()
     secs[3]["font"] = "tiro"  # same text in another font: CSS, not a genuine issue
     b = make(tmp_path / "b.pdf", secs)
+    cfg["style"]["compare_with_prod"] = True  # the optional prod -> stage font comparison
     r = compare(a, b, cfg)
     assert any(f["check"] == "style" for s in r["sections"] for f in s["findings"])
     assert genuine(r) == []

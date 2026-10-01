@@ -4,3 +4,4 @@ playwright>=1.45   # e2e walker: drives the viewer, scrolls to each section, scr
 pytest>=8          # CI suite: one test case per section
 pillow>=10         # screenshots, image crops and comparisons (imported as PIL)
 numpy>=1.24        # image matching (cross-correlation)
+openpyxl>=3.1

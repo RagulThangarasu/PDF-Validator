@@ -28,6 +28,7 @@ import pymupdf
 
 from ..model import Doc, Finding, Image, Loc
 from . import Aligner, Unit, locs, snippet
+from .assets import icon_max
 
 
 def relation(doc: Doc, rng: tuple[int, int], im: Image) -> tuple[str, int | None, int | None]:
@@ -61,6 +62,18 @@ def relation(doc: Doc, rng: tuple[int, int], im: Image) -> tuple[str, int | None
     return ("block", max(above) if above else None, min(below) if below else None)
 
 
+def _in_table_test(u: Unit):
+    """im -> True when the picture's centre lies in a table grid on its page (either document). Uses the
+    table finder's result the extractor already cached for the page (tables._raw), so it costs nothing."""
+    from . import tables as tables_mod
+
+    def test(doc: Doc, im: Image) -> bool:
+        cx, cy = (im.bbox[0] + im.bbox[2]) / 2, (im.bbox[1] + im.bbox[3]) / 2
+        return any(len(rows) >= 2 and b[0] <= cx <= b[2] and b[1] <= cy <= b[3]
+                   for _, b, rows, _ in tables_mod._raw(doc, im.page))
+    return test
+
+
 def _last_paired(i: int | None, paired: dict, lo: int) -> int | None:
     """Nearest word at or before i that has a counterpart on the other side."""
     while i is not None and i >= lo:
@@ -76,12 +89,15 @@ def _word(doc: Doc, i: int | None) -> str:
 
 def check(u: Unit) -> list[Finding]:
     pcfg = u.cfg["layout"]
-    if not pcfg.get("check_placement", True):
+    if not pcfg.get("check_placement", True):  # image alignment: always compared with prod (not CSS)
         return []
     sev = pcfg.get("severity", {}).get("placement", "warning")
     al = Aligner(u)
     findings = []
+    in_table = _in_table_test(u)
     for x, y in u.image_pairs:
+        if in_table(u.a, x) or in_table(u.b, y):
+            continue  # a picture in a table cell (status LEDs): cells, not lines of text - not judged here
         ra, rb = relation(u.a, u.a_range, x), relation(u.b, u.b_range, y)
         kind_a, prev_a, next_a = ra
         kind_b, prev_b, next_b = rb
@@ -105,19 +121,21 @@ def check(u: Unit) -> list[Finding]:
                 pos = f"after {_word(u.b, prev_b)}" if prev_b is not None else "at the start of its line"
                 msg = (f"Graphic moved into a text line: in prod it is on its own line below {_word(u.a, prev_a)}; "
                        f"in stage it sits inline {pos}")
-        elif not same_neighbours and pa is not None and pb is not None and al.a2b[pa] != pb:
+        elif not same_neighbours and pa is not None and pb is not None and al.a2b[pa] != pb \
+                and not (kind_a != "inline" and icon_max(u.a, x, u.cfg["assets"]) and icon_max(u.b, y, u.cfg["assets"])):
+            # (a small icon on its own - a status LED in a table cell - is not judged by the text before it:
+            # rows of identical icons pair with the wrong row. An icon moving into / out of a sentence is.)
             where = "inline after" if kind_a == "inline" else "placed after"
             msg = (f"Graphic {where} different text: after {_word(u.a, pa)} in prod, "
                    f"after {_word(u.b, pb)} in stage (prod's {_word(u.a, pa)} is elsewhere in stage)")
         if msg:
-            a_ctx = [i for i in (prev_a,) if i is not None]
-            b_ctx = [i for i in (prev_b,) if i is not None]
+            # only the picture is boxed on each side (the text it follows is named in the message)
             findings.append(Finding(
                 "assets", sev, msg,
-                [Loc(x.page, x.bbox)] + locs(u.a, a_ctx), [Loc(y.page, y.bbox)] + locs(u.b, b_ctx),
+                [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
                 {"kind": "placement", "property": "placement", "baseline": kind_a, "candidate": kind_b},
                 types=["placement"]))
-    findings += _containment(u, al, sev)
+    findings += _containment(u, al, sev, in_table)
     return findings
 
 
@@ -179,7 +197,7 @@ def _region(doc: Doc, words: list[int], page: int, rng: tuple[int, int]) -> tupl
     return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)), False
 
 
-def _containment(u: Unit, al: Aligner, sev: str) -> list[Finding]:
+def _containment(u: Unit, al: Aligner, sev: str, in_table=lambda d, im: False) -> list[Finding]:
     """A graphic inside a note / box on one side but outside the same note on the other.
     The note is known by its text: a tinted panel's words on one side, found through the
     content alignment on the other side, where the note may be drawn differently (a panel,
@@ -193,6 +211,8 @@ def _containment(u: Unit, al: Aligner, sev: str) -> list[Finding]:
     sides = ((u.a, u.b, a2b, u.a_range, u.b_range, "prod", "stage"),
              (u.b, u.a, b2a, u.b_range, u.a_range, "stage", "prod"))
     for x, y in u.image_pairs:
+        if in_table(u.a, x) or in_table(u.b, y):
+            continue  # a table's shaded rows are not note boxes
         for k, (S, O, to_o, rs, ro, ns, no) in enumerate(sides):
             im_s, im_o = (x, y) if k == 0 else (y, x)
             for panel, words in _panels(S, im_s.page, rs):
@@ -212,11 +232,8 @@ def _containment(u: Unit, al: Aligner, sev: str) -> list[Finding]:
                 msg = (f"Image moved into the note / box in stage: “{note}” – in prod the image is outside it"
                        if stage_in else
                        f"Image outside its note / box in stage: in prod it is inside the note “{note}”, in stage it is not")
-                box_s = [Loc(im_s.page, panel)]
-                box_o = [Loc(im_o.page, found[0])] if found else []
-                a_box, b_box = (box_s, box_o) if k == 0 else (box_o, box_s)
-                out.append(Finding(
-                    "assets", sev, msg, [Loc(x.page, x.bbox)] + a_box, [Loc(y.page, y.bbox)] + b_box,
+                out.append(Finding(  # only the picture is boxed; the note is in the screenshot around it
+                    "assets", sev, msg, [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
                     {"kind": "outside-box", "property": "placement"}, types=["image outside box"],
                     links=[(Loc(x.page, x.bbox), Loc(y.page, y.bbox))]))
     return out

@@ -65,7 +65,25 @@ def main(argv: list[str] | None = None) -> int:
     x.add_argument("--out", help="zip file (default: <pdf name>-source.zip next to the PDF)")
     x.add_argument("--config", help="TOML overrides merged over config/default.toml")
 
+    md = sub.add_parser("metadata", help="check Document Title / Page Title of every product map in AEM against the sheet")
+    md.add_argument("--sheet", help="migration sheet .xlsx (default: newest in <project>/metadata)")
+    md.add_argument("--out", default="reports/metadata", help="report directory")
+    md.add_argument("--lang", default="en", help="language folder of the maps in AEM")
+    md.add_argument("--config", help="TOML overrides merged over config/default.toml")
+
     args = ap.parse_args(argv)
+    if args.cmd == "metadata":
+        import os
+        from . import aem, metadata
+        from .app.server import _keychain_get
+        acfg = aem.merge_settings(engine.load_config(args.config).get("aem", {}), _saved_aem_settings())
+        acfg["password"] = os.environ.get("PDFVAL_AEM_PASSWORD") or _keychain_get(acfg.get("user", ""))
+        res = metadata.run(acfg, args.out, args.sheet, args.lang, progress=lambda f, m: print(f"{int(f * 100):3d}%  {m}"))
+        sm = res["excel"]
+        print(f"{sm['rows']} Excel rows: {sm['pass']} pass, {sm['fail']} mismatch, {sm['missing']} empty in AEM, "
+              f"{sm['case']} case/spacing only, {sm['not_in_aem']} no map in AEM")
+        print(f"report: {Path(args.out) / 'metadata-report.pdf'}  ·  {Path(args.out) / 'metadata-report.csv'}")
+        return 1 if sm["fail"] or sm["missing"] or sm["case"] else 0
     if args.cmd == "source":
         from . import source_export
         out = args.out or str(Path(args.pdf).with_name(Path(args.pdf).stem + "-source.zip"))
@@ -102,6 +120,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if gen["total"] else 0
     bad = {"error": ("fail",), "warning": ("fail", "warn")}[args.fail_on]
     return 1 if any(x["status"] in bad for x in result["sections"]) else 0
+
+
+def _saved_aem_settings() -> dict:
+    """AEM user / author / products saved from the web UI."""
+    import json
+    try:
+        return json.loads((Path(__file__).resolve().parents[1] / "runs" / "aem-settings.json").read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
 
 
 def _block() -> None:

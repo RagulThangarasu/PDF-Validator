@@ -60,10 +60,41 @@ def _pct_status(c: dict) -> str:
 INCLUDE_ALL = {"summary": True, "genuine": True, "critical": True, "sections": True, "toc": True, "stylemap": True,
                "issues": True, "screenshots": True}
 
-# the genuine-issues report: its overview table and every genuine issue with screenshots, nothing else
-GENUINE = {"include": {"summary": False, "genuine": True, "critical": False, "sections": False, "toc": False,
-                       "stylemap": False, "issues": True, "screenshots": True},
+# the genuine-issues report: the metrics at the top, then every genuine issue with its screenshots -
+# no overview tables (the issue pages say what each issue is)
+GENUINE = {"include": {"summary": True, "categories": False, "genuine": "counts", "css": False, "toc_compare": True,
+                       "critical": False, "sections": False,
+                       "toc": False, "stylemap": False, "issues": True, "screenshots": True},
            "filter": {"genuine_only": True}}
+
+# the CSS report: every CSS / typography / layout issue that is not in the PDF report (fonts, sizes, colours,
+# line heights, spec styles), with its screenshots
+CSS_REPORT = {"include": {**GENUINE["include"], "genuine": False, "css": True},
+              "filter": {"categories": ["css"], "non_genuine": True}}
+
+# the image report: every picture issue (missing / changed / size / pixelated / blurred / alignment / order,
+# and picture labels missing in stage or drawn into the stage picture), whether in the PDF report or not
+IMAGE_TYPES = {"missing image label", "label in picture", "text in image"}
+IMAGE_REPORT = {"include": {**GENUINE["include"], "genuine": False},
+                "filter": {"images": True}}
+
+
+def is_image_issue(f: dict) -> bool:
+    return f.get("check") == "assets" or bool(set(f.get("types") or []) & IMAGE_TYPES)
+
+
+def _actual_cell(st: dict) -> str:
+    """Stage's most used style for a Figma style; differing values in red."""
+    a = st.get("actual")
+    if not a:
+        return "<span class='muted'>not used in stage</span>"
+    red = lambda ok, v: v if ok else f"<b style='color:#dc2626'>{v}</b>"
+    parts = [red(a["font"].lower().startswith(st["font"].lower()), escape(a["font"])),
+             red(a["weight"] == st["weight"], escape(a["weight"])),
+             red(abs(a["size"] - st["size"]) <= 0.25, f"{a['size']:g} pt"),
+             f"<span style='background-color:{a['color']};border:0.5px solid #9aa1ad'>&#160;&#160;&#160;</span> "
+             + red(a["color"] == (st["color"] or a["color"]), escape(a["color"]))]
+    return " · ".join(parts) + f" <span class='muted'>({a['share']:.0%} of {a['words']} words)</span>"
 
 
 def _summary_html(result: dict, include: dict | None = None, note: str = "", n_issues: int | None = None) -> list[str]:
@@ -91,32 +122,55 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
         f"<tr><th>Critical / breaking</th><td><b style='color:{'#b42318' if sm['critical']['total'] else '#16a34a'}'>"
         f"{sm['critical']['total']}</b> " + (" · ".join(f"{v} × {escape(k)}" for k, v in sm["critical"]["by_kind"].items())
                                              or "— no missing sections, rows, images, files, links or glyphs") + "</td></tr>",
-        f"<tr><th>CSS / layout</th><td>{sm['css']['issues']} issues (style {sm['css']['style']}, layout {sm['css']['layout']}) "
-        "— reported separately, not part of the content %</td></tr>",
+        (f"<tr><th>CSS / layout</th><td>{sm['css']['issues']} issues (style {sm['css']['style']}, layout {sm['css']['layout']}) "
+         "— reported separately, not part of the content %</td></tr>" if inc.get("css", True) else ""),
         "<tr><th>All findings</th><td>" + " · ".join(f"<b style='color:{CHECK_COLOR[k]}'>{k}</b> {v}"
-                                                    for k, v in sm["by_check"].items()) + "</td></tr>"
+                                                    for k, v in sm["by_check"].items()
+                                                    if inc.get("css", True) or k not in ("style", "layout")) + "</td></tr>"
         + (f"<tr><th>This report</th><td>{escape(note)}</td></tr>" if note else "") + "</table>",
     ]
     if not inc["summary"]:  # keep only the title, the documents and the filter note
         html = html[:3] + [doc_row("Prod (baseline)", meta["baseline"]),
                            doc_row("Web page (candidate)" if meta.get("mode") == "html" else "Stage (candidate)", meta["candidate"]),
                            (f"<tr><th>This report</th><td>{escape(note)}</td></tr>" if note else "") + "</table>"]
-    else:
+    elif inc.get("categories", True):
         html.append("<h2>Issues by category and type</h2><table class='grid'><tr><th>Category</th><th>Total</th><th>Types</th></tr>")
         for c, label in CATS:
             bc = sm["by_category"][c]
             html.append(f"<tr><td><b style='color:{CAT_COLOR[c]}'>{label}</b></td><td class='n'>{bc['total']}</td><td>"
                         + (" · ".join(f"{escape(t)} {n}" for t, n in bc["types"].items()) or "—") + "</td></tr>")
         html.append("</table>")
+    typo = meta.get("typography")
+    if inc["summary"] and typo and typo.get("styles"):  # the Figma type scale the typography issues refer to
+        m = typo.get("margins") or {}
+        th = typo.get("theme") or {}
+        theme = (f" Theme <b>{escape(th['name'])}</b> (accent {escape(th.get('accent') or '')}), "
+                 + (f"read from the cover ({escape(th.get('cover_color') or '')})." if th.get("cover") else "no cover page: the default theme.")
+                 if th.get("name") else "")
+        html.append(f"<h2>Design spec (Figma) — {escape(typo['format'])}: expected headings and text</h2>"
+                    f"<p class='muted'>Stage text is checked against these styles; each typography issue names the style it "
+                    f"expected.{theme} Page {typo['page'][0]:g} × {typo['page'][1]:g} pt, margins top {m.get('top', 0):g} · bottom "
+                    f"{m.get('bottom', 0):g} · left {m.get('left', 0):g} · right {m.get('right', 0):g} pt.</p>"
+                    "<table class='grid'><tr><th>Style</th><th>Font</th><th>Weight</th><th class='n'>Size</th>"
+                    "<th class='n'>Line height</th><th>Colour</th><th>Stage (actual): font · weight · size · colour</th></tr>"
+                    + "".join(f"<tr><td><b>{escape(st['style'])}</b></td><td>{escape(st['font'])}</td><td>{escape(st['weight'])}"
+                              f"{', underlined' if st.get('underline') else ''}</td><td class='n'>{st['size']:g} pt</td>"
+                              f"<td class='n'>{st['line_height']:g} pt</td><td><span style='background-color:{st['color'] or '#000'};border:0.5px solid #9aa1ad'>&#160;&#160;&#160;</span> "
+                              f"{escape(st['color'])}</td><td>{_actual_cell(st)}</td></tr>" for st in typo["styles"]) + "</table>")
     gen = [(s, f) for s in result["sections"] for f in s["findings"] if f.get("genuine")]
-    if inc["genuine"]:
+    if inc["genuine"] == "counts":  # metrics only: how many of each issue, the issues follow with screenshots
+        by = Counter(f["issue"] for _, f in gen)
+        html.append(f"<h2 style='color:#b42318'>Issues ({len(gen)})</h2><p>"
+                    + " · ".join(f"<b style='color:{next((f.get('color') for _, f in gen if f['issue'] == k and f.get('color')), '#1d2330')}'>"
+                                 f"{n}</b> × {escape(k)}" for k, n in by.most_common()) + "</p>")
+    elif inc["genuine"]:
         html.append(genuine_html(gen))
     crit = [(s, f) for s in result["sections"] for f in s["findings"] if f.get("critical")]
     if crit and inc["critical"]:
         html.append("<h2 style='color:#b42318'>Critical issues</h2><table class='grid'><tr><th>#</th><th>Section</th>"
                     "<th>Check</th><th>Issue</th><th>Prod p.</th><th>Stage p.</th></tr>")
         for s, f in crit:
-            html.append(f"<tr><td>{f['id']}</td><td>{escape(s['title'])}</td><td>{CAT_LABEL[f['category']]}</td><td>{escape(f['message'])}</td>"
+            html.append(f"<tr><td>{f['id']}</td><td>{escape(s['title'])}</td><td>{CAT_LABEL[f['category']]}</td><td>{escape(f['message']).replace(chr(10), '<br/>')}</td>"
                         f"<td>{f['baseline'][0]['page'] + 1 if f['baseline'] else '—'}</td>"
                         f"<td>{f['candidate'][0]['page'] + 1 if f['candidate'] else '—'}</td></tr>")
         html.append("</table>")
@@ -227,15 +281,119 @@ def _rgb(hex_: str) -> tuple[float, float, float]:
     return tuple(int(hex_[i:i + 2], 16) / 255 for i in (1, 3, 5))
 
 
-def _jpeg_bytes(src: Path, width: int = 600) -> tuple[bytes, float] | None:
+def _jpeg_bytes(src: Path, width: int = 1400) -> tuple[bytes, float] | None:
     if not src.exists():
         return None
     img = Image.open(src).convert("RGB")
     if img.width > width:
         img = img.resize((width, round(img.height * width / img.width)), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, "JPEG", quality=60, optimize=True)
+    img.save(buf, "JPEG", quality=88, optimize=True)
     return buf.getvalue(), img.height / img.width
+
+
+TOC_COLOR = {"match": "#16a34a", "level differs": "#b45309", "title differs": "#b45309", "order differs": "#d92d20",
+             "missing in stage": "#d92d20", "extra in stage": "#2563eb"}
+WRONG_PAGE = "#9333ea"
+
+
+def _toc_section(c: "_Canvas", t: dict, web: bool, out: Path) -> None:
+    """The TOC compared like the UI's TOC tab: the banner, both TOC pages side by side with every entry
+    boxed in its status colour, then the entries table (prod entry | status | stage entry)."""
+    sm, other = t["summary"], "web page" if web else "stage"
+    c.new_page()
+    c.runs([("TOC comparison", "#1d2330", True), (f"   prod vs {other}, entry by entry", "#6a7282", False)], 14)
+    c.y += 4
+    head_b, head_c = t["heading"].get("baseline") or "—", t["heading"].get("candidate") or "—"
+    same_head = head_b.strip().lower() == head_c.strip().lower()
+    c.runs([("TOC status  ", "#6a7282", True), (sm["status"].upper(), TOC_COLOR.get("match" if sm["status"] == "pass" else
+                                                                   "level differs" if sm["status"] == "warn" else "order differs"), True),
+            ("     Sequence  ", "#6a7282", True),
+            ("✓ same order" if sm["sequence_ok"] else f"✗ {sm['order differs']} out of order", "#16a34a" if sm["sequence_ok"] else "#d92d20", True),
+            ("     Levels matching  ", "#6a7282", True), (f"{sm['levels_match_pct']}%", "#1d2330", True),
+            ("     Entries  ", "#6a7282", True), (f"{sm['baseline_entries']} prod · {sm['candidate_entries']} {other}", "#1d2330", True)], 9)
+    c.runs([("TOC heading  ", "#6a7282", True), (f"“{head_b}” {'=' if same_head else '≠'} “{head_c}”", "#1d2330" if same_head else "#d92d20", True),
+            ("     Levels  ", "#6a7282", True), (f"{t['levels']['baseline']} prod · {t['levels']['candidate']} {other}", "#1d2330", True)], 9)
+    counts = [(k, sm.get(k, 0)) for k in ("match", "level differs", "title differs", "order differs", "missing in stage", "extra in stage")]
+    c.runs([x for k, n in counts for x in ((f"■ ", TOC_COLOR[k], True), (f"{k.replace('stage', other)} {n}    ", "#1d2330", False))]
+           + [("■ ", WRONG_PAGE, True), (f"wrong page no. {sm.get('wrong page', 0)}", "#1d2330", False)], 8)
+    c.y += 6
+
+    # --- the TOC pages side by side, every entry boxed in its status colour
+    col_w = (c.width - 16) / 2
+    pages_b, pages_c = t.get("images", {}).get("baseline", []), t.get("images", {}).get("candidate", [])
+    for k in range(max(len(pages_b), len(pages_c))):
+        pb = pages_b[k] if k < len(pages_b) else None
+        pc = pages_c[k] if k < len(pages_c) else None
+        tiles = []
+        for side, pg in (("baseline", pb), ("candidate", pc)):
+            im = _jpeg_bytes(out / pg["src"], width=1400) if pg else None
+            tiles.append((side, pg, im))
+        h = max((min(col_w * im[1], c.PAGE.height - 2 * c.M - 40) for _, _, im in tiles if im), default=0)
+        if not h:
+            continue
+        room = c.PAGE.height - c.M - 8 - c.y - 20
+        if room < 300:  # too little left on this page: the pair starts a new one
+            c.new_page()
+            room = c.PAGE.height - c.M - 8 - c.y - 20
+        h = min(h, room)  # else shrink the pair to fit under what is already on the page
+        for col, (side, pg, im) in enumerate(tiles):
+            x0 = c.M + col * (col_w + 16)
+            c.page.insert_text((x0, c.y + 8), f"{'PROD' if side == 'baseline' else other.upper()} TOC p.{pg['page'] if pg else '—'}",
+                               fontsize=7, color=_rgb("#6a7282"))
+            if not im:
+                continue
+            w = h / im[1]
+            r = pymupdf.Rect(x0, c.y + 12, x0 + w, c.y + 12 + h)
+            c.page.insert_image(r, stream=im[0])
+            c.page.draw_rect(r, color=(0.8, 0.82, 0.85), width=0.5)
+            size = t.get("page_size", {}).get(side, {}).get(str(pg["page"]))
+            if not size:
+                continue
+            sx, sy = r.width / size[0], r.height / size[1]
+            for row in t["rows"]:
+                e = row.get(side)
+                if not e or e.get("toc_page") != pg["page"] or not e.get("bbox"):
+                    continue
+                b = e["bbox"]
+                box = pymupdf.Rect(r.x0 + b[0] * sx, r.y0 + b[1] * sy, r.x0 + b[2] * sx, r.y0 + b[3] * sy)
+                wrong = any(fl.endswith("page wrong") for fl in row.get("flags", [])) and side == "candidate"
+                col_ = _rgb(WRONG_PAGE if wrong else TOC_COLOR.get(row["status"], "#6a7282"))
+                c.page.draw_rect(box, color=col_, fill=col_, fill_opacity=0.12, width=0.8)
+        c.y += h + 20
+
+    # --- the entries: prod | status | stage
+    if not c.room(60):
+        c.new_page()
+    c.runs([("Entries", "#1d2330", True), ("   prod entry  ·  status  ·  " + other + " entry (level, title, page)", "#6a7282", False)], 10)
+    w_side, w_mid = c.width * 0.42, c.width * 0.16
+    cell = lambda e: f"L{e['level']}  {e['title']}  ·  p.{e.get('page') if e.get('page') is not None else '—'}" if e else "—"
+    for n, row in enumerate(t["rows"], 1):
+        st = row["status"] + ("  ·  " + ", ".join(row["flags"]) if row.get("flags") else "")
+        colour = TOC_COLOR.get(row["status"], "#6a7282")
+        cells = [(c.M, f"{n}. " + cell(row.get("baseline")), "#1d2330", False, w_side),
+                 (c.M + w_side + 6, st.replace("stage", other), colour, True, w_mid),
+                 (c.M + w_side + w_mid + 12, cell(row.get("candidate")), "#1d2330", False, w_side)]
+        # every cell in full: a long entry wraps onto more lines, the row grows to fit
+        wrapped = [c.wrap(text, 8, c.bold if bold else c.regular, width) for _, text, _, bold, width in cells]
+        h = 11 * max(len(w) for w in wrapped) + 2
+        if not c.room(h + 2):
+            c.new_page()
+        y = c.y
+        if row["status"] != "match":
+            c.page.draw_rect(pymupdf.Rect(c.M - 2, y - 1, c.M + c.width + 2, y + h - 1), color=None,
+                             fill=_rgb(colour), fill_opacity=0.07)
+        for (x, _, col, bold, _), lines in zip(cells, wrapped):
+            for k, line in enumerate(lines):
+                _text(c, x, y + 11 * k, line, col, bold)
+        c.y = y + h + 1
+    c.y += 6
+
+
+def _text(c: "_Canvas", x: float, y: float, text: str, color: str, bold: bool) -> None:
+    tw = pymupdf.TextWriter(c.PAGE)
+    tw.append((x, y + 9), text, font=c.bold if bold else c.regular, fontsize=8)
+    tw.write_text(c.page, color=_rgb(color))
 
 
 def _section_header(c: _Canvas, s: dict, cont: bool = False):
@@ -253,10 +411,10 @@ def genuine_html(gen: list[tuple]) -> str:
     """Overview of the genuine issues: count per issue, then one row per issue with its description."""
     from ..genuine import where
     if not gen:
-        return ("<h2 style='color:#16a34a'>Genuine issues: none</h2><p>No missing or duplicated sections, missing or "
+        return ("<h2 style='color:#16a34a'>Issues: none</h2><p>No missing or duplicated sections, missing or "
                 "broken images, misplaced images or content, missing data, table or link problems.</p>")
     by = Counter(f["issue"] for _, f in gen)
-    out = [f"<h2 style='color:#b42318'>Genuine issues ({len(gen)})</h2><p>"
+    out = [f"<h2 style='color:#b42318'>Issues ({len(gen)})</h2><p>"
            + " · ".join(f"<b>{n}</b> × {escape(k)}" for k, n in by.most_common()) + "</p>",
            _topics_html(gen),
            "<table class='grid'><tr><th>#</th><th>Section</th><th>Issue</th><th>Prod</th><th>Stage</th><th>AEM topic (GUID)</th>"
@@ -264,9 +422,10 @@ def genuine_html(gen: list[tuple]) -> str:
     for s, f in gen:
         pa, pc = where(f)
         out.append(f"<tr><td>{f['id']}</td><td>{escape(s['title'])}</td>"
-                   f"<td><b>{escape(f['issue'])}</b><br/><span class='muted'>{escape(f.get('why', ''))}</span></td>"
+                   f"<td><b style='color:{f.get('color') or '#1d2330'}'>{escape(f['issue'])}</b>"
+                   f"<br/><span class='muted'>{escape(f.get('why', ''))}</span></td>"
                    f"<td>{pa or '—'}</td><td>{pc or '—'}</td><td>{_guid_cell(f.get('aem'))}</td>"
-                   f"<td>{escape(f['description'])}</td></tr>")
+                   f"<td>{escape(f['description']).replace(chr(10), '<br/>')}</td></tr>")
     return "".join(out) + "</table>"
 
 
@@ -313,7 +472,9 @@ def select_issues(result: dict, flt: dict | None = None, severities: set[str] | 
             if f["severity"] not in sev or (cats and f.get("category") not in cats) \
                     or (types and not set(f.get("types") or []) & types) or (flt.get("critical_only") and not f.get("critical")) \
                     or (q and q not in f["message"].lower() and q not in s["title"].lower()) \
-                    or (flt.get("genuine_only") and not f.get("genuine")):
+                    or (flt.get("genuine_only") and not f.get("genuine")) \
+                    or (flt.get("non_genuine") and f.get("genuine")) \
+                    or (flt.get("images") and not is_image_issue(f)):
                 continue
             out.append((s, f))
     # content first, then links, formatting and CSS last; in each group the document's section
@@ -357,6 +518,10 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
     inc = {**INCLUDE_ALL, **(opts.get("include") or {})}
     issues = select_issues(result, opts.get("filter"), severities) if inc["issues"] else []
     note = describe(opts.get("filter"), len(issues)) if options else ""
+    toc = result.get("toc") if inc.get("toc_compare") else None
+    toc_issues = [x for x in issues if x[1]["check"] == "toc"] if toc and toc.get("rows") else []
+    if toc_issues:  # the TOC is compared entry by entry in its own section, like the UI's TOC tab
+        issues = [x for x in issues if x[1]["check"] != "toc"]
 
     # --- summary, sections table, style map: HTML flow (Story)
     buf = io.BytesIO()
@@ -364,7 +529,11 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
     page_rect = pymupdf.paper_rect("a4-l")
     blocks = _summary_html(result, inc, note)
     if (opts.get("filter") or {}).get("genuine_only"):
-        blocks[0] = blocks[0].replace("PDF Parity Report", "Genuine Issues Report", 1)
+        blocks[0] = blocks[0].replace("PDF Parity Report", "PDF Report", 1)
+    elif (opts.get("filter") or {}).get("non_genuine"):
+        blocks[0] = blocks[0].replace("PDF Parity Report", "CSS Report", 1)
+    elif (opts.get("filter") or {}).get("images"):
+        blocks[0] = blocks[0].replace("PDF Parity Report", "Image Report", 1)
     if inc["issues"]:
         n_by = Counter(group_of(f) for _, f in issues)
         capped = sum(n for s in result["sections"] for c, v in s.get("checks", {}).items()
@@ -373,6 +542,8 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
                        "<table class='grid'><tr><th>#</th><th>Group</th><th>What it covers</th><th class='n'>Issues</th></tr>"
                        + "".join(f"<tr><td>{k + 1}</td><td><b>{escape(l)}</b></td><td>{escape(d)}</td><td class='n'>{n_by[g]}</td></tr>"
                                  for k, (g, l, d) in enumerate(GROUPS)) + "</table>"
+                       + (f"<p><b>TOC comparison</b> comes first: prod and stage TOC side by side, entry by entry "
+                          f"({len(toc_issues)} TOC issue(s)).</p>" if toc_issues else "")
                        + (f"<p class='muted'>{capped} further CSS / layout findings of kinds already listed are not "
                           f"repeated (report.max_findings_per_check per check and section); every critical and genuine "
                           f"issue is listed.</p>" if capped else ""))
@@ -390,7 +561,9 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
 
     # --- issues: direct drawing, prod | stage screenshots side by side
     c = _Canvas(doc)
-    col_w, gap, max_h = (c.width - 16) / 2, 16, 230
+    if toc_issues:
+        _toc_section(c, toc, result["meta"].get("mode") == "html", out)
+    col_w, gap, max_h = (c.width - 16) / 2, 16, 320
     current = group = None
     for k, (s, f) in enumerate(issues):
         if group_of(f) != group:  # each group starts on a new page with its heading
@@ -407,12 +580,22 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
         imgs = {side: _jpeg_bytes(out / shots[side]) if shots.get(side) else None for side in ("baseline", "candidate")}
         img_h = max((min(col_w * im[1], max_h) for im in imgs.values() if im), default=0)
         text = f["description"] if f.get("genuine") and (opts.get("filter") or {}).get("genuine_only") else f["message"]
-        msg_lines = c.wrap(re.sub(r"\.{4,}", " … ", text), 9)
-        if len(msg_lines) > 5:
-            msg_lines = msg_lines[:5]
-            msg_lines[-1] += " …"
+        # the issue in full, never shortened; several differences at one spot: one line each
+        parts = [p.strip() for p in (text.split("\n\n") if "\n" in text else text.split("  ·  ")) if p.strip()]
+        rows_txt = []
+        for k, part in enumerate(parts, 1):
+            head, *rest = part.split("\n")  # a design-spec issue: headline, "Figma: …", "Stage: …"
+            rows_txt.append(("Issue", head, "#1d2330") if len(parts) == 1 else (f"Difference {k}", head, "#b42318"))
+            rows_txt += [(ln.split(": ", 1)[0], ln.split(": ", 1)[1], "#7c3aed" if ln.startswith("Figma") else "#2563eb" if ln.startswith("Prod") else "#0f766e")
+                         for ln in rest if ln.startswith(("Figma: ", "Prod: ", "Stage: "))]
+        msg_lines = []  # (label or None, text, label colour)
+        for label, value, colour in rows_txt:
+            wrapped = c.wrap(re.sub(r"\.{4,}", " ", f"{label}: {value}"), 9)
+            msg_lines.append((label, wrapped[0][len(label) + 2:], colour))
+            msg_lines += [(None, ln, colour) for ln in wrapped[1:]]
         a = f.get("aem")
         need = 12 + len(msg_lines) * 12.2 + (11 if a else 0) + (img_h + 16 if img_h else 0) + 8
+        need = min(need, c.PAGE.height - 2 * c.M - 60)  # longer than a page: it continues on the next one
         if s is not current:
             if not c.room(need + 40):
                 c.new_page()
@@ -428,14 +611,20 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
         c.runs(([("CRITICAL  ", "#b42318", True)] if f.get("critical") else [])
                + [(f["severity"].upper(), SEV_COLOR[f["severity"]], True), ("  ·  ", "#6a7282", False),
                 (f.get("issue") if f.get("genuine") else f"{CAT_LABEL.get(f.get('category'), f['check'])} · {', '.join(f.get('types', []))}",
-                 CAT_COLOR.get(f.get("category"), "#333333"), True),
+                 f.get("color") or CAT_COLOR.get(f.get("category"), "#333333"), True),
                 (f"  ·  #{f['id']}  ·  prod {pa} ↔ stage {pc}", "#6a7282", False)], 8)
-        for line in msg_lines:
-            c.runs([(line, "#1d2330", False)], 9)
+        for label, line, colour in msg_lines:
+            if not c.room(12.2):
+                c.new_page()
+                _section_header(c, s, cont=True)
+            c.runs(([(f"{label}: ", colour, True)] if label else []) + [(line, "#1d2330", False)], 9)
         if a:
             near = f"  ·  near {a['element']}" + (f" “{a['element_title']}”" if a.get("element_title") else "") if a.get("element") else ""
             c.runs([("AEM topic  ", "#6a7282", True), (a.get("topic") or "", "#1d2330", False), ("  ·  ", "#6a7282", False),
                     (a["guid"] + ("  ↗" if a.get("url") else ""), "#0f766e", True, a.get("url")), (near, "#6a7282", False)], 8)
+        if img_h and not c.room(img_h + 16 + (11 if a else 0)):
+            c.new_page()
+            _section_header(c, s, cont=True)
         if img_h:
             c.y += 2
             for col, (side, label) in enumerate((("baseline", "PROD"), ("candidate", "STAGE"))):

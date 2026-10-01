@@ -54,7 +54,9 @@ def build(path, lang, paras=None, overflow=False):
 
 @pytest.fixture
 def cfg():
-    return load_config()
+    c = load_config()
+    c["typography"]["enabled"] = False  # content comparison only: these pages don't follow the design spec
+    return c
 
 
 def genuine(r):

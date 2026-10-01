@@ -105,3 +105,96 @@ def test_guid_opens_the_product_map_with_all_topics():
     assert aem.url_for(found, cfg).endswith("/Topics/Product%20overview.dita")  # default: the topic once it is found
     assert aem.url_for(found, cfg, "map").endswith("/Maps/sl04_and_sh04.ditamap&appMode=author")
     assert aem.url_for({**a, "folder": ""}, cfg).startswith("http://aem:4502/libs/fmdita")  # no product folder: Explorer
+
+
+def test_generate_pdf_starts_the_preset_and_downloads_the_new_output(tmp_path):
+    """A fake AEM: the preset's id is looked up by its title, the generation request names the map and
+    that id in the query string (a form body gets “400 Request Data has already been read”); the
+    query then lists the new PDF, which is downloaded."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    seen = {}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(n)
+            u = urlparse(self.path)
+            seen["post"] = (u.path, parse_qs(u.query), self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if u.path == "/bin/querybuilder.json" and "folderprofiles" in u.query:
+                body = json.dumps({"hits": [{"jcr:path": "/var/dxml/folderprofiles/p/presets/fd4ac90a",
+                                             "fmdita-outputTitle": "BenQ EDU With Image", "fmdita-outputType": "pdf"}]}).encode()
+            elif u.path == "/bin/querybuilder.json":
+                body = json.dumps({"hits": [{"jcr:path": "/content/dam/out/w2720i.pdf"}]}).encode()
+            else:
+                seen["get"] = u.path
+                body = b"%PDF-1.7 fake"
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    cfg = {"author": f"http://127.0.0.1:{srv.server_address[1]}", "user": "u", "password": "p",
+           "generate": {"rules": [["/Education/", "BenQ EDU with images"]], "poll_s": 0.05, "timeout_s": 5}}
+    mp = "/content/dam/g/en/Education/Signage/w2720i/Maps/w2720i.ditamap"
+    preset = aem.preset_for(mp, cfg)
+    assert preset == "BenQ EDU with images"
+    out = aem.generate_pdf(mp, preset, str(tmp_path / "stage.pdf"), cfg)
+    srv.shutdown()
+    path, form, auth = seen["post"]
+    assert path == "/bin/publishlistener" and form["source"] == [mp] and form["outputName"] == ["fd4ac90a"]
+    assert form["operation"] == ["GENERATEOUTPUT"] and auth.startswith("Basic ")
+    assert seen["get"] == "/content/dam/out/w2720i.pdf" and open(out, "rb").read().startswith(b"%PDF")
+
+
+def test_map_is_found_from_the_prod_pdf_file_name():
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            q = parse_qs(urlparse(self.path).query)
+            hits = [{"jcr:path": "/content/dam/g/en/Consumer/Projector/w2720i/Maps/w2720i.ditamap"}] \
+                if q.get("nodename") == ["w2720i.ditamap"] else []
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps({"hits": hits}).encode())
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    cfg = {"author": f"http://127.0.0.1:{srv.server_address[1]}", "user": "u", "password": "p"}
+    assert aem.map_candidates("aeedd66f_W2720i_V1.03_EN.pdf") == ["w2720i"]
+    assert aem.find_map_for("aeedd66f_W2720i_V1.03_EN.pdf", cfg).endswith("/w2720i/Maps/w2720i.ditamap")
+    assert aem.preset_for("/content/dam/g/en/Consumer/Projector/w2720i/Maps/w2720i.ditamap", {}) == "BenQ with images"
+    srv.shutdown()
+
+
+def test_map_found_whatever_its_case_or_language_suffix():
+    """“EW270Q-en.ditamap” is the map ew270q.ditamap: case, a language suffix and punctuation do not
+    matter; the search-root / English copy wins over other DAM folders."""
+    maps = ["/content/dam/hashout/x/en/Monitor/ew270q/Maps/ew270q.ditamap",
+            "/content/dam/benq-aem-guides/ar-me/Monitor/ew270q/Maps/ew270q.ditamap",
+            "/content/dam/benq-aem-guides/en/Consumer/Monitor/ew270q/Maps/ew270q.ditamap",
+            "/content/dam/benq-aem-guides/en/Education/Signage/SL04-and-SH04/Maps/sl04_and_sh04.ditamap"]
+    root = "/content/dam/benq-aem-guides"
+    assert aem.map_key("EW270Q-en.ditamap") == aem.map_key("ew270q.ditamap") == "ew270q"
+    assert aem.best_map("EW270Q-en.ditamap", maps, root) == maps[2]
+    assert aem.best_map("SL04_and_SH04_EN", maps, root) == maps[3]
+    assert aem.best_map("nothing-here", maps, root) == ""

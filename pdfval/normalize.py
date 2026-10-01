@@ -12,6 +12,11 @@ _TYPOGRAPHY = str.maketrans({
     "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u2033": '"', "\u2032": "'",
     "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2212": "-",
 })
+# content.ignore_quote_style = true (default): only the quotes / apostrophes ("haven’t" = "haven't")
+_QUOTE_STYLE = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'", "\u2032": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u2033": '"',
+})
 _LEADER = re.compile(r"(\.\s*){3,}\d*$")  # TOC dot leaders (+ page number)
 _NUMBERING = re.compile(r"^(\d+(\.\d+)*\.?|[A-Z]\.)\s+")
 
@@ -41,7 +46,8 @@ def join_words(words) -> str:
         wrapped = nxt is not None and nxt.line != w.line and \
             (nxt.bbox[1] + nxt.bbox[3]) / 2 - (w.bbox[1] + w.bbox[3]) / 2 > 0.5 * (w.bbox[3] - w.bbox[1])
         glued = w.space_after == 0 or (w.space_after is None and wrapped
-                                       and nospace_char(w.text[-1:]) and nospace_char(nxt.text[:1]))
+                                       and nospace_char(w.text[-1:]) and nospace_char(nxt.text[:1])) \
+            or (wrapped and w.text.endswith("\u00ad"))  # "But­" | "ton’s": one word hyphenated at the line break
         if not glued:
             out.append(" ")
     return clean("".join(out), typography=False)  # keep ’ vs ' visible: it may be the difference
@@ -51,19 +57,21 @@ _WIDE = re.compile("[\u3000-\u303F\uFF00-\uFFEF]")
 _KEEP_WIDTH = re.compile("[\u3000-\u303F\uFF00-\uFFEF]+|[^\u3000-\u303F\uFF00-\uFFEF]+")
 
 
-def clean(text: str, typography: bool = True) -> str:
+def clean(text: str, typography: bool | str = True) -> str:
     """NFKC (ligatures like ﬁ are glyph-level, not content) + invisible chars;
-    typography=True also folds curly quotes and dash variants."""
+    typography=True also folds curly quotes and dash variants, "quotes" the quotes / apostrophes only."""
     # NFKC everywhere except CJK and full-width punctuation/letters: "，" vs "," or "（" vs "(" is a
     # visible difference in Chinese/Japanese text, not a glyph variant
     text = _KEEP_WIDTH.sub(lambda m: m.group() if _WIDE.match(m.group()) else unicodedata.normalize("NFKC", m.group()),
                            text).translate(_INVISIBLE)
-    if typography:
+    if typography == "quotes":
+        text = text.translate(_QUOTE_STYLE)
+    elif typography:
         text = text.translate(_TYPOGRAPHY)
     return re.sub(r"\s+", " ", text).strip()
 
 
-def token(text: str, *, case_sensitive: bool, ignore: set[str], typography: bool = False) -> str:
+def token(text: str, *, case_sensitive: bool, ignore: set[str], typography: bool | str = False) -> str:
     """Normalise a single word for the content diff. Punctuation is kept, so
     'down' vs 'down.' or 'details,see' vs 'details, see' are content changes.
     Returns '' for tokens that must be ignored (bullets, dot leaders)."""
@@ -100,15 +108,16 @@ def fold_xref_pages(doc) -> int:
     """Cross-reference page numbers are the PDF template's: InDesign writes
     `see "Controls and functions" on page 12.` where AEM Guides writes `see "Controls and
     functions".` - and the number shifts with every layout change anyway (like TOC page numbers).
-    After a quoted cross-reference, "on page N" is taken out of the comparison; the punctuation
-    after N stays with the reference. Returns the number folded."""
+    Every "on page N" is taken out of the comparison - after a quoted title or a plain linked one
+    ("Projection dimensions on page 17") - and the punctuation after N stays with the word before.
+    Returns the number folded."""
     ws, n = doc.words, 0
     for k in range(1, len(ws) - 2):
         prev, on, page, num = ws[k - 1], ws[k], ws[k + 1], ws[k + 2]
         if not (on.norm and page.norm and num.norm) or on.norm.lower() != "on" or page.norm.lower() != "page":
             continue
         m = re.fullmatch(r"(\d{1,4})([.,;:)]*)", num.norm)
-        if not m or not prev.norm or not prev.norm.rstrip(".,;:").endswith(_CLOSE_QUOTE):
+        if not m or not prev.norm:
             continue
         prev.norm += m.group(2)
         on.norm = page.norm = num.norm = ""

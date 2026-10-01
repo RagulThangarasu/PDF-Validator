@@ -26,7 +26,13 @@
   .chip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 3px 10px; cursor: pointer; font: inherit; display: inline-flex; align-items: center; gap: 6px; }
   .chip[aria-pressed="false"] { opacity: .45; }
   .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
-  main { display: grid; grid-template-columns: 290px minmax(0, 1fr) minmax(0, 1fr) 360px; min-height: 0; }
+  /* the sections list (left) and the findings panel (right) are closed by default: the two PDFs get
+     the whole width; the header buttons (or [ and ]) open them */
+  main { --lw: 0px; --rw: 0px; display: grid; grid-template-columns: var(--lw) minmax(0, 1fr) minmax(0, 1fr) var(--rw); min-height: 0; }
+  body.left-open main { --lw: 290px; } body.right-open main { --rw: 360px; }
+  main > aside, main > #side { overflow: hidden; }
+  body:not(.left-open) main > aside, body:not(.right-open) main > #side { visibility: hidden; border: 0; }
+  .chip.panel[aria-pressed="true"] { background: var(--accent, #0f766e); color: #fff; border-color: transparent; }
   aside, section.pane-wrap, #side { min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--panel); }
   .toolbar { padding: 8px 10px; border-bottom: 1px solid var(--line); display: flex; gap: 6px; align-items: center; }
   .toolbar input { flex: 1; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
@@ -86,6 +92,12 @@
   .finding .sev { font-weight: 700; text-transform: uppercase; font-size: 10px; }
   .sev.error { color: var(--fail); } .sev.warning { color: var(--warn); } .sev.info { color: var(--info); }
   .finding .msg { word-break: break-word; }
+  .msg .fs { display: flex; gap: 8px; margin-top: 3px; font-weight: 400; }
+  .msg .fs b { flex: 0 0 44px; font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding-top: 2px; }
+  .msg .fs b.fig { color: #7c3aed; }
+  .msg .fs b.stg { color: #0f766e; }
+  .msg .fs b.prd { color: #2563eb; }
+  .msg .fgap { height: 8px; border-top: 1px dashed #d0d5dd; margin-top: 8px; }
   .finding .aem { font: 11px ui-monospace, Menlo, monospace; color: var(--muted); margin-top: 3px; word-break: break-all; }
   .finding.content { border-left-color: var(--c-content); } .finding.style { border-left-color: var(--c-style); }
   .finding.layout { border-left-color: var(--c-layout); } .finding.assets { border-left-color: var(--c-assets); }
@@ -104,10 +116,12 @@
   <h1>PDF Parity Report</h1>
   <span id="result" class="badge"></span>
   <div class="stats" id="stats"></div>
+  <button class="chip panel" id="open-left" aria-pressed="false" title="Show / hide the sections list ([)">☰ Sections</button>
   <button class="chip sync" id="sync" aria-pressed="true" title="Scroll both PDFs together, aligned by matching text (s)">⇅ Sync scroll</button>
   <label class="chip" title="Fit width: each document's pages fill their pane. Same text size: stage is drawn so its body text is as big as prod's (never wider than the pane)">Scale
     <select id="scale" style="border:0;background:none;font:inherit"><option value="fit">Fit width</option><option value="text">Same text size</option></select></label>
   <div class="toggles" id="check-toggles"></div>
+  <button class="chip panel" id="open-right" aria-pressed="false" title="Show / hide the section findings and style map (])">Findings ☰</button>
 </header>
 <main>
   <aside>
@@ -118,7 +132,7 @@
       </select>
     </div>
     <div id="sections" role="list"></div>
-    <div class="toolbar" style="border-top:1px solid var(--line);border-bottom:0;color:var(--muted);font-size:11px"><kbd>j</kbd>/<kbd>k</kbd> next/prev section · <kbd>n</kbd> next finding · <kbd>s</kbd> sync scroll</div>
+    <div class="toolbar" style="border-top:1px solid var(--line);border-bottom:0;color:var(--muted);font-size:11px"><kbd>j</kbd>/<kbd>k</kbd> next/prev section · <kbd>n</kbd> next finding · <kbd>s</kbd> sync scroll · <kbd>[</kbd> <kbd>]</kbd> panels</div>
   </aside>
   <section class="pane-wrap"><div class="pane-head"><b>Baseline (prod)</b><span class="cur" id="cur-a"></span><span id="name-a"></span></div><div class="pane" id="pane-a"></div><div class="guide" aria-hidden="true"></div></section>
   <section class="pane-wrap"><div class="pane-head"><b>Candidate (stage)</b><span class="cur" id="cur-b"></span><span id="name-b"></span></div><div class="pane" id="pane-b"></div><div class="guide" aria-hidden="true"></div></section>
@@ -140,8 +154,17 @@ const CHECKS = ['structure', 'content', 'tables', 'assets', 'integrity', 'style'
 const CATS = [['content', 'Content'], ['images', 'Images'], ['tables', 'Tables'], ['toc', 'TOC'], ['structure', 'Structure'],
               ['links', 'Links & rendering'], ['css', 'CSS / layout']];
 // content differences: the quoted prod / stage words in red
-const msgHtml = f => f.check !== 'content' ? esc(f.message)
-  : esc(f.message).replace(/“([^”]*)”/g, '“<b style="color:var(--c-content)">$1</b>”');
+// a design-spec issue ("…\nFigma: …\nStage: …"): its headline, then a Figma row and a Stage row
+const msgHtml = f => {
+  const m = f.message || '';
+  if (!m.includes('\n')) return f.check !== 'content' ? esc(m)
+    : esc(m).replace(/“([^”]*)”/g, '“<b style="color:var(--c-content)">$1</b>”');
+  return m.split('\n\n').map(block => block.split('\n').map(ln => {
+    const lab = /^(Figma|Prod|Stage): /.exec(ln);
+    return lab ? `<div class="fs"><b class="${lab[1] === 'Figma' ? 'fig' : lab[1] === 'Prod' ? 'prd' : 'stg'}">${lab[1]}</b><span>${esc(ln.slice(lab[0].length))}</span></div>`
+      : `<div>${esc(ln)}</div>`;
+  }).join('')).join('<div class="fgap"></div>');
+};
 const CAT_COLOR = { toc: '#9333ea', content: '#dc2626', images: '#0d9488', tables: '#0284c7', structure: '#2563eb', links: '#b91c1c', css: '#7c3aed' };
 const byId = Object.fromEntries(DATA.sections.map(s => [s.id, s]));
 const state = { status: 'all', q: '', cats: new Set(CATS.map(c => c[0])), current: null, finding: -1, tab: 'findings' };
@@ -460,8 +483,29 @@ document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => {
   document.querySelectorAll('[data-tab]').forEach(x => x.setAttribute('aria-selected', x === b));
   renderSide();
 });
+// ---- side panels: closed by default; opening one narrows the PDF panes, so the pages are re-fitted
+let PANEL_T = null;
+function togglePanel(side, open) {
+  const cls = side === 'left' ? 'left-open' : 'right-open';
+  open = open ?? !document.body.classList.contains(cls);
+  document.body.classList.toggle(cls, open);
+  $('#open-' + side).setAttribute('aria-pressed', String(open));
+  clearTimeout(PANEL_T);
+  PANEL_T = setTimeout(async () => {
+    if (!window.pdfval.ready) return;
+    const f = state.finding;
+    await layout();
+    buildSync();
+    if (state.current) { await goto(state.current.id); if (f >= 0) await focusFinding(f); }
+  }, 120);
+}
+$('#open-left').onclick = () => togglePanel('left');
+$('#open-right').onclick = () => togglePanel('right');
+
 document.addEventListener('keydown', e => {
   if (e.target.matches('input,select')) return;
+  if (e.key === '[') togglePanel('left');
+  if (e.key === ']') togglePanel('right');
   if (e.key === 's') setSync(!SYNC.on);
   if (e.key === 'j') step(1);
   if (e.key === 'k') step(-1);

@@ -1,5 +1,7 @@
 """Self-tests for the engine: build a baseline PDF, inject known regressions
 into a candidate, and assert each check catches exactly what was injected."""
+import re
+
 import pymupdf
 import pytest
 
@@ -62,6 +64,7 @@ def test_style_changes_detected(tmp_path, cfg):
 
 
 def test_indent_detected(tmp_path, cfg):
+    cfg["layout"]["compare_with_prod"] = True  # the optional prod -> stage layout comparison
     a = make_pdf(tmp_path / "a.pdf")
     b = make_pdf(tmp_path / "b.pdf", indent=24)
     f = checks(compare(a, b, cfg), "layout")
@@ -77,6 +80,13 @@ def test_structure_missing_and_extra(tmp_path, cfg):
     assert any("Extra section" in m and "Setup" in m for m in msgs)
 
 
+def parts(f):
+    """A finding's differences: several differences at one spot are merged into one issue
+    (detail.parts), each keeping its own types, message and details."""
+    return [{"types": f["types"], "message": f["message"], "detail": f["detail"]}] if not f["detail"].get("parts") \
+        else f["detail"]["parts"]
+
+
 def section_by(result, title):
     return next(s for s in result["sections"] if s["title"] == title)
 
@@ -85,7 +95,7 @@ def test_punctuation_and_spacing_are_content(tmp_path, cfg):
     a = make_pdf(tmp_path / "a.pdf")
     b = make_pdf(tmp_path / "b.pdf", body_text=BODY.replace("bank.", "bank").replace("over the", "over  the"))
     r = compare(a, b, cfg)
-    ops = {f["detail"].get("op") for f in checks(r, "content")}
+    ops = {p["detail"].get("op") for f in checks(r, "content") for p in parts(f)}
     assert "spacing" in ops and "replace" in ops
     assert section_by(r, "Overview")["content"]["match_pct"] < 100
 
@@ -164,6 +174,7 @@ def make_icon_pdf(path, tmp_path, inline: bool):
 
 
 def test_inline_icon_dropped_below_text_is_flagged(tmp_path, cfg):
+    cfg["layout"]["compare_with_prod"] = True  # the optional prod -> stage layout comparison
     a = make_icon_pdf(tmp_path / "a.pdf", tmp_path, inline=True)
     same = make_icon_pdf(tmp_path / "same.pdf", tmp_path, inline=True)
     moved = make_icon_pdf(tmp_path / "b.pdf", tmp_path, inline=False)
@@ -252,9 +263,10 @@ def test_toc_levels_missing_extra_and_not_content(tmp_path, cfg):
         {"level differs", "missing entry", "extra entry"}
 
 
-def test_toc_top_level_only_by_default(tmp_path, cfg):
-    """Only level-1 entries are validated: deeper entries are ignored unless the title is level 1
-    on the other side (then it is a level difference, not a missing entry)."""
+def test_toc_top_level_only_when_configured(tmp_path, cfg):
+    """With toc.max_level = 1 only level-1 entries are validated: deeper entries are ignored unless the
+    title is level 1 on the other side (then it is a level difference, not a missing entry)."""
+    cfg["toc"]["max_level"] = 1
     heads = ["Overview", "Setup", "Mounting", "Settings"]
     a = make_toc_pdf(tmp_path / "a.pdf", [(1, "Overview", 2), (2, "Setup", 3), (1, "Mounting", 4), (1, "Settings", 5)], heads)
     b = make_toc_pdf(tmp_path / "b.pdf", [(1, "Overview", 2), (2, "Extras", 3), (2, "Mounting", 4), (1, "Settings", 5)], heads)
@@ -289,6 +301,7 @@ def _wrapped_pdf(path, lines):
 
 
 def test_line_wrap_is_layout_not_content(tmp_path, cfg):
+    cfg["layout"]["compare_with_prod"] = True  # the optional prod -> stage layout comparison
     a = _wrapped_pdf(tmp_path / "a.pdf", ["Supported models SL6504/", "SL7504/ and the quick brown fox jumps over", "the lazy dog."])
     b = _wrapped_pdf(tmp_path / "b.pdf", ["Supported models SL6504/SL7504/ and the quick brown fox", "jumps over the lazy dog."])
     cfg["layout"]["check_wrap"] = True  # off by default
@@ -356,6 +369,7 @@ def _list_pdf(path, bullet_dx, gap=6, marker_after=False):
 
 
 def test_bullet_alignment_is_an_indent_issue(tmp_path, cfg):
+    cfg["layout"]["compare_with_prod"] = True  # the optional prod -> stage layout comparison
     a = _list_pdf(tmp_path / "a.pdf", 0)
     b = _list_pdf(tmp_path / "b.pdf", 9, marker_after=True)
     bullets = [f for f in checks(compare(a, b, cfg), "layout") if "bullet" in f["types"]]
@@ -381,8 +395,9 @@ def _numbered_pdf(path, labels):
 
 def test_list_numbering_style_format_and_sequence(tmp_path, cfg):
     a = _numbered_pdf(tmp_path / "a.pdf", ["a.", "b.", "c."])
-    kinds = lambda b: {(f["detail"]["kind"], f["detail"]["baseline"], f["detail"]["candidate"])
-                       for f in checks(compare(a, b, cfg), "layout") if "bullet" in f["types"]}
+    kinds = lambda b: {(p["detail"]["kind"], p["detail"]["baseline"], p["detail"]["candidate"])
+                       for f in checks(compare(a, b, cfg), "content") for p in parts(f)
+                       if "bullet" in p["types"]}  # the marker is content
     roman = kinds(_numbered_pdf(tmp_path / "b.pdf", ["i.", "ii.", "ii."]))
     assert ("numbering style", "a, b, c", "i, ii, iii") in roman
     assert any(k == "numbering sequence" and "expected “iii.”" in c for k, _, c in roman)
@@ -411,6 +426,7 @@ def _note_pdf(path, image_inside):
 
 
 def test_image_outside_its_note_box(tmp_path, cfg):
+    cfg["layout"]["compare_with_prod"] = True  # the optional prod -> stage layout comparison
     a = _note_pdf(tmp_path / "a.pdf", True)
     out = [f for f in checks(compare(a, _note_pdf(tmp_path / "b.pdf", False), cfg), "assets")
            if "image outside box" in f["types"]]
@@ -437,22 +453,27 @@ def _steps_cell_pdf(path, numbered):
 
 def test_list_numbers_missing_in_a_table_cell(tmp_path, cfg):
     r = compare(_steps_cell_pdf(tmp_path / "a.pdf", True), _steps_cell_pdf(tmp_path / "b.pdf", False), cfg)
-    f = [f for f in checks(r, "layout") if f["detail"].get("kind") == "bullet marker"]
-    assert f and f[0]["detail"]["lines"] == 2 and "“1.”, “2.”" in f[0]["message"] and "missing in stage" in f[0]["message"]
-    assert f[0]["genuine"]
+    # one per item, as content - and the two items sit in one screenshot, so they are merged into one issue
+    f = [f for f in checks(r, "content") if any(p["detail"].get("kind") == "bullet marker" for p in parts(f))]
+    assert len(f) == 1, [x["message"] for x in f]
+    bullet = next(p for p in parts(f[0]) if p["detail"].get("kind") == "bullet marker")
+    assert bullet["detail"].get("merged") == 2 and "(2 places)" in bullet["message"] and "missing in stage" in f[0]["message"]
+    assert {"“1.”", "“2.”"} == set(re.findall(r"“\d\.”", f[0]["message"]))
+    assert len(f[0]["baseline"]) >= 2  # both items boxed in the prod screenshot
+    assert f[0]["genuine"] and f[0]["color"] == "#dc2626"
 
 
-def test_toc_issues_stay_out_of_the_genuine_report(tmp_path, cfg):
-    """A wrong TOC page number is reported (full report, TOC tab) but is not a genuine issue,
-    unless `[genuine] exclude_checks` no longer lists "toc"."""
+def test_toc_issues_are_in_the_genuine_report(tmp_path, cfg):
+    """A wrong TOC page number is a genuine issue (the genuine report has the TOC too), unless
+    `[genuine] exclude_checks` lists "toc"."""
     heads = ["Overview", "Setup", "Mounting", "Settings"]
     a = make_toc_pdf(tmp_path / "a.pdf", [(1, "Overview", 2), (1, "Setup", 3), (1, "Mounting", 4), (1, "Settings", 5)], heads)
     b = make_toc_pdf(tmp_path / "b.pdf", [(1, "Overview", 2), (1, "Setup", 3), (1, "Mounting", 9), (1, "Settings", 5)], heads)
     toc = lambda r: [f for s in r["sections"] for f in s["findings"] if f["check"] == "toc" and "Mounting" in f["message"]]
+    assert [f for f in toc(compare(a, b, cfg)) if f["genuine"] and f.get("issue") == "TOC page number wrong"]
+    cfg["genuine"]["exclude_checks"] = ["toc"]
     r = compare(a, b, cfg)
     assert toc(r) and not any(f["genuine"] for s in r["sections"] for f in s["findings"] if f["check"] == "toc")
-    cfg["genuine"]["exclude_checks"] = []
-    assert [f for f in toc(compare(a, b, cfg)) if f.get("issue") == "TOC page number wrong"]
 
 
 def test_genuine_issues_are_never_capped(tmp_path, cfg):
@@ -460,6 +481,7 @@ def test_genuine_issues_are_never_capped(tmp_path, cfg):
     words = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa".split()
     a = make_pdf(tmp_path / "a.pdf", body_text=" ".join(words))
     b = make_pdf(tmp_path / "b.pdf", body_text=" ".join(w.upper() if i % 4 == 1 else w for i, w in enumerate(words)))
+    cfg["report"]["merge_nearby"] = False  # count each difference: this test is about the cap, not merging
     count = lambda r: len([f for s in r["sections"] for f in s["findings"] if f.get("genuine") and f["category"] == "content"])
     full = count(compare(a, b, cfg))
     cfg["report"]["max_findings_per_check"] = 1
@@ -489,10 +511,12 @@ def test_two_column_list_read_in_another_order(tmp_path, cfg):
     """Prod's two columns have different line spacing, so reading by height interleaves them
     ("Webcam accessory" before "Quick Start Guide"); stage reads it last, just before "NOTE:".
     The moved item is not extra content, and the bullet gap is compared on all six items."""
+    cfg["layout"]["compare_with_prod"] = True  # the optional prod -> stage layout comparison
     a = _two_column_list(tmp_path / "a.pdf", [110, 129, 140], [110, 121, 132], gap=0, note=False)
     b = _two_column_list(tmp_path / "b.pdf", [110, 127, 144], [110, 127, 144], gap=6, note=True)
     r = compare(a, b, cfg)
-    content = [f["message"] for f in checks(r, "content") if "reordered" not in (f.get("types") or [])]
+    content = [f["message"] for f in checks(r, "content")
+               if not {"reordered", "moved text", "repeated header"} & set(f.get("types") or [])]
     assert not [m for m in content if "Webcam" in m], content
     assert [m for m in content if "NOTE:" in m], content
     gap = [f for f in checks(r, "layout") if f["detail"].get("kind") == "bullet gap"]
@@ -525,11 +549,15 @@ def _figure_pdf(path, labels_as_text: bool, labels=("50 cm", "60±10 cm")):
 
 @pytest.mark.skipif(not __import__("shutil").which("tesseract"), reason="needs tesseract")
 def test_labels_drawn_in_the_stage_picture_are_not_missing(tmp_path, cfg):
+    cfg["genuine"]["everything"] = False  # the selective genuine report: only the listed types
     a = _figure_pdf(tmp_path / "a.pdf", True)
     b = _figure_pdf(tmp_path / "b.pdf", False)
     r = compare(a, b, cfg)
     fs = [f for f in checks(r, "content") if "cm" in f["message"]]
-    assert fs and all("text in image" in f["types"] and not f["genuine"] for f in fs), [f["message"] for f in fs]
+    fs = [f for s in r["sections"] for f in s["findings"] if "cm" in f["message"]]
+    assert fs and all("label in picture" in f["types"] and not f["genuine"] for f in fs), [f["message"] for f in fs]
+    # the stage side marks the label itself inside the stage picture, not the whole picture
+    assert all(f["candidate"] and (f["candidate"][0]["bbox"][2] - f["candidate"][0]["bbox"][0]) < 200 for f in fs)
     # a label the stage picture does not have stays missing
     b2 = _figure_pdf(tmp_path / "b2.pdf", False, labels=("50 cm", "Ultrasonic"))
     missing = [f for f in checks(compare(a, b2, cfg), "content") if "missing text" in f["types"]]
@@ -573,7 +601,8 @@ def test_badge_drawn_as_a_picture_is_a_layout_issue_not_missing_text(tmp_path, c
     r = compare(a, _badge_pdf(tmp_path / "b.pdf", True), cfg)
     assert not [f for f in checks(r, "content") if "missing text" in f["types"]]
     fs = [f for f in checks(r, "layout") if "text as graphic" in f["types"]]
-    assert len(fs) == 1 and not fs[0]["genuine"] and "“A”" in fs[0]["message"]
+    assert len(fs) == 1 and "“A”" in fs[0]["message"]
+    assert fs[0]["genuine"] and fs[0]["issue"] == "Text shown as a graphic"  # in the genuine report, not as data missing
     # another letter in the stage badge: the prod text really is not there
     r2 = compare(a, _badge_pdf(tmp_path / "b2.pdf", True, letter="W"), cfg)
     assert [f for f in checks(r2, "content") if "missing text" in f["types"]]
@@ -655,3 +684,230 @@ def test_web_guide_skips_print_only_pages_and_compares_heading_depth(tmp_path, c
     msgs = [f["message"] for f in checks(r, "structure")]
     assert not [m for m in msgs if "not found in candidate" in m], msgs  # cover, TOC page, back cover
     assert not [m for m in msgs if m.startswith("Outline level")], msgs  # H2/H3 in the PDF = h1/h2 on the web
+
+
+def _ports_list_pdf(path, gap):
+    """A numbered list: marker and item text drawn apart by `gap` pt (0 = the text touches the number).
+    The marker keeps its space character, as in the AEM PDF: only the drawing shows no gap."""
+    items = ["Focus ring stabilizer", "RS-232 control port", "USB Mini-B port for firmware upgrades",
+             "Audio output jack for speakers", "SPDIF output port for audio"]
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 60), "Projector exterior view", fontsize=18)
+    p.insert_text((72, 90), "The ports on the rear panel of the projector are listed below.", fontsize=11)
+    for k, t in enumerate(items):
+        m = f"{k + 15}."
+        p.insert_text((72, 120 + 20 * k), m + " ", fontsize=11)
+        p.insert_text((72 + pymupdf.get_text_length(m, fontsize=11) + gap, 120 + 20 * k), t, fontsize=11)
+    doc.save(path)
+    return str(path)
+
+
+def test_list_number_touching_its_text_is_reported(tmp_path, cfg):
+    """“16.RS-232”: no space after the number in stage - reported (red, genuine) even though the
+    prod layout comparison is off and the gap is far below the alignment tolerance."""
+    r = compare(_ports_list_pdf(tmp_path / "a.pdf", 3.0), _ports_list_pdf(tmp_path / "b.pdf", 0.0), cfg)
+    fs = [f for f in checks(r, "content") if f["detail"].get("kind") == "marker glued"]
+    assert len(fs) == 1 and fs[0]["genuine"] and fs[0]["color"] == "#dc2626", [f["message"] for f in checks(r, "content")]
+    assert "no space after" in fs[0]["message"] and "“16.”" in fs[0]["message"]
+    assert not [f for f in checks(compare(_ports_list_pdf(tmp_path / "c.pdf", 3.0), _ports_list_pdf(tmp_path / "d.pdf", 3.0), cfg), "content")
+                if f["detail"].get("kind") == "marker glued"]
+
+
+def _mountain(page, r):
+    """A small line drawing with curves (like the altitude illustration)."""
+    x0, y0, x1, y1 = r
+    sh = page.new_shape()
+    for k in range(12):
+        sh.draw_bezier((x0, y1 - 5 * k), (x0 + 30, y0 + 3 * k), (x1 - 30, y0 + 4 * k), (x1, y1 - 6 * k))
+    sh.draw_rect(pymupdf.Rect(x0 + 20, y0 - 10, x1 - 20, y0 + 10))
+    sh.finish(color=(0, 0, 0), width=1)
+    sh.commit()
+
+
+def _altitude_pdf(path, labels_on_page: bool):
+    """Prod: the drawing with its height labels beside it as text. Stage: the same drawing embedded as a
+    picture, with no labels, on the same place of the page."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 60), "Important safety instructions", fontsize=18)
+    p.insert_text((72, 100), "Do not place the projector in locations where the altitudes are higher than 3000 m.", fontsize=11)
+    r = (330, 140, 480, 260)
+    if labels_on_page:
+        _mountain(p, r)
+        p.insert_text((265, 150), "3000 m", fontsize=9)
+        p.insert_text((265, 250), "0 m", fontsize=9)
+    else:
+        art = pymupdf.open()
+        a = art.new_page(width=170, height=140)
+        _mountain(a, (10, 10, 160, 130))
+        p.insert_image(pymupdf.Rect(320, 130, 490, 270), stream=a.get_pixmap(dpi=200).tobytes("png"))
+    p.insert_text((72, 320), "NOTE: To avoid damaging the chips, never aim a laser beam into the projection lens.", fontsize=11)
+    doc.save(path)
+    return str(path)
+
+
+def test_labels_beside_a_drawn_picture_missing_on_the_stage_picture(tmp_path, cfg):
+    """The labels of a vector illustration are missing on stage's copy of it: the stage side of the
+    finding is that picture (not a marker at the nearest text), and the message names the labels."""
+    r = compare(_altitude_pdf(tmp_path / "a.pdf", True), _altitude_pdf(tmp_path / "b.pdf", False), cfg)
+    fs = [f for f in checks(r, "content") if "missing image label" in f["types"]]
+    assert len(fs) == 1, [f["message"] for f in checks(r, "content")]
+    f = fs[0]
+    assert "“3000 m”" in f["message"] and "“0 m”" in f["message"] and "not on the stage picture" in f["message"]
+    assert f["candidate"] and f["candidate"][0]["bbox"][0] > 300  # the stage picture, not the NOTE text
+
+
+def _xref_pdf(path, says: int, goes_to: int):
+    """Page 1 has a cross-reference “See Menu settings on page <says>” linking to file page <goes_to>;
+    every page prints its number in the footer; page 3 starts “Menu settings”."""
+    doc = pymupdf.open()
+    for n in range(1, 5):
+        p = doc.new_page()
+        p.insert_text((72, 60), ["Overview", "Setup", "Menu settings", "Care"][n - 1], fontsize=18)
+        p.insert_text((72, 100), f"Body text of page {n} with enough words to be a paragraph here.", fontsize=11)
+        p.insert_text((297, 820), str(n), fontsize=9)
+    first = doc[0]
+    first.insert_text((72, 130), f"See Menu settings on page {says} for more information.", fontsize=11)
+    r = first.search_for(f"Menu settings on page {says}")[0]
+    first.insert_link({"kind": pymupdf.LINK_GOTO, "from": r, "page": goes_to - 1, "to": pymupdf.Point(72, 40)})
+    doc.set_toc([[1, t, k + 1] for k, t in enumerate(["Overview", "Setup", "Menu settings", "Care"])])
+    doc.save(path)
+    return str(path)
+
+
+def test_link_text_page_number_must_match_where_it_lands(tmp_path, cfg):
+    cfg = {**cfg, "ignore": {}}  # the detector itself (the default [ignore] list leaves it out)
+    a = _xref_pdf(tmp_path / "a.pdf", 3, 3)
+    bad = [f for f in checks(compare(a, _xref_pdf(tmp_path / "b.pdf", 4, 3), cfg), "integrity")
+           if "link page number" in f["types"]]
+    assert bad and "numbered 3" in bad[0]["message"] and "not page 4" in bad[0]["message"]
+    ok = [f for f in checks(compare(a, _xref_pdf(tmp_path / "c.pdf", 3, 3), cfg), "integrity") if "link page number" in f["types"]]
+    assert not ok
+
+
+def _menu_pdf(path, sub_bookmarks: bool):
+    """“Information” lists sub-menus under bold sub-headings (“WAN”, “Wireless Network”); then the “WAN”
+    and “Wireless Network” chapters. Stage bookmarks the sub-headings too, so the titles repeat."""
+    doc = pymupdf.open()
+    toc = []
+    body = {"Information": [("WAN", "The WAN sub-menu lists the connection status and the address of the Receiver."),
+                            ("Wireless Network", "The Wireless Network sub-menu lists the frequency and the channels in use.")],
+            "WAN": [("", "Click WAN and you can configure the settings for the wired connection in the General sub-menu.")],
+            "Wireless Network": [("", "Click Wireless Network to see the Setting and Wi-Fi Radio Setup sub-menus for the Receiver.")]}
+    for chapter, parts in body.items():
+        p = doc.new_page()
+        p.insert_text((72, 70), chapter, fontsize=18)
+        toc.append([1, chapter, doc.page_count])
+        y = 110
+        for sub, text in parts:
+            if sub:
+                p.insert_text((72, y), sub, fontsize=13)
+                if sub_bookmarks:
+                    toc.append([2, sub, doc.page_count])
+                y += 22
+            p.insert_text((72, y), text, fontsize=10)
+            y += 40
+    doc.set_toc(toc)
+    doc.save(path)
+    return str(path)
+
+
+def test_repeated_heading_title_is_paired_by_its_text_not_reported_as_duplicate(tmp_path, cfg):
+    """Stage bookmarks the sub-heading “WAN” inside “Information” as well as the “WAN” chapter: prod's
+    chapter must be compared with stage's chapter (same text), and the sub-heading is not a duplicate."""
+    r = compare(_menu_pdf(tmp_path / "a.pdf", False), _menu_pdf(tmp_path / "b.pdf", True), cfg)
+    wan = next(s for s in r["sections"] if s["title"] == "WAN")
+    assert wan["candidate"]["start"]["page"] == wan["baseline"]["start"]["page"] == 1  # the chapter, 2nd page
+    assert wan["content"]["match_pct"] == 100
+    msgs = [f["message"] for f in checks(r, "structure")]
+    assert not [m for m in msgs if "Duplicate section" in m], msgs
+
+
+def test_toc_level_2_and_3_entries_are_validated_by_default(tmp_path, cfg):
+    heads = ["Overview", "Setup", "Mounting", "Settings"]
+    a = make_toc_pdf(tmp_path / "a.pdf", [(1, "Overview", 2), (2, "Setup", 3), (3, "Mounting", 4), (1, "Settings", 5)], heads)
+    b = make_toc_pdf(tmp_path / "b.pdf", [(1, "Overview", 2), (2, "Setup", 3), (2, "Mounting", 4), (1, "Settings", 5)], heads)
+    status = {(row["baseline"] or row["candidate"])["title"]: row["status"] for row in compare(a, b, cfg)["toc"]["rows"]}
+    assert status == {"Overview": "match", "Setup": "match", "Mounting": "level differs", "Settings": "match"}
+
+
+def _long_table_pdf(path, repeat_header: bool):
+    """A table over two pages: bold header row on page 1; page 2 repeats it or not."""
+    doc = pymupdf.open()
+    rows = [(f"Item {k}", f"Value {k} with a short description") for k in range(1, 46)]
+    for n, chunk in enumerate((rows[:32], rows[32:])):
+        p = doc.new_page()
+        if n == 0:
+            p.insert_text((72, 60), "Specifications", fontsize=18)
+        y = 80 if n == 0 else 40
+        head = n == 0 or repeat_header
+        cells = ([("Model", "Description")] if head else []) + list(chunk)
+        for r, (a, b) in enumerate(cells):
+            bold = head and r == 0
+            for x0, x1, t in ((72, 250, a), (250, 520, b)):
+                p.draw_rect(pymupdf.Rect(x0, y, x1, y + 20), color=(0, 0, 0), width=0.6)
+                p.insert_text((x0 + 4, y + 14), t, fontsize=9, fontname="hebo" if bold else "helv")
+            y += 20
+    doc.set_toc([[1, "Specifications", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_table_header_must_repeat_on_its_continuation_page(tmp_path, cfg):
+    a = _long_table_pdf(tmp_path / "a.pdf", True)
+    ok = compare(a, _long_table_pdf(tmp_path / "b.pdf", True), cfg)
+    assert not [f for s in ok["sections"] for f in s["findings"] if "continuation page" in f["message"]]
+    assert not [f for s in ok["sections"] for f in s["findings"] if "repeated header" in (f.get("types") or [])]
+    bad = compare(a, _long_table_pdf(tmp_path / "c.pdf", False), cfg)
+    assert [f for s in bad["sections"] for f in s["findings"] if "continuation page" in f["message"]]
+
+
+def _quoted_xref_pdf(path, quoted: bool, goes_to: int = 3):
+    """Page 1 links “See "Menu settings" on page 3.” (or the title without quotes) to file page goes_to."""
+    doc = pymupdf.open()
+    for n in range(1, 5):
+        p = doc.new_page()
+        p.insert_text((72, 60), ["Overview", "Setup", "Menu settings", "Care"][n - 1], fontsize=18)
+        p.insert_text((72, 100), f"Body text of page {n} with enough words to be a paragraph here.", fontsize=11)
+        p.insert_text((297, 820), str(n), fontsize=9)
+    first = doc[0]
+    title = '"Menu settings"' if quoted else "Menu settings"
+    first.insert_text((72, 130), f"See {title} on page 3 for more information.", fontsize=11)
+    r = first.search_for(f"{title} on page 3")[0]
+    first.insert_link({"kind": pymupdf.LINK_GOTO, "from": r, "page": goes_to - 1, "to": pymupdf.Point(72, 40)})
+    doc.set_toc([[1, t, k + 1] for k, t in enumerate(["Overview", "Setup", "Menu settings", "Care"])])
+    doc.save(path)
+    return str(path)
+
+
+def test_link_title_quotes_missing_in_stage(tmp_path, cfg):
+    a = _quoted_xref_pdf(tmp_path / "a.pdf", True)
+    got = [f for f in checks(compare(a, _quoted_xref_pdf(tmp_path / "b.pdf", False), cfg), "integrity")
+           if "link quotes" in f["types"]]
+    assert got and "missing in stage" in got[0]["message"] and got[0]["genuine"]
+    same = [f for f in checks(compare(a, _quoted_xref_pdf(tmp_path / "c.pdf", True), cfg), "integrity")
+            if "link quotes" in f["types"]]
+    assert not same
+
+
+def test_change_does_not_run_into_callouts_below(tmp_path, cfg):
+    """A changed word at the end of a line and figure callout numbers further down (prod only) are
+    two findings, not one: “ideaCam 1 2” → “ideaCam” was reported for “See … ideaCam” + “1 2”."""
+    def make(path, last, callouts):
+        doc = pymupdf.open()
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((72, 90), "Overview", fontsize=18, fontname="hebo")
+        page.insert_text((72, 130), f"See the setup guide for your camera {last}", fontsize=12, fontname="helv")
+        if callouts:
+            page.insert_text((150, 175), "1   2", fontsize=11, fontname="helv")
+        page.insert_text((72, 240), BODY, fontsize=11, fontname="helv")
+        doc.set_toc([[1, "Overview", 1]])
+        doc.save(path)
+        return str(path)
+    a = make(tmp_path / "a.pdf", "today", True)
+    b = make(tmp_path / "b.pdf", "tomorrow", False)
+    f = checks(compare(a, b, cfg), "content")
+    changed = [x for x in f if "today" in x["message"]]
+    assert changed and all("1" not in re.sub(r"“[^”]*” in “[^”]*”$", "", x["message"]).split("→")[0].replace("today", "")
+                           for x in changed), [x["message"] for x in f]

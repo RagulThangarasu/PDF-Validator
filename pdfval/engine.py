@@ -12,8 +12,9 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from . import aem, extract, genuine, normalize, sections, toc as tocmod
-from .checks import PIPELINE, Aligner, Unit, insertion_loc, locs
+from .checks import PIPELINE, Aligner, Unit, insertion_loc, locs, snippet
 from .checks import typography as checks_typography
+from .checks import footer as checks_footer
 from .model import SEVERITY_RANK, Anchor, Doc, Finding, Loc
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config" / "default.toml"
@@ -75,6 +76,8 @@ def _reset_caches() -> None:
                   integrity._OFFPAGE, integrity._NAMES, tables._DOCS, tables._RAW, tables._RULES):
         cache.clear()
     placement._shapes.cache_clear()
+    from .checks import layout
+    layout._BOXES.clear()
     from . import ocr
     ocr.reset()
 
@@ -89,9 +92,10 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     cfg = copy.deepcopy(cfg or load_config())
     _reset_caches()
     report(0.0, "Extracting baseline (prod)")
-    A = extract.load(baseline, "baseline", cfg)
+    # each side is the other's reference for glyphs drawn without a Unicode map (glyphs.py)
+    A = extract.load(baseline, "baseline", cfg, reference=None if candidate_doc else candidate)
     report(0.2, "Extracting candidate")
-    B = candidate_doc or extract.load(candidate, "candidate", cfg)
+    B = candidate_doc or extract.load(candidate, "candidate", cfg, reference=baseline)
     labels = cfg["content"].get("label_words") or []
     if labels:  # "Tips" -> "TIPS:", "Note" -> "NOTE:" is house style, not a content change
         normalize.fold_labels(A, labels)
@@ -117,11 +121,18 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                     break
                 w.norm = ""
     anA, anB = sections.build_anchors(A, cfg), sections.build_anchors(B, cfg)
+    # the printed TOC is compared on its own (TOC check): its title and entry lines are not sections,
+    # whatever found them (bookmarks, or font sizes when the PDF has no bookmarks)
+    def off_toc(anchors, doc, toc):
+        lines = set(toc.lines)
+        return [a for a in anchors if not (lines and a.located and a.word < len(doc.words) and doc.words[a.word].line in lines)
+                and not (toc.pages and not a.located and a.page in toc.pages)]
+    anA, anB = off_toc(anA, A, toc_a), off_toc(anB, B, toc_b)
     tocmod.resolve_pages(toc_a, anA)
     tocmod.resolve_pages(toc_b, anB)
     _assign_roles(A, anA)
     _assign_roles(B, anB)
-    pairs = sections.match_anchors(anA, anB, cfg)
+    pairs = sections.match_anchors(anA, anB, cfg, A, B)
     # a web page is one part of the PDF: validate only the chapter(s) it covers
     scope = None
     if (candidate_meta or {}).get("mode") == "html" and cfg["sections"].get("page_scope", True):
@@ -137,6 +148,10 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
         top_b = {e.norm for e in toc_b.entries if e.level <= max_level}
         toc_a.entries = [e for e in toc_a.entries if e.level <= max_level or e.norm in top_b]
         toc_b.entries = [e for e in toc_b.entries if e.level <= max_level or e.norm in top_a]
+    skip_sec = _ignored_sections(cfg)
+    if skip_sec:  # sections the validation leaves out (Q&A index): not compared in the TOC either
+        toc_a.entries = [e for e in toc_a.entries if not skip_sec(e.norm)]
+        toc_b.entries = [e for e in toc_b.entries if not skip_sec(e.norm)]
     toc_info, toc_findings = tocmod.compare(toc_a, toc_b, cfg)
     if toc_a.heading and toc_b.heading and normalize_heading(toc_a.heading) != normalize_heading(toc_b.heading):
         toc_findings.insert(0, Finding("toc", "warning", f"TOC heading differs: “{toc_a.heading}” → “{toc_b.heading}”",
@@ -221,7 +236,9 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     html = (candidate_meta or {}).get("mode") == "html"
     in_toc = {e.norm for e in toc_a.entries}
     toc_pages = [an.page for an in anA if an.norm in in_toc]
-    print_only = lambda an: (html and toc_pages and an.norm not in in_toc
+    # cover / back cover (web guide and PDF alike): a heading the TOC does not list, before its first
+    # chapter or after its last chapter's page, is print matter - not a section that can go missing
+    print_only = lambda an: (toc_pages and an.norm not in in_toc
                              and (an.page < min(toc_pages) or an.page > max(toc_pages)))
     for i, an in enumerate(anA):
         if scope and (not scope.contains(an.word) or i in scope.title_chapters):
@@ -241,12 +258,19 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             end = min((x.word for x in anA if x.word > an.word), default=len(A.words))
             missing_spans.append((pos_a(an.word), pos_a(end), spot, an.title))
             broken = failed_page_of(i)
+            # the whole lost section: its word count, its text and every line of it highlighted (heading first)
+            body = [k for k in range(an.word, end) if A.words[k].norm] if an.located else []
+            last_page = A.words[end - 1].page + 1 if body else an.page + 1
+            pages = f"p.{an.page + 1}" + (f"–{last_page}" if last_page > an.page + 1 else "")
             struct[unit_for("a", an.word).id].append(Finding(
                 "structure", cfg["sections"].get("missing_severity", "error"),
-                f"Section “{an.title}” (baseline p.{an.page + 1}) not found in candidate"
-                + (f" - its stage page was not captured ({broken['reason']})" if broken else ""),
-                [locs(A, [an.word])[0]] if an.located else [Loc(an.page, (0, an.y, A.pages[an.page].width, an.y + 20))],
+                f"Section “{an.title}” (baseline {pages}, {len(body)} words) not found in candidate"
+                + (f" - its stage page was not captured ({broken['reason']})" if broken else "")
+                + (f": “{snippet(A, body, 24)}”" if len(body) > 1 else ""),
+                (locs(A, body, cfg["report"]["max_locs"]) if body else [])
+                or ([locs(A, [an.word])[0]] if an.located else [Loc(an.page, (0, an.y, A.pages[an.page].width, an.y + 20))]),
                 detail={"heading": an.title, "anchor_side": "baseline", "anchor_word": an.word if an.located else None,
+                        "words": len(body), "baseline_text": snippet(A, body, 200) if body else "",
                         **({"stage_page_error": {"url": broken["url"], "reason": broken["reason"]}} if broken else {})},
                 candidate_at=spot, critical=True))
     count_a = Counter(an.norm for an in anA)
@@ -263,7 +287,8 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 f"Duplicate section in stage: “{an.title}” appears {count_b[an.norm]} times in stage "
                 f"but {count_a[an.norm]} time(s) in prod (again on stage p.{an.page + 1}, first on p.{first.page + 1})",
                 [], [locs(B, [an.word])[0]] if an.located else [Loc(an.page, (0, an.y, B.pages[an.page].width, an.y + 20))],
-                detail={"kind": "duplicate-section", "heading": an.title}, critical=True, types=["duplicate section"]))
+                detail={"kind": "duplicate-section", "heading": an.title, "anchor_side": "candidate",
+                        "anchor_word": an.word if an.located else None}, critical=True, types=["duplicate section"]))
             end = min((x.word for x in anB if x.word > an.word), default=len(B.words))
             dup_spans.append((pos_b(an.word), pos_b(end), struct[unit_for("b", an.word).id][-1]))
             continue
@@ -274,14 +299,29 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 [], [locs(B, [an.word])[0]] if an.located else [],
                 detail={"heading": an.title, "anchor_side": "candidate", "anchor_word": an.word if an.located else None}))
     in_order = _increasing(pairs)
-    if html and not scope:
-        # a whole guide vs the PDF: compare heading depth, not the H number. The PDF's levels come
-        # from the cover title (H1) and font sizes (H2, H3, H5), the site's from h1/h2 per page:
-        # rank each side's levels among the matched headings (H2/H3/H5 -> 1/2/3, h1/h2 -> 1/2)
+    guessed_a, guessed_b = not A.outline, not B.outline  # no bookmarks: levels guessed from font sizes
+    if (html or guessed_a or guessed_b) and not scope:
+        # compare heading depth, not the H number. A PDF without bookmarks has levels from font sizes
+        # (H4/H5/H6), a web guide from h1/h2 per page: a heading listed in the side's own printed TOC
+        # takes the TOC's level; else each side's levels are ranked among the matched headings
         ranks_a = sorted({anA[i].level for i, _, _ in pairs})
         ranks_b = sorted({anB[j].level for _, j, _ in pairs})
-        depth_a = lambda i: ranks_a.index(anA[i].level) + 1
-        depth_b = lambda j: ranks_b.index(anB[j].level) + 1
+        def toc_depths(anchors, toc):
+            """Depth of each heading from the side's own TOC; a heading the TOC does not list sits one
+            level below the listed heading before it (the same level when its type is as large)."""
+            listed = {e.norm: e.level for e in toc.entries}
+            out, last = {}, None  # last = (toc level, font level) of the previous listed heading
+            for k, an in enumerate(anchors):
+                if an.norm in listed:
+                    out[k] = listed[an.norm]
+                    last = (listed[an.norm], an.level)
+                elif last:
+                    out[k] = last[0] + (1 if an.level > last[1] else 0)
+            return out
+        lvl_a = toc_depths(anA, toc_a) if guessed_a and toc_a.entries else {}
+        lvl_b = toc_depths(anB, toc_b) if guessed_b and toc_b.entries else {}
+        depth_a = lambda i: lvl_a.get(i) or ranks_a.index(anA[i].level) + 1
+        depth_b = lambda j: lvl_b.get(j) or ranks_b.index(anB[j].level) + 1
     else:
         depth_a = lambda i: anA[i].level
         depth_b = lambda j: anB[j].level + (scope.level_offset if scope else 0)
@@ -297,7 +337,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             struct[u.id].append(Finding(
                 "structure", cfg["sections"].get("level_severity", "warning"),
                 f"Outline level: H{anA[i].level} → H{anB[j].level}"
-                + (f" (heading depth {depth_a(i)} in prod, {depth_b(j)} in stage)" if html and not scope else ""),
+                + (f" (heading depth {depth_a(i)} in prod, {depth_b(j)} in stage)" if (html or guessed_a or guessed_b) and not scope else ""),
                 [locs(A, [anA[i].word])[0]], [locs(B, [anB[j].word])[0]]))
         if s < 1.0:
             struct[u.id].append(Finding(
@@ -343,7 +383,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             findings.extend(must + rest[:max_f])
         _resolve_one_sided(u, findings, cfg)
         # stage-only findings inside a duplicate copy of a section are that duplicate, not news of their own
-        for start, end, dup in dup_spans:
+        for start, end, dup in [x for x in dup_spans if x[2].detail.get("kind") == "duplicate-section"]:
             inside = [f for f in findings if f is not dup and f.candidate and not f.baseline
                       and start <= (f.candidate[0].page, f.candidate[0].bbox[1]) < end]
             if inside:
@@ -369,12 +409,22 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             f.types = _types(f)
         ran.append((u, findings, truncated))
 
+    # --- running headers / footers, prod vs stage (taken out of the text comparison, compared on their own)
+    for unit, f in checks_footer.compare(A, B, [x for x, _, _ in ran], cfg):
+        f.types = f.types or _types(f)
+        next(fs for x, fs, _ in ran if x is unit).append(f)
+
     # --- issues that span sections: image/content in the wrong section, links to the wrong section
     report(0.97, "Relating sections")
     genuine.cross_section([(u, fs) for u, fs, _ in ran], A, B, cfg, (candidate_meta or {}).get("mode", "pdf"),
                           progress=lambda m: report(0.97, f"Relating sections - {m}"))
+    _apply_ignore(ran, A, B, cfg)
+    _spec_prod_spots(ran, cfg)
     data_min = cfg.get("genuine", {}).get("data_missing_words", 3)
     genuine_skip = set(cfg.get("genuine", {}).get("exclude_checks", []))
+    if cfg["report"].get("merge_nearby", True):  # one issue per place: the same kind a few lines apart
+        for _, findings, _ in ran:
+            findings[:] = _merge_nearby(findings, cfg["report"].get("merge_distance", 45))
     for u, findings, truncated in ran:
         per_check = {c: _check_summary([f for f in findings if f.check == c]) for c in CHECKS}
         for c, n in truncated.items():
@@ -414,7 +464,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                          for k, f in enumerate(findings)],
         })
         for f in out_sections[-1]["findings"]:
-            genuine.tag(f, genuine_types, data_min, genuine_skip)
+            genuine.tag(f, genuine_types, data_min, genuine_skip, cfg.get("genuine", {}).get("everything", False))
         out_sections[-1]["genuine"] = sum(f["genuine"] for f in out_sections[-1]["findings"])
 
     status = Counter(s["status"] for s in out_sections)
@@ -430,6 +480,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             "candidate": {**_doc_meta(B, anB), **(candidate_meta or {})},
             "mode": (candidate_meta or {}).get("mode", "pdf"),
             "matched_sections": len(pairs),
+            "typography": checks_typography.reference(B, cfg),  # the Figma type scale stage is checked against
         },
         "summary": {
             "sections": len(out_sections),
@@ -476,11 +527,86 @@ CATEGORY = {"content": "content", "assets": "images", "tables": "tables", "struc
 CATEGORIES = ("content", "images", "tables", "toc", "structure", "links", "css")
 _KIND_TYPE = {  # detail.kind -> type, for checks that tag findings with a kind
     "missing": "missing image", "extra": "extra image", "changed": "image changed", "raster-vs-vector": "raster vs vector",
-    "glyph": "broken glyph", "offpage": "text off page", "broken-link": "broken link", "missing-link": "missing link",
+    "glyph": "broken glyph", "offpage": "text off page", "broken-link": "broken link", "missing-link": "missing link", "extra-link": "extra link",
     "file-missing": "missing file", "file-extra": "extra file", "outline-only": "bookmark only",
     "broken": "broken image",
     "blackout": "image blacked out",
 }
+
+
+_NO_MERGE = {"structure", "toc"}  # one finding per heading / TOC entry
+
+
+def _merge_nearby(findings: list[Finding], dist: float) -> list[Finding]:
+    """Findings of the same kind that one pair of screenshots shows (both sides on the same page,
+    within `dist` pt of each other) become one finding: every box marked, every message listed.
+    “Switching” and “input” of one link, two word gaps on one line - one issue, not two."""
+    def spot(locs_, at):
+        if locs_:
+            return locs_[0].page, min(l.bbox[1] for l in locs_), max(l.bbox[3] for l in locs_)
+        return (at.page, at.bbox[1], at.bbox[3]) if at else None
+
+    def near(p, q):
+        if p is None or q is None:
+            return p is None and q is None
+        return p[0] == q[0] and q[1] - p[2] <= dist and p[1] - q[2] <= dist
+
+    out: list[Finding] = []
+    parts: dict[int, list[str]] = {}
+    for f in findings:
+        g = next((g for g in reversed(out)
+                  if f.check not in _NO_MERGE and g.check == f.check and g.types == f.types
+                  and g.detail.get("kind") == f.detail.get("kind") and g.severity == f.severity
+                  and near(spot(g.baseline, g.baseline_at), spot(f.baseline, f.baseline_at))
+                  and near(spot(g.candidate, g.candidate_at), spot(f.candidate, f.candidate_at))), None)
+        if g is None:
+            out.append(f)
+            continue
+        n = g.detail.get("merged", 1) + 1
+        parts.setdefault(id(g), [g.message]).append(f.message)
+        g.baseline, g.candidate = g.baseline + f.baseline, g.candidate + f.candidate
+        g.links = (g.links or []) + (f.links or [])
+        g.critical = g.critical or f.critical
+        g.detail = {**g.detail, "merged": n}
+    for g in out:  # "Link missing in stage (2 places): “Switching” …; “input” …"
+        msgs = parts.get(id(g))
+        if msgs:
+            heads = {m.split(":", 1)[0] for m in msgs}
+            if any("\n" in m for m in msgs):  # "Figma: … / Stage: …" messages: one block each
+                g.message = "\n\n".join(dict.fromkeys(msgs))
+            elif len(heads) == 1 and all(":" in m for m in msgs):
+                g.message = f"{heads.pop()} ({len(msgs)} places): " + "; ".join(m.split(":", 1)[1].strip() for m in msgs)
+            else:
+                g.message = "  ·  ".join(msgs)
+    return _merge_kinds(out, spot, near)
+
+
+def _merge_kinds(findings: list[Finding], spot, near) -> list[Finding]:
+    """Different content differences at one spot (a colon added AND the bullet dropped on the same
+    list items) are one issue: one pair of screenshots marks all of them, the message lists each."""
+    rank = {"error": 2, "warning": 1, "info": 0}
+    out: list[Finding] = []
+    for f in findings:
+        g = next((g for g in out if f.check == "content" and g.check == "content"
+                  and f.severity != "info" and g.severity != "info" and g.types != f.types
+                  and near(spot(g.baseline, g.baseline_at), spot(f.baseline, f.baseline_at))
+                  and near(spot(g.candidate, g.candidate_at), spot(f.candidate, f.candidate_at))), None)
+        if g is None:
+            out.append(f)
+            continue
+        kinds = g.detail.get("merged_types") or [(g.types or ["content"])[0]]
+        # each merged difference keeps its own types, message and details
+        parts = g.detail.get("parts") or [{"types": list(g.types), "message": g.message, "detail": dict(g.detail)}]
+        parts.append({"types": list(f.types), "message": f.message, "detail": dict(f.detail)})
+        g.detail = {**g.detail, "merged_types": kinds + [(f.types or ["content"])[0]], "parts": parts}
+        g.message = f"{g.message}\n\n{f.message}" if "\n" in g.message + f.message else f"{g.message}  ·  {f.message}"
+        g.types = list(dict.fromkeys(g.types + f.types))
+        g.baseline, g.candidate = g.baseline + f.baseline, g.candidate + f.candidate
+        g.links = (g.links or []) + (f.links or [])
+        g.critical = g.critical or f.critical
+        if rank.get(f.severity, 0) > rank.get(g.severity, 0):
+            g.severity = f.severity
+    return out
 
 
 def _types(f: Finding) -> list[str]:
@@ -552,9 +678,12 @@ def _resolve_one_sided(u: Unit, findings: list[Finding], cfg: dict) -> None:
         if f.check == "structure" and d.get("anchor_word") is not None:
             w = d["anchor_word"]
             if d["anchor_side"] == "candidate" and w in b2a:
+                # the heading's text is in prod right here (a sub-heading prod does not bookmark): not an
+                # extra section, nor a second copy of a same-titled section - only the bookmarks differ
                 a = b2a[w]
                 f.baseline = [locs(u.a, [a])[0]]
                 f.severity, d["kind"], f.critical = sev, "outline-only", False
+                f.types = ["bookmark only"]
                 f.message = (f"Bookmark only in candidate: “{d['heading']}” is an outline entry in stage, "
                              f"but in prod it is plain text (prod p.{u.a.words[a].page + 1})")
                 continue
@@ -562,6 +691,7 @@ def _resolve_one_sided(u: Unit, findings: list[Finding], cfg: dict) -> None:
                 b = a2b[w]
                 f.candidate, f.candidate_at = [locs(u.b, [b])[0]], None
                 f.severity, d["kind"], f.critical = sev, "outline-only", False
+                f.types = ["bookmark only"]
                 f.message = (f"Bookmark only in baseline: “{d['heading']}” is an outline entry in prod, "
                              f"but in stage it is plain text (stage p.{u.b.words[b].page + 1})")
                 continue
@@ -729,6 +859,8 @@ def _doc_meta(d: Doc, anchors: list[Anchor]) -> dict:
         "margins": {"odd": [d.pages[0].left, round(d.pages[0].right, 1)],
                     "even": [d.pages[min(1, len(d.pages) - 1)].left, round(d.pages[min(1, len(d.pages) - 1)].right, 1)]},
         "removed_header_footer_lines": d.removed_lines,
+        # glyphs of fonts without a Unicode map, read back from the page (OCR + shape)
+        **({"decoded_glyphs": d.decoded} if getattr(d, "decoded", None) else {}),
     }
 
 
@@ -790,3 +922,155 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
         except Exception as e:  # the content result stands on its own
             result["site"] = {"error": f"{type(e).__name__}: {e}"}
     return result
+
+
+_CALLOUT_WORD = re.compile(r"^\W*(note|notes|warning|important|caution|notice|tip|danger|attention)\b", re.I)
+
+
+def _ignored_sections(cfg: dict):
+    pats = [re.compile(p, re.I) for p in cfg.get("ignore", {}).get("sections", [])]
+    return (lambda norm: any(p.search(norm or "") for p in pats)) if pats else None
+
+
+def _apply_ignore(ran, A: Doc, B: Doc, cfg: dict) -> None:
+    """[ignore]: what the validation leaves out entirely (not in any report): finding types, line
+    breaks / wrapping inside table cells, indentation of Note / Warning / Important callouts, and
+    whole sections by title. A finding with several types keeps the ones not ignored."""
+    icfg = cfg.get("ignore", {})
+    drop = set(icfg.get("types", []))
+    in_table, in_callout = set(icfg.get("in_table_cells", [])), set(icfg.get("in_callouts", []))
+    skip_sec = _ignored_sections(cfg)
+    if not (drop or in_table or in_callout or skip_sec):
+        return
+    from .checks import tables as _tables, components as _components
+    tables_of: dict = {}
+    callouts_of: dict = {}
+
+    def inside(r, box, pad=3):
+        return r[0] >= box[0] - pad and r[1] >= box[1] - pad and r[2] <= box[2] + pad and r[3] <= box[3] + pad
+
+    def in_tbl(doc, loc) -> bool:
+        key = (id(doc), loc.page)
+        if key not in tables_of:
+            try:
+                tables_of[key] = [t[1] for t in _tables._raw(doc, loc.page)]
+            except Exception:
+                tables_of[key] = []
+        return any(inside(loc.bbox, b) for b in tables_of[key])
+
+    def in_co(doc, loc) -> bool:
+        if id(doc) not in callouts_of:
+            try:
+                callouts_of[id(doc)] = [c for c in _components.callouts(doc, cfg) if c.get("box")]
+            except Exception:
+                callouts_of[id(doc)] = []
+        if any(c["page"] == loc.page and inside(loc.bbox, c["box"]) for c in callouts_of[id(doc)]):
+            return True
+        # a callout without a box: its paragraph starts with the callout word ("Note: ...")
+        ln = next((l for l in doc.lines if l.page == loc.page and l.bbox[1] <= loc.bbox[3] and l.bbox[3] >= loc.bbox[1]), None)
+        return bool(ln and _CALLOUT_WORD.match(ln.text))
+
+    def all_in(test, f) -> bool:
+        pts = [(A, l) for l in f.baseline] + [(B, l) for l in f.candidate]
+        return bool(pts) and all(test(d, l) for d, l in pts)
+
+    title_re = re.compile(r"[“\"]([^”\"]+)[”\"]")
+    for u, findings, _ in ran:
+        if skip_sec and (skip_sec(normalize.title(u.title or "")) or
+                         (u.b_anchor is not None and skip_sec(u.b_anchor.norm))):
+            findings.clear()
+            continue
+        keep = []
+        for f in findings:
+            types = list(f.types or [])
+            if skip_sec and f.check in ("structure", "toc") and (m := title_re.search(f.message)) \
+                    and skip_sec(normalize.title(m.group(1))):
+                continue
+            rm = set(t for t in types if t in drop)
+            if set(types) & in_table and all_in(in_tbl, f):
+                rm |= set(types) & in_table
+            if set(types) & in_callout and all_in(in_co, f):
+                rm |= set(types) & in_callout
+            if rm:
+                rest = [t for t in types if t not in rm]
+                if not rest:
+                    continue
+                f.types = rest
+            keep.append(f)
+        findings[:] = keep
+
+
+def _spec_prod_spots(ran, cfg: dict) -> None:
+    """A design-spec finding is measured on stage only, but the reader compares with prod: each stage spot
+    gets the prod spot holding the same words (the content diff's word pairs, of whichever section holds
+    the spot: a document-wide finding lists callouts of every section), so the prod screenshot shows the
+    same callout / heading / text as prod prints it."""
+    units = [u for u, _, _ in ran if u.pairs]
+    if not units:
+        return
+    A, B = units[0].a, units[0].b
+    b2a = {j: i for u in units for i, j in u.pairs}
+    by_page: dict[int, list[int]] = defaultdict(list)
+    for j, w in enumerate(B.words):
+        by_page[w.page].append(j)
+    als: dict[int, Aligner] = {}
+
+    def prod_spot(loc):
+        js = [j for j in by_page.get(loc.page, []) if (w := B.words[j]).bbox[1] < loc.bbox[3] and w.bbox[3] > loc.bbox[1]
+              and w.bbox[0] < loc.bbox[2] and w.bbox[2] > loc.bbox[0]]
+        ia = [b2a[j] for j in js if j in b2a]
+        if ia:
+            ws = [A.words[i] for i in ia if A.words[i].page == A.words[ia[0]].page]
+            return Loc(ws[0].page, (min(w.bbox[0] for w in ws), min(w.bbox[1] for w in ws),
+                                    max(w.bbox[2] for w in ws), max(w.bbox[3] for w in ws)))
+        u = next((u for u in units if js and u.b_range[0] <= js[0] < u.b_range[1]), None)
+        if u is not None:
+            al = als.setdefault(id(u), Aligner(u))
+            return al.loc_in_a(js[0])
+        return None
+
+    boxes = None
+
+    def whole_callout(loc):
+        """A callout finding: the prod callout around the spot, whole (its title / icon / text)."""
+        nonlocal boxes
+        if boxes is None:
+            from .checks import components as _components
+            try:
+                boxes = [c for c in _components.callouts(A, cfg) if c.get("box")]
+            except Exception:
+                boxes = []
+        cx, cy = (loc.bbox[0] + loc.bbox[2]) / 2, (loc.bbox[1] + loc.bbox[3]) / 2
+        c = next((c for c in boxes if c["page"] == loc.page and c["box"][0] <= cx <= c["box"][2]
+                  and c["box"][1] <= cy <= c["box"][3]), None)
+        if c:
+            return Loc(loc.page, tuple(c["box"]))
+        # no coloured box (a callout set between rules): the text block at the spot, its lines one under
+        # the other with no paragraph gap, plus an icon at its left
+        lines = [l for l in A.lines if l.page == loc.page]
+        k = next((n for n, l in enumerate(lines) if l.bbox[1] <= cy <= l.bbox[3]), None)
+        if k is None:
+            return loc
+        lo = hi = k
+        gap = lambda a, b: (0 <= b.bbox[1] - a.bbox[3] <= 0.6 * (a.bbox[3] - a.bbox[1])  # the next line, no paragraph gap
+                            and abs(a.size - b.size) <= 0.5)
+        while lo > 0 and gap(lines[lo - 1], lines[lo]):
+            lo -= 1
+        while hi + 1 < len(lines) and gap(lines[hi], lines[hi + 1]):
+            hi += 1
+        blk = lines[lo:hi + 1]
+        x0, y0 = min(l.bbox[0] for l in blk), min(l.bbox[1] for l in blk)
+        x1, y1 = max(l.bbox[2] for l in blk), max(l.bbox[3] for l in blk)
+        icon = [im.bbox for im in A.images if im.page == loc.page and im.bbox[2] <= x0 + 2
+                and x0 - im.bbox[2] <= 60 and im.bbox[1] < y1 and im.bbox[3] > y0]
+        for b in icon:
+            x0, y0, y1 = min(x0, b[0]), min(y0, b[1]), max(y1, b[3])
+        return Loc(loc.page, (x0, y0, x1, y1))
+
+    for _, findings, _ in ran:
+        for f in findings:
+            if f.detail.get("kind") == "spec" and not f.baseline and f.candidate:
+                spots = [x for x in (prod_spot(l) for l in f.candidate) if x is not None]
+                if any(t.startswith("spec callout") for t in f.types or []):
+                    spots = [whole_callout(x) for x in spots]
+                f.baseline = spots

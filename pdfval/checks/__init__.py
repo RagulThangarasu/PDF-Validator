@@ -53,13 +53,17 @@ class Aligner:
         n = bisect.bisect_left(self.a_keys, i)
         prv = self.by_a[n - 1][1] if n > 0 else None
         nxt = self.by_a[n][1] if n < len(self.by_a) else None
-        return insertion_loc(self.u.b, prv, nxt)
+        o_prv = self.by_a[n - 1][0] if n > 0 else None
+        o_nxt = self.by_a[n][0] if n < len(self.by_a) else None
+        return insertion_loc_by(self.u.b, prv, nxt, self.u.a, [i] if i < len(self.u.a.words) else [], o_prv, o_nxt)
 
     def loc_in_a(self, j: int) -> Loc | None:
         n = bisect.bisect_left(self.b_keys, j)
         prv = self.by_b[n - 1][0] if n > 0 else None
         nxt = self.by_b[n][0] if n < len(self.by_b) else None
-        return insertion_loc(self.u.a, prv, nxt)
+        o_prv = self.by_b[n - 1][1] if n > 0 else None
+        o_nxt = self.by_b[n][1] if n < len(self.by_b) else None
+        return insertion_loc_by(self.u.a, prv, nxt, self.u.b, [j] if j < len(self.u.b.words) else [], o_prv, o_nxt)
 
     def to_b(self, i: int) -> int | None:
         """Candidate word at/after baseline word i (next paired word)."""
@@ -93,6 +97,22 @@ def insertion_loc(doc: Doc, prev: int | None, nxt: int | None) -> Loc | None:
         w = doc.words[prev]
         return Loc(w.page, (w.bbox[0], w.bbox[3] + 4, w.bbox[2], w.bbox[3] + 6))
     return None
+
+
+def insertion_loc_by(doc: Doc, prev: int | None, nxt: int | None,
+                     other: Doc, idx: list[int], o_prev: int | None, o_next: int | None) -> Loc | None:
+    """Where text that exists on the other side only belongs on this side: next to the same neighbour it
+    sits with over there. A table header row stage added directly above "Connect to 5GHz Wi-Fi" goes above
+    prod's "Connect to 5GHz Wi-Fi" - even on the next page - not after the note that happens to precede it."""
+    if idx and o_prev is not None and o_next is not None and prev is not None and nxt is not None:
+        gap = lambda a, b: (abs(other.words[b].page - other.words[a].page) * 10000
+                            + abs(other.words[b].bbox[1] - other.words[a].bbox[3]))
+        if gap(idx[-1], o_next) < gap(o_prev, idx[0]):
+            w = doc.words[nxt]
+            return Loc(w.page, w.bbox)
+        w = doc.words[prev]
+        return Loc(w.page, (w.bbox[0], w.bbox[3] + 4, w.bbox[2], w.bbox[3] + 6))
+    return insertion_loc(doc, prev, nxt)
 
 
 def locs(doc: Doc, idxs, limit: int = 40) -> list[Loc]:
@@ -135,16 +155,15 @@ def paired_locs(a: Doc, b: Doc, pairs, limit: int = 40) -> list[tuple[Loc, Loc]]
     return out
 
 
-def snippet(doc: Doc, idxs, n: int = 18) -> str:
-    idxs = list(idxs)
+def snippet(doc: Doc, idxs, n: int = 0) -> str:
+    """The words as text - all of them (n is ignored: an issue is never shortened with "…")."""
     from .. import normalize
-    s = normalize.join_words(doc.words[i] for i in idxs[:n])
-    return s + (" …" if len(idxs) > n else "")
+    return normalize.join_words(doc.words[i] for i in idxs)
 
 
-from . import assets, content, integrity, layout, placement, style, tables, typography  # noqa: E402
+from . import brackets, assets, content, integrity, layout, placement, rows, style, tables, typography  # noqa: E402
 
 # content must run first: it produces the word pairs every other check relies on;
 # placement needs the image pairs from assets
-PIPELINE = [content.check, style.check, typography.check, layout.check, tables.check, assets.check, placement.check,
-            integrity.check]
+PIPELINE = [content.check, brackets.check, style.check, typography.check, layout.check, rows.check, tables.check, assets.check,
+            placement.check, integrity.check]

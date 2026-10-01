@@ -28,7 +28,7 @@ from difflib import SequenceMatcher
 from . import normalize
 from .model import Anchor, Doc, Finding, Loc
 
-_ENTRY = re.compile(r"^(?P<title>.*?)[\s.·]*\.{3,}[\s.]*(?P<page>\d+)\s*$")
+_ENTRY = re.compile(r"^(?P<title>.*?)[\s.·]*\.{3,}[\s.]*(?P<page>\d+|[ivxlcdmIVXLCDM]{1,6})\s*$")
 
 
 @dataclass
@@ -54,12 +54,26 @@ class Toc:
     page_sizes: dict = field(default_factory=dict)  # 0-based page -> (width, height) pt
 
 
+_TOC_HEAD = re.compile(r"^\s*(table\s+of\s+contents?|contents?)\s*$", re.I)
+
+
 def detect(doc: Doc, cfg: dict) -> Toc:
     tcfg = cfg.get("toc", {})
     min_entries = tcfg.get("min_entries", 4)
     front = max(3, int(len(doc.pages) * tcfg.get("max_front_fraction", 0.25)))
     per_page = Counter(ln.page for ln in doc.lines if ln.page < front and _ENTRY.match(normalize.clean(ln.text)))
     pages = sorted(p for p, n in per_page.items() if n >= min_entries)
+    if not pages:
+        # a TOC further in (after the cover, notices, a quick start): pages of "Title ..... 12" lines anywhere,
+        # the first of them headed "Contents" / "Table of Contents" (a dotted Q&A index or list of figures is not)
+        every = Counter(ln.page for ln in doc.lines if _ENTRY.match(normalize.clean(ln.text)))
+        rich = sorted(p for p, n in every.items() if n >= min_entries)
+        heads = {ln.page for ln in doc.lines if _TOC_HEAD.match(normalize.clean(ln.text))}
+        start = next((p for p in rich if p in heads), None)
+        if start is not None:
+            pages = [start]
+            while pages[-1] + 1 in rich:
+                pages.append(pages[-1] + 1)
     if pages:
         pages = list(range(pages[0], pages[-1] + 1))  # contiguous run
         return _printed(doc, pages)
@@ -86,7 +100,9 @@ def _printed(doc: Doc, pages: list[int]) -> Toc:
                 title = f"{normalize.clean(pending[0].text)} {title}".strip()
                 box = (min(pending[0].bbox[0], box[0]), pending[0].bbox[1], max(pending[0].bbox[2], box[2]), box[3])
                 x0 = pending[0].bbox[0]
-            raw.append((title, int(m["page"]), ln.page, box, x0))
+            # a roman number (front matter: i, ii, iv) is kept as the title's end marker only - front-matter
+            # pages are numbered separately, so it is not checked against the page it points to
+            raw.append((title, int(m["page"]) if m["page"].isdigit() else None, ln.page, box, x0))
             pending = None
         elif text and not toc.heading and not raw:
             toc.heading = text  # "Table of contents"

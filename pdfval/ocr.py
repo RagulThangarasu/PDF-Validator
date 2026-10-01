@@ -27,6 +27,7 @@ def reset() -> None:
         d.close()
     _DOCS.clear()
     _TEXT.clear()
+    _BOXES.clear()
 
 
 def image_text(path: str, page: int, bbox: tuple, dpi: int = 300, scales: tuple = (1, 2)) -> str:
@@ -121,6 +122,48 @@ def prefetch(path: str, pictures: list[tuple[int, tuple]], dpi: int, scales: tup
                 pool.submit(_tesseract, png).add_done_callback(lambda fut, key=key: finished(key, fut))
             else:
                 finished(key)
+
+
+_BOXES: dict[tuple, list] = {}
+
+
+def word_boxes(path: str, page: int, bbox: tuple, dpi: int = 600) -> list[tuple[str, tuple]]:
+    """OCR words of a picture with their boxes in page points: [(text, (x0, y0, x1, y1))], cached."""
+    key = _cache_key(path, page, bbox, dpi)
+    if key not in _BOXES:
+        _BOXES[key] = []
+        try:
+            png = _render(path, page, bbox, dpi)
+            # two reading modes: sparse text (labels scattered over a drawing) and one block (a small
+            # picture that is mostly its label - "Quick Start Guide" on a booklet - which sparse mode misses)
+            for psm in ("11", "6") if png else ():
+                r = subprocess.run(["tesseract", "stdin", "stdout", "--psm", psm, "tsv"], input=png,
+                                   capture_output=True, timeout=120)
+                k, x0, y0 = 72 / dpi, bbox[0], bbox[1]
+                for row in r.stdout.decode("utf-8", "replace").splitlines()[1:]:
+                    c = row.split("\t")
+                    if len(c) >= 12 and c[11].strip() and c[10] not in ("-1",):
+                        l, t, w, h = (int(v) for v in c[6:10])
+                        _BOXES[key].append((c[11].strip(), (x0 + l * k, y0 + t * k, x0 + (l + w) * k, y0 + (t + h) * k)))
+        except Exception:
+            pass
+    return _BOXES[key]
+
+
+def locate(text: str, path: str, page: int, bbox: tuple, dpi: int = 600) -> list[tuple]:
+    """Boxes (page points) of the OCR words in the picture that spell `text` (compared like `found`:
+    letters and digits, OCR misreadings allowed); [] when it cannot be placed."""
+    words = word_boxes(path, page, bbox, dpi)
+    want = [k for k in (_key(t) for t in text.split()) if k]
+    if not words or not want:
+        return []
+    keys = [_key(t) for t, _ in words]
+    out = []
+    for w in want:
+        tol = len(w) // 4 or (1 if len(w) >= 4 else 0)
+        hit = [i for i, k in enumerate(keys) if k and (k == w or (len(w) >= 3 and _near(w, k, tol) and abs(len(k) - len(w)) <= tol))]
+        out += [words[i][1] for i in hit[:1]]
+    return out if len(out) >= max(1, (len(want) + 1) // 2) else []
 
 
 _DIGITS = str.maketrans("oqdilzsbg", "000112569")  # what OCR reads for a digit in a label

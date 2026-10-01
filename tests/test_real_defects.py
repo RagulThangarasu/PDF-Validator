@@ -152,7 +152,6 @@ DEFECTS = {
     "table removed": (d_table_removed, {"Table missing"}),
     "tables merged": (d_tables_merged, {"Tables merged"}),
     "section missing": (d_section_missing, {"Section missing"}),
-    "section order": (d_section_order, {"Section in the wrong place"}),
     "section duplicated": (d_section_duplicated, {"Section duplicated"}),
 }
 
@@ -170,3 +169,16 @@ def test_planted_defect_is_a_genuine_issue(tmp_path, name):
     r = compare(PROD, str(out), load_config())
     got = {f["issue"] for s in r["sections"] for f in s["findings"] if f.get("genuine")}
     assert got & expect, f"{name}: expected one of {sorted(expect)}, got {sorted(got)}"
+
+
+@pytest.mark.skipif(not Path(PROD).exists(), reason="sample prod PDF not present")
+def test_section_order_is_in_the_pdf_report(tmp_path):
+    """A section in the wrong place (content sequence) is one of the user's main scenarios: it is in the
+    PDF report ([genuine] types has "order differs")."""
+    doc = pymupdf.open(PROD)
+    d_section_order(doc)
+    out = tmp_path / "stage.pdf"
+    doc.save(out, garbage=3)
+    r = compare(PROD, str(out), load_config())
+    order = [f for s in r["sections"] for f in s["findings"] if "order differs" in (f.get("types") or [])]
+    assert order and all(f["genuine"] for f in order)

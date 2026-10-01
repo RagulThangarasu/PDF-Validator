@@ -29,9 +29,13 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
     report(0.75, "Building PDF report")
     # every issue of every severity: the screenshot setting only decides which issues get pictures
     pdf_report.build(result, out, progress=lambda f, m: report(0.75 + 0.23 * f, m))
-    report(0.98, "Building genuine-issues report")
+    report(0.98, "Building PDF report (issues)")
     pdf_report.build(result, out, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
     write_genuine_csv(result, out / "genuine-issues.csv")
+    report(0.99, "Building CSS report")
+    pdf_report.build(result, out, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
+    report(0.995, "Building image report")
+    pdf_report.build(result, out, options=pdf_report.IMAGE_REPORT, filename="image-issues.pdf")
     if (result.get("site") or {}).get("rows"):
         from ..site_nav import write_csv
         write_csv(result["site"], out / "site-navigation.csv")

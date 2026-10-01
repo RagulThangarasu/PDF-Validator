@@ -19,3 +19,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+
+# source documents / internal data (never committed)
+pdf-prod/
+pdf-prod-pdfs/
+metadata/

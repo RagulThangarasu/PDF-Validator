@@ -178,6 +178,7 @@ def resolve(guids: list[tuple[str, str]], cfg: dict) -> tuple[dict[str, str], st
         return {}, ""
     auth = "Basic " + base64.b64encode(f"{cfg['user']}:{cfg['password']}".encode()).decode()
     root = cfg.get("search_root") or "/content/dam"
+    wide = cfg.get("wide_search_root") or "/content/dam"  # when the product folder has no match
     out, err = {}, ""
 
     def query(params: dict) -> list[str]:
@@ -191,7 +192,12 @@ def resolve(guids: list[tuple[str, str]], cfg: dict) -> tuple[dict[str, str], st
             out[guid] = _PATHS[(author, guid)]
             continue
         try:
-            hits = query({"nodename": f"{guid}*"}) or query({"fulltext": guid, "nodename": "*.dita"})
+            # the file named after the GUID; else a topic file that contains it (.dita or .xml topics);
+            # else any file under the folder that mentions it; else the same, in the whole search root
+            hits = query({"nodename": f"{guid}*"}) or query({"fulltext": guid, "nodename": "*.dita"}) \
+                or query({"fulltext": guid, "nodename": "*.xml"}) or query({"fulltext": guid})
+            if not hits and wide and wide != root:
+                hits = query({"fulltext": guid, "path": wide}) or query({"nodename": f"{guid}*", "path": wide})
         except HTTPError as e:
             return out, ("AEM refused the login (user name or password wrong)" if e.code in (401, 403)
                          else f"AEM search failed: HTTP {e.code}")
@@ -233,6 +239,61 @@ def find_map(name: str, cfg: dict) -> str:
     return hits[0] if hits else ""
 
 
+_LANG_SUFFIX = re.compile(r"[-_ ](?:[a-z]{2}(?:[-_][a-z]{2})?)$", re.I)
+
+
+def map_key(name: str) -> str:
+    """A map name compared loosely: no .ditamap, no language suffix (-en, _EN, -zh-cn), case and
+    punctuation ignored - “EW270Q-en.ditamap” and “ew270q.ditamap” are the same map."""
+    stem = re.sub(r"\.ditamap$", "", (name or "").rsplit("/", 1)[-1], flags=re.I)
+    stem = _LANG_SUFFIX.sub("", stem)
+    return re.sub(r"[^a-z0-9]", "", stem.lower())
+
+
+_ALL_MAPS: dict = {}
+
+
+def all_maps(cfg: dict) -> list[str]:
+    """Every .ditamap AEM has: under the search root first, then the whole DAM."""
+    import base64
+    import json
+    from urllib import request as _rq
+    from urllib.parse import urlencode
+    author = (cfg.get("author") or "").rstrip("/")
+    if not author or not cfg.get("user") or not cfg.get("password"):
+        return []
+    if author in _ALL_MAPS:
+        return _ALL_MAPS[author]
+    auth = "Basic " + base64.b64encode(f"{cfg['user']}:{cfg['password']}".encode()).decode()
+    out: list[str] = []
+    for root in dict.fromkeys([cfg.get("search_root") or "/content/dam", "/content/dam"]):
+        q = {"path": root, "type": "dam:Asset", "nodename": "*.ditamap", "p.limit": "-1",
+             "p.hits": "selective", "p.properties": "jcr:path"}
+        try:
+            with _rq.urlopen(_rq.Request(f"{author}/bin/querybuilder.json?{urlencode(q)}",
+                                         headers={"Authorization": auth}), timeout=60) as r:
+                out += [h["jcr:path"] for h in json.load(r).get("hits", [])]
+        except Exception:
+            continue
+    _ALL_MAPS[author] = list(dict.fromkeys(out))
+    return _ALL_MAPS[author]
+
+
+def best_map(name: str, maps: list[str], prefer: str = "") -> str:
+    """The map that is `name` by map_key; else one whose key contains it (or the other way round).
+    Ties: under the search root, an English folder, then the shortest path."""
+    want = map_key(name)
+    if not want:
+        return ""
+    rank = lambda p: (not p.startswith(prefer) if prefer else False, "/en/" not in p.lower(), len(p))
+    exact = sorted((p for p in maps if map_key(p) == want), key=rank)
+    if exact:
+        return exact[0]
+    near = sorted((p for p in maps if len(want) >= 4 and (want in map_key(p) or (len(map_key(p)) >= 4 and map_key(p) in want))),
+                  key=lambda p: (abs(len(map_key(p)) - len(want)),) + rank(p))
+    return near[0] if near else ""
+
+
 def merge_settings(acfg: dict, saved: dict) -> dict:
     """Config [aem] with the settings saved from the UI on top (products merged)."""
     out = {**acfg, **{k: v for k, v in saved.items() if k != "products" and v not in (None, "")}}
@@ -253,7 +314,9 @@ def relink(result: dict, acfg: dict) -> bool:
     if found and not a["folder"]:  # .../<product>/Maps/<map>.ditamap -> the product folder
         a["folder"] = re.sub(rf"/{re.escape(maps)}/[^/]+$", "", found) if f"/{maps}/" in found else found.rsplit("/", 1)[0]
     a["map_path"] = found or map_path({"map": a.get("map", ""), "folder": a["folder"]}, acfg)
-    scfg = {**acfg, "search_root": a["folder"]} if a["folder"] else acfg  # topics: inside the product first
+    # topics: inside the product folder first, then anywhere under the configured search root
+    scfg = {**acfg, "search_root": a["folder"], "wide_search_root": acfg.get("search_root") or "/content/dam"} \
+        if a["folder"] else acfg
     paths, a["resolve_error"] = resolve([(t["guid"], t["lang"]) for t in a["topics"]], scfg)
     base = {"map": a.get("map", ""), "product": a["product"], "folder": a["folder"], "map_path": a["map_path"]}
     urls = {}
@@ -320,3 +383,159 @@ def annotate(result: dict, cfg: dict) -> None:
     result["aem"] = {**base, "author": acfg.get("author", ""), "topics_in_pdf": len(loc.topics),
                      "topics": sorted(topics.values(), key=lambda t: (-t["genuine"], -t["critical"], -t["issues"]))}
     relink(result, acfg)
+
+
+# ---------------------------------------------------------------- generate the stage PDF in AEM Guides
+
+def preset_for(map_path: str, cfg: dict) -> str:
+    """The Native PDF output preset for a map, from where the map lives: [aem.generate] rules =
+    [[path part, preset], ...] (first match, case-insensitive), else the default preset."""
+    g = cfg.get("generate") or {}
+    for part, preset in g.get("rules", []):
+        if part.lower() in (map_path or "").lower():
+            return preset
+    return g.get("default_preset", "BenQ with images")
+
+
+def _key(title: str) -> str:
+    """Preset titles compared loosely: case, spaces and a plural “s” do not matter (“BenQ with images” = “BenQ With Image”)."""
+    k = re.sub(r"[^a-z0-9]", "", (title or "").lower())
+    return k[:-1] if k.endswith("s") else k
+
+
+def preset_id(title: str, cfg: dict) -> str:
+    """The node name AEM Guides knows an output preset by (often a UUID), from its title as the map
+    console shows it. The presets are read from the folder profiles under /var/dxml/folderprofiles."""
+    import json
+    from urllib import request as _rq
+    from urllib.parse import urlencode
+    author, auth = _auth(cfg)
+    q = {"path": "/var/dxml/folderprofiles", "property": "fmdita-outputTitle", "property.operation": "exists",
+         "p.limit": "-1", "p.hits": "selective", "p.properties": "jcr:path fmdita-outputTitle fmdita-outputType"}
+    with _rq.urlopen(_rq.Request(f"{author}/bin/querybuilder.json?{urlencode(q)}", headers={"Authorization": auth}),
+                     timeout=30) as r:
+        hits = json.load(r).get("hits", [])
+    for h in hits:
+        if _key(h.get("fmdita-outputTitle", "")) == _key(title):
+            return h["jcr:path"].rsplit("/", 1)[-1]
+    pdf = sorted({h.get("fmdita-outputTitle", "") for h in hits if (h.get("fmdita-outputType") or "").lower() == "pdf"})
+    raise RuntimeError(f"AEM has no output preset “{title}”. PDF presets in AEM: {', '.join(pdf) or 'none'} "
+                       "- set the name in [aem.generate] of config/default.toml")
+
+
+def _auth(cfg: dict) -> tuple[str, str]:
+    import base64
+    author = (cfg.get("author") or "").rstrip("/")
+    if not author or not cfg.get("user") or not cfg.get("password"):
+        raise RuntimeError("Log in to AEM first (author URL, user and password in the AEM login card)")
+    return author, "Basic " + base64.b64encode(f"{cfg['user']}:{cfg['password']}".encode()).decode()
+
+
+def resolve_map(name_or_path: str, cfg: dict) -> str:
+    """A map's DAM path from its path or its file name (w2720i / w2720i.ditamap)."""
+    s = (name_or_path or "").strip()
+    if s.startswith("/content/"):
+        return s
+    name = s if s.lower().endswith(".ditamap") else f"{s}.ditamap"
+    path = find_map(name, cfg) or best_map(name, all_maps(cfg), cfg.get("search_root") or "")
+    if not path:
+        raise RuntimeError(f"Map “{name}” not found in AEM: no map in any DAM folder is named like it "
+                           f"(compared as “{map_key(name)}”)")
+    return path
+
+
+def generate_pdf(map_path: str, preset: str, dest: str, cfg: dict, progress=None) -> str:
+    """Start the preset's Native PDF generation for the map (as “Generate” in the map console's Output
+    tab), wait for the new PDF to appear in AEM, download it to dest. Returns dest.
+    The request is [aem.generate] endpoint + params ({map}, {preset} filled in), so it can be adapted to
+    the AEM Guides version without code changes."""
+    import json
+    import time
+    from datetime import datetime, timezone
+    from urllib import request as _rq
+    from urllib.parse import urlencode
+
+    say = progress or (lambda m: None)
+    g = cfg.get("generate") or {}
+    author, auth = _auth(cfg)
+    started = datetime.now(timezone.utc)
+    pid = preset_id(preset, cfg)
+    params = {k: str(v).format(map=map_path, preset=pid, preset_title=preset) for k, v in
+              (g.get("params") or {"operation": "GENERATEOUTPUT", "source": "{map}", "outputName": "{preset}"}).items()}
+    # the parameters go in the query string: AEM Guides' publishlistener answers a form body with
+    # “400 Request Data has already been read”
+    req = _rq.Request(f"{author}{g.get('endpoint', '/bin/publishlistener')}?{urlencode(params)}", data=b"",
+                      headers={"Authorization": auth}, method="POST")
+    say(f"Generating “{preset}” for {map_path.rsplit('/', 1)[-1]} in AEM")
+    from urllib.error import HTTPError
+    try:
+        with _rq.urlopen(req, timeout=60) as r:
+            if r.status >= 400:
+                raise RuntimeError(f"AEM refused the generation: HTTP {r.status}")
+    except HTTPError as e:  # say what AEM said, not just "400 Bad Request"
+        body = re.sub(r"<[^>]+>|\s+", " ", e.read().decode("utf-8", "replace")).strip()[:300]
+        raise RuntimeError(f"AEM refused the generation of “{preset}” for {map_path.rsplit('/', 1)[-1]}: "
+                           f"HTTP {e.code} {body}") from None
+    # wait for a PDF of this map written after the start: the preset's output lands in the DAM
+    stem = map_path.rsplit("/", 1)[-1].rsplit(".", 1)[0].lower()
+    root = g.get("output_root") or cfg.get("search_root") or "/content/dam"
+    deadline = time.time() + float(g.get("timeout_s", 1200))
+    while time.time() < deadline:
+        time.sleep(float(g.get("poll_s", 10)))
+        q = {"path": root, "type": "dam:Asset", "nodename": "*.pdf", "p.limit": "20", "p.hits": "full", "p.nodedepth": "2",
+             "daterange.property": "jcr:content/jcr:lastModified",
+             "daterange.lowerBound": started.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+             "orderby": "@jcr:content/jcr:lastModified", "orderby.sort": "desc"}
+        with _rq.urlopen(_rq.Request(f"{author}/bin/querybuilder.json?{urlencode(q)}", headers={"Authorization": auth}),
+                         timeout=30) as r:
+            hits = [h.get("jcr:path", "") for h in json.load(r).get("hits", [])]
+        # this map's PDF: named after the map or its preset, else the newest one written since the start
+        mine = [h for h in hits if stem in h.lower()] or [h for h in hits if preset.lower().replace(" ", "") in h.lower().replace(" ", "")]
+        if mine:
+            with _rq.urlopen(_rq.Request(author + quote(mine[0], safe="/"), headers={"Authorization": auth}), timeout=120) as r, \
+                    open(dest, "wb") as out:
+                out.write(r.read())
+            say(f"Downloaded {mine[0]}")
+            return dest
+        say(f"Waiting for AEM to finish “{preset}” ({int(deadline - time.time())} s left)")
+    raise RuntimeError(f"AEM did not produce the PDF within {g.get('timeout_s', 1200)} s - check the map console's Output tab")
+
+
+def map_candidates(filename: str) -> list[str]:
+    """Map names a prod PDF's file name points to: “aeedd66f_W2720i_V1.03_EN.pdf” -> w2720i, …;
+    “SL04&SH04_UM_V1.2_EN.pdf” -> sl04_and_sh04, sl04, sh04. Upload prefixes, versions, language and
+    document-type words are dropped."""
+    stem = re.sub(r"\.pdf$", "", filename.rsplit("/", 1)[-1], flags=re.I)
+    stem = re.sub(r"^[0-9a-f]{8}_", "", stem)  # upload prefix
+    words = [w for w in re.split(r"[_\s\-]+", stem) if w]
+    noise = re.compile(r"^(v?\d+(\.\d+)*|en|eng|um|ug|qsg|user|manual|guide|final|draft|\(\d+\))$", re.I)
+    keep = [w for w in words if not noise.match(w)]
+    out = []
+    if keep:
+        out.append("_".join(keep).replace("&", "_and_").lower())
+        out += [w.lower() for w in keep]
+        for w in keep:
+            out += [p.lower() for p in w.split("&") if p]
+    return list(dict.fromkeys(x for x in out if len(x) >= 3))
+
+
+def find_map_for(filename: str, cfg: dict) -> str:
+    """The DAM path of the map a prod PDF belongs to, from the PDF's file name (see map_candidates):
+    an exact map file name first, then a map whose name contains the product code."""
+    import json
+    from urllib import request as _rq
+    from urllib.parse import urlencode
+    author, auth = _auth(cfg)
+    for name in map_candidates(filename):
+        hit = find_map(f"{name}.ditamap", cfg) or best_map(name, all_maps(cfg), cfg.get("search_root") or "")
+        if hit:
+            return hit
+    for name in map_candidates(filename):
+        q = {"path": cfg.get("search_root") or "/content/dam", "type": "dam:Asset", "nodename": f"*{name}*.ditamap",
+             "p.limit": "10", "p.hits": "selective", "p.properties": "jcr:path"}
+        with _rq.urlopen(_rq.Request(f"{author}/bin/querybuilder.json?{urlencode(q)}", headers={"Authorization": auth}),
+                         timeout=30) as r:
+            hits = sorted((h["jcr:path"] for h in json.load(r).get("hits", [])), key=lambda h: ("/en/" not in h, len(h)))
+        if hits:
+            return hits[0]
+    raise RuntimeError(f"No map found in AEM for “{filename}” (tried {', '.join(map_candidates(filename)) or 'nothing'})")

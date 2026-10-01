@@ -49,6 +49,10 @@ def check(u: Unit) -> list[Finding]:
     lcfg, rcfg = u.cfg["layout"], u.cfg["report"]
     if not lcfg.get("enabled", True):
         return []
+    if not lcfg.get("compare_with_prod", True):
+        # layout is judged on stage against the spec; the list markers themselves (a bullet or number
+        # missing, another numbering style / format, out of sequence) are content and still compared
+        return _bullets(u, positions=False)
     tol_i, tol_a, tol_lh = lcfg["indent_tolerance"], lcfg["align_tolerance"], lcfg["line_height_tolerance_em"]
     A, B = u.a, u.b
     starts = [(i, j) for i, j in u.pairs if A.words[i].line_start and B.words[j].line_start]
@@ -136,7 +140,7 @@ def _wraps(u: Unit) -> list[Finding]:
         findings.append(Finding(
             "layout", lcfg.get("severity", {}).get("line-wrap", "info"),
             f"[{role}] line-wrap: same text wraps to the next line at a different place ({len(ps)}): "
-            + "; ".join(examples[:3]) + (" …" if len(ps) > 3 else ""),
+            + "; ".join(examples),
             a_locs, b_locs,
             {"role": role, "property": "line-wrap", "places": len(ps), "examples": examples[:50]},
             types=["line-wrap"],
@@ -167,8 +171,13 @@ def _marker_test(lcfg: dict):
     enum = re.compile(lcfg["list_marker"]) if lcfg.get("list_marker") else None
     cats = set(lcfg.get("list_symbol_categories", []))
     # a bullet is one glyph, maybe repeated ("•", "--"): "◄/►" starting a wrapped line is not a bullet
+    # ordinary punctuation is not a bullet: a "." "," "/" wrapped to the start of a line ends the text before it
+    plain = set(".,:;!?/\\'\"()[]{}@#%&_|")
+    # Chinese / Japanese sentence punctuation (。，、：「」（）…) wraps to the start of a line like any
+    # character: it is never a bullet
+    plain |= set("。，、；：！？「」『』（）【】〈〉《》…・")
     return lambda t: bool(t) and ((enum is not None and enum.match(t) is not None)
-                                  or (bool(cats) and len(set(t)) == 1 and len(t) <= 3
+                                  or (bool(cats) and len(set(t)) == 1 and len(t) <= 3 and t[0] not in plain
                                       and all(unicodedata.category(c) in cats for c in t)))
 
 
@@ -264,8 +273,10 @@ def _list_items(doc: Doc, rng: tuple[int, int], is_marker, tol_em: float, max_ga
                  and doc.lines[li].bbox[0] <= x1 and doc.lines[li].bbox[2] >= x0
                  and (bound is None or doc.lines[li].bbox[0] >= bound)]
         li = max(above, key=lambda k: doc.lines[k].bbox[3], default=None)
-        if li is not None and owner[li] is not None:
+        if li is not None and owner[li] is not None and "ref_kind" in owner[li]:
             it["ref"], it["ref_kind"] = owner[li]["ref"], owner[li]["ref_kind"]  # same list: its introduction
+        # (an item above that is not measured yet - side-by-side lists, or one starting level with
+        # this one - gives nothing to inherit: measure this item on its own below)
         elif li is not None and top - doc.lines[li].bbox[3] <= max_gap_em * mw.style.size:
             it["ref"], it["ref_kind"] = doc.lines[li].bbox[0], "intro"
         else:
@@ -275,6 +286,8 @@ def _list_items(doc: Doc, rng: tuple[int, int], is_marker, tol_em: float, max_ga
         o = owner[li] if li is not None else None
         while o is not None and doc.words[o["marker"]].bbox[0] > x0 + slack:
             o = o.get("parent")
+        if o is not None and "list" not in o:  # the item above is not placed yet (side-by-side lists)
+            o = None
         if o is not None and abs(doc.words[o["marker"]].bbox[0] - x0) <= slack:
             it["list"], it["parent"] = o["list"], o.get("parent")
         else:
@@ -377,8 +390,12 @@ def _item_pairs(u: Unit, ia: dict, ib: dict, min_words: int = 3) -> list[tuple[i
     return out
 
 
-def _bullets(u: Unit) -> list[Finding]:
-    """Bullet / numbered list alignment, compared on items whose text matched."""
+MARKER_KINDS = {"bullet marker", "numbering style", "numbering format", "numbering sequence", "marker glued"}
+
+
+def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
+    """Bullet / numbered list alignment, compared on items whose text matched.
+    positions=False: only the markers (missing, different, numbering), not where they sit."""
     lcfg, rcfg = u.cfg["layout"], u.cfg["report"]
     if not lcfg.get("check_bullets", True):
         return []
@@ -425,6 +442,14 @@ def _bullets(u: Unit) -> list[Finding]:
         elif (xa.get("enum") is None) != (xb.get("enum") is None):  # numbered on one side, bullet on the other
             groups[(wa.role, "numbering style", xa.get("style") or f"bullet “{ma.text}”",
                     xb.get("style") or f"bullet “{mb.text}”")].append((xa, xb, i, j))
+        # the marker touching its text ("15.12 V trigger jack", "16.RS-232"): no visible space in stage
+        # where prod has one. Checked on its own - the gap is far smaller than the alignment tolerance
+        glue = lcfg.get("bullet_glued_em", 0.12)
+        gap_a, gap_b = (wa.bbox[0] - ma.bbox[2]) / em_a, (wb.bbox[0] - mb.bbox[2]) / em_b
+        if gap_b < glue <= gap_a / 2 and wb.page == mb.page and abs(wb.bbox[1] - mb.bbox[1]) < em_b:
+            groups[(wa.role, "marker glued", "", "")].append((xa, xb, i, j))  # one finding per role: gaps in the message
+        if not positions:
+            continue
         vals = {
             # only comparable when both are measured against the same kind of line
             "bullet indent": ((ma.bbox[0] - xa["ref"]) / em_a, (mb.bbox[0] - xb["ref"]) / em_b)
@@ -437,7 +462,12 @@ def _bullets(u: Unit) -> list[Finding]:
             if va is not None and vb is not None and abs(va - vb) > tol:
                 groups[(wa.role, prop, f"{va:+.1f}em", f"{vb:+.1f}em")].append((xa, xb, i, j))
 
+    # which item a paragraph belongs to is the list's structure (like a missing bullet), not a
+    # measurement: compared with prod even when positions are judged against the spec only
+    level_findings = _levels(u, ia, ib, tol, marker)
+
     what = {"bullet indent": "marker position from the line introducing the list", "bullet gap": "space between marker and text",
+            "marker glued": "no space between the list number / bullet and its text in stage",
             "hanging indent": "wrapped lines from the item text", "bullet marker": "list marker",
             "numbering style": "how the list is numbered", "numbering format": "punctuation around the number",
             "numbering sequence": "the number does not follow the item before it"}
@@ -445,28 +475,205 @@ def _bullets(u: Unit) -> list[Finding]:
     for (role, prop, x, y), items in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         if len(items) < lcfg.get("min_lines", 1):
             continue
+        # the marker itself (added, missing, another bullet or dash, numbering, no space after it) is
+        # content; only where it sits (indent, gap, hanging indent) is layout
+        check = "content" if prop in MARKER_KINDS else "layout"
         a_idx = [k for xa, _, i, _ in items for k in ([xa["marker"], i] if xa else [i])]
         b_idx = [k for _, xb, _, j in items for k in ([xb["marker"], j] if xb else [j])]
         # link each marker to its counterpart - or, when it is missing on one side, to the spot
         # where it should be (the item's first word), so both screenshots show the same item
         pairs = [p for xa, xb, i, j in items
                  for p in [(xa["marker"] if xa else i, xb["marker"] if xb else j), (i, j)]]
-        eg = "; ".join(f"“{_item_start(A, i)}”" for _, _, i, _ in items[:3])
+        eg = "; ".join(f"“{_item_start(A, i)}”" for _, _, i, _ in items)
         text = f"[{role}] {prop} ({what[prop]}): {x} → {y} ({len(items)} items, e.g. {eg})"
         if prop == "bullet marker" and "none" in (x, y):
+            # a bullet / number added or dropped: one finding per item, so each place is listed and shown
+            added = x == "none"
+            for xa, xb, i, j in items:
+                mark = (B.words[xb["marker"]] if added else A.words[xa["marker"]]).text
+                a1, b1 = ([i] if added else [xa["marker"], i]), ([xb["marker"], j] if added else [j])
+                findings.append(Finding(
+                    check, lcfg.get("severity", {}).get("indent", "warning"),
+                    (f"{_marker_name(mark)} added in stage: “{mark}” before “{_item_start(A, i)}” (none in prod)" if added else
+                     f"{_marker_name(mark)} missing in stage: “{mark}” before “{_item_start(A, i)}” in prod, none in stage"),
+                    locs(A, a1, rcfg["max_locs"]), locs(B, b1, rcfg["max_locs"]),
+                    {"role": role, "property": "indent", "kind": prop, "baseline": x, "candidate": y, "lines": 1},
+                    types=["bullet marker", "indent", "bullet"],
+                    links=paired_locs(A, B, [(xa["marker"] if xa else i, xb["marker"] if xb else j), (i, j)], rcfg["max_locs"])))
+            continue
+        if False:
             side, d, key = ("stage", A, 0) if y == "none" else ("prod", B, 1)
             marks = ", ".join(dict.fromkeys(f"“{d.words[it[key]['marker']].text}”" for it in items))
             has = "prod" if side == "stage" else "stage"
             text = (f"[{role}] List marker missing in {side}: {marks} before the items in {has}, "
                     f"none in {side} ({len(items)} items, e.g. {eg})")
+        if prop == "marker glued":
+            marks = ", ".join(dict.fromkeys(f"“{B.words[it[1]['marker']].text}”" for it in items))
+            gap = lambda d, k, it: (d.words[it[k + 2]].bbox[0] - d.words[it[k]["marker"]].bbox[2]) / max(d.words[it[k + 2]].style.size, 1)
+            x = f"{sum(gap(A, 0, it) for it in items) / len(items):+.2f}em"
+            y = f"{sum(gap(B, 1, it) for it in items) / len(items):+.2f}em"
+            text = (f"[{role}] List number / bullet touches its text in stage: no space after {marks} "
+                    f"(gap {y} in stage, {x} in prod; {len(items)} items, e.g. {eg})")
         findings.append(Finding(
-            "layout", lcfg.get("severity", {}).get("indent", "warning"),
+            check, lcfg.get("severity", {}).get("indent", "warning"),
             text,
             locs(A, a_idx, rcfg["max_locs"]), locs(B, b_idx, rcfg["max_locs"]),
             {"role": role, "property": "indent", "kind": prop, "baseline": x, "candidate": y, "lines": len(items)},
             types=["indent", "bullet"], links=paired_locs(A, B, pairs, rcfg["max_locs"]),
         ))
+    return findings + level_findings
+
+
+_BOXES: dict[tuple, list] = {}
+
+
+def _boxes(d: Doc, page: int) -> list[tuple]:
+    """Shaded or framed rectangles on a page (callouts, notes): text in one is set by the box."""
+    key = (d.path, page)
+    if key not in _BOXES:
+        out = []
+        try:
+            import pymupdf
+            with pymupdf.open(d.path) as pdf:
+                for dr in pdf[page].get_drawings():
+                    r = dr["rect"]
+                    if r.width > 80 and r.height > 14 and (dr.get("fill") is not None or
+                                                            any(it[0] == "re" for it in dr["items"])):
+                        out.append(tuple(r))
+        except Exception:
+            pass
+        _BOXES[key] = out
+    return _BOXES[key]
+
+
+def _in_box(d: Doc, li: int) -> tuple | None:
+    b = d.lines[li].bbox
+    return next((r for r in _boxes(d, d.lines[li].page)
+                 if r[0] - 1 <= b[0] and b[2] <= r[2] + 1 and r[1] - 1 <= b[1] and b[3] <= r[3] + 1), None)
+
+
+def _shares_row(d: Doc, li: int) -> bool:
+    """Other text beside the line on the same row, or the line inside a table (it is not a
+    paragraph of its own: a cell's text sits in the cell's column, not the list's)."""
+    a = d.lines[li]
+    from . import tables
+    for t in tables._RAW.get((d.path, a.page)) or []:
+        r = t[1]
+        if r[0] - 1 <= a.bbox[0] and a.bbox[2] <= r[2] + 1 and r[1] - 1 <= a.bbox[1] and a.bbox[3] <= r[3] + 1:
+            return True
+    h = a.bbox[3] - a.bbox[1]
+    for k in range(max(0, li - 40), min(len(d.lines), li + 40)):
+        b = d.lines[k]
+        if k == li or b.page != a.page:
+            continue
+        ov = min(a.bbox[3], b.bbox[3]) - max(a.bbox[1], b.bbox[1])
+        if ov > 0.5 * min(h, b.bbox[3] - b.bbox[1]) and (b.bbox[0] >= a.bbox[2] or b.bbox[2] <= a.bbox[0]):
+            return True
+    return False
+
+
+def _owners(d: Doc, items: dict, rng: tuple[int, int], tol_em: float, is_marker) -> dict[int, int | None]:
+    """A list lays out in columns: the marker on the left, the item text on the right, and a nested
+    list's markers in its parent's text column. For each paragraph that starts a line (not an item
+    line, not a wrapped line of the paragraph above), the item whose text column it starts in - the
+    paragraph belongs to that item ("Do not use if tilted ..." set under the second bullet's text is
+    part of that bullet) - or None when it starts in no item's text column (body text)."""
+    if rng[0] >= rng[1]:
+        return {}
+    by_line = {it["line"]: t for t, it in items.items()}
+    out: dict[int, int | None] = {}
+    stack: list[int] = []
+    # x from the page's left margin: a list runs on over a page break (odd and even pages have
+    # other margins) and the paragraph at the top of the next page still belongs to its item
+    rel = lambda k: d.words[k].bbox[0] - d.left(d.words[k].page)
+    l0, l1 = d.words[rng[0]].line, d.words[rng[1] - 1].line + 1
+    for li in range(l0, l1):
+        ln = d.lines[li]
+        f = ln.first_word
+        if f < rng[0] or f >= rng[1]:
+            continue
+        tol = tol_em * max(d.words[f].style.size, 1)
+        if li in by_line:
+            t = by_line[li]
+            mx = rel(items[t]["marker"])
+            while stack and rel(items[stack[-1]]["marker"]) >= mx - tol:
+                stack.pop()  # a sibling or a shallower item closes the deeper ones
+            stack.append(t)
+            continue
+        nxt = d.lines[li + 1].first_word if li + 1 < len(d.lines) else len(d.words)
+        if nxt - f == 1 and is_marker(d.words[f].text):
+            continue  # a bullet stored as its own line
+        if _shares_row(d, li):
+            continue  # a table cell, a label beside a picture: columns of their own, not a list's
+        x = ln.bbox[0] - d.left(ln.page)
+
+        def owner_by(xof, at, st) -> int | None:
+            st = list(st)
+            while st and xof(st[-1]) > at + tol:
+                st.pop()
+            return st[-1] if st and abs(xof(st[-1]) - at) <= tol else None
+        # an item from an earlier page: margins measured on two pages may disagree, so it counts only
+        # when the page positions and the margin-relative ones say the same
+        carried = any(d.words[t].page != ln.page for t in stack)
+        if carried and owner_by(rel, x, stack) != owner_by(lambda k: d.words[k].bbox[0], ln.bbox[0], stack):
+            continue
+        while stack and rel(stack[-1]) > x + tol:
+            stack.pop()  # starts left of the item's text: not inside it
+        prev = d.lines[li - 1] if li > 0 else None
+        ended = d.words[f - 1].text[-1:] in ".:;!?。：" if f > 0 else True
+        if prev is not None and prev.block == ln.block and prev.page == ln.page and not ended:
+            continue  # the next line of a running paragraph: the hanging indent check covers it
+        own = stack[-1] if stack and abs(rel(stack[-1]) - x) <= tol else None
+        box = _in_box(d, li) if own is not None else None
+        if box is not None and _in_box(d, items[own]["line"]) != box:
+            own = None  # a note / tip box: its text is set by the box, not by the list above it
+        out[li] = own
+    return out
+
+
+def _levels(u: Unit, ia: dict, ib: dict, tol_em: float, is_marker) -> list[Finding]:
+    """A paragraph that belongs to a list item in prod (starts in that item's text column: under a
+    bullet's text, not under the number of the item above it) must belong to the same item in stage,
+    and body text must stay body text - the list's left / right columns are kept, not merged."""
+    lcfg, rcfg = u.cfg["layout"], u.cfg["report"]
+    A, B = u.a, u.b
+    oa, ob = _owners(A, ia, u.a_range, tol_em, is_marker), _owners(B, ib, u.b_range, tol_em, is_marker)
+    pair = dict(u.pairs)
+
+    def where(d: Doc, items: dict, t: int | None) -> str:
+        if t is None:
+            return "body text (no list item)"
+        mark = d.words[items[t]["marker"]].text
+        return f"the text of the “{mark}” item “{_item_start(d, t)}”"
+
+    findings = []
+    for li, own_a in oa.items():
+        f = A.lines[li].first_word
+        j = pair.get(f)
+        if j is None or not B.words[j].line_start or B.words[j].line not in ob:
+            continue
+        own_b = ob[B.words[j].line]
+        if own_a is None and own_b is None:
+            continue
+        if own_a is not None and (own_a not in pair or pair[own_a] == own_b):
+            continue  # same item (or its text is not matched: nothing to compare it with)
+        if own_a is None and own_b is not None and own_b not in pair.values():
+            continue
+        a_idx, b_idx = [f] + ([own_a] if own_a is not None else []), [j] + ([own_b] if own_b is not None else [])
+        findings.append(Finding(
+            "layout", lcfg.get("severity", {}).get("indent", "warning"),
+            f"List level differs in stage: “{_item_start(A, f, 8)}” starts under {where(A, ia, own_a)} in prod; "
+            f"in stage it starts under {where(B, ib, own_b)}",
+            locs(A, a_idx, rcfg["max_locs"]), locs(B, b_idx, rcfg["max_locs"]),
+            {"property": "indent", "kind": "list level", "lines": 1},
+            types=["list level", "indent", "bullet"],
+            links=paired_locs(A, B, [(f, j)] + ([(own_a, pair[own_a])] if own_a is not None and own_a in pair else []),
+                              rcfg["max_locs"])))
     return findings
+
+
+def _marker_name(mark: str) -> str:
+    return "List number" if any(c.isalnum() for c in mark) else "Bullet"
 
 
 def _item_start(d: Doc, i: int, n: int = 4) -> str:

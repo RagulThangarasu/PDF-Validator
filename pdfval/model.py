@@ -49,6 +49,7 @@ class Image:
     bbox: Rect
     broken: bool = False  # failed to load (web page <img> with no pixels)
     stretch: float = 1.0  # drawn shape / pixel shape ((box w/h) / (px w/h)); 1 = drawn in its own proportions
+    px: tuple = (0, 0)  # the embedded bitmap's size in pixels (0 = unknown: vector, web capture)
 
 
 @dataclass
@@ -83,6 +84,9 @@ class Doc:
     body_size: float = 0.0
     removed_lines: int = 0  # header/footer/ignored lines dropped
     raw_tables: dict | None = None  # page -> tables from a structured source (HTML DOM); None = detect in the PDF
+    # running headers / footers taken out of the text comparison, kept to compare them on their own:
+    # [{page, band ('header' | 'footer'), text, bbox, words: [(text, bbox, Style)]}]
+    furniture: list = field(default_factory=list)
 
     def left(self, page: int) -> float:
         return self.pages[page].left

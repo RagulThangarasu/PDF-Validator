@@ -103,6 +103,13 @@
   .issue .meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); }
   .issue .meta .sp { margin-left: auto; }
   .issue .msg { margin: 6px 0 10px; font-weight: 500; word-break: break-word; }
+  /* a design-spec issue: what Figma sets and what stage has, one labelled row each */
+  .msg .fs { display: flex; gap: 10px; margin-top: 4px; font-weight: 400; }
+  .msg .fs b { flex: 0 0 46px; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding-top: 2px; }
+  .msg .fs b.fig { color: var(--c-style); }
+  .msg .fs b.stg { color: var(--accent); }
+  .msg .fs b.prd { color: var(--c-structure); }
+  .msg .fgap { height: 10px; border-top: 1px dashed var(--line); margin-top: 10px; }
   .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   @media (max-width: 800px) { .pair { grid-template-columns: 1fr; } .filters input[type=text] { width: 100%; } }
   figure { margin: 0; }
@@ -279,7 +286,7 @@
 <body>
 <header class="top">
   <a class="brand" href="#/new" title="Home – new comparison" style="color:inherit;text-decoration:none"><span class="logo">⇆</span>PDF Parity</a>
-  <nav><a href="#/new" data-nav="new">New comparison</a><a href="#/runs" data-nav="runs">Runs</a></nav>
+  <nav><a href="#/new" data-nav="new">New comparison</a><a href="#/runs" data-nav="runs">Runs</a><a href="#/metadata" data-nav="metadata">Metadata</a></nav>
   <div class="theme" role="group" aria-label="Theme">
     <button data-theme-set="light">Light</button><button data-theme-set="dark">Dark</button><button data-theme-set="system" title="Follow the operating system">System</button>
   </div>
@@ -324,10 +331,55 @@ async function route() {
   const [, view, id] = path.split('/');
   document.querySelectorAll('[data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === (view || 'new') || (view === 'run' && a.dataset.nav === 'runs')));
   if (view === 'runs') return viewRuns();
+  if (view === 'metadata') return viewMetadata();
   if (view === 'run' && id) return viewRun(id, qs);
   return viewNew(qs);
 }
 addEventListener('hashchange', route);
+
+// ---------------- metadata: Document Title / Page Title of every product map in AEM vs the migration sheet
+async function viewMetadata() {
+  const st = await api('/api/metadata');
+  const r = st.result, sm = r?.summary;
+  const rank = { fail: 0, missing: 1, error: 2, case: 3, not_in_aem: 4, pass: 5 };
+  const label = { pass: 'Pass', fail: 'Mismatch', missing: 'Empty in AEM', error: 'Not readable', case: 'Case / spacing', not_in_aem: 'No map in AEM' };
+  const cls = { pass: 'pass', fail: 'fail', missing: 'fail', error: 'fail', case: 'warn', not_in_aem: 'queued' };
+  app.innerHTML = `<h1>Map metadata</h1>
+    <p class="muted">Checks every product map in AEM: <b>Document Title</b> (dc:title) = “{Product line} {Model name} user manual” and
+      <b>Page Title</b> (dc:pageTitle) = “{Product line} {Model name}”, with the product line and model name from the sheet's Model-list.</p>
+    <div class="card"><div class="row" style="gap:10px;flex-wrap:wrap;align-items:end">
+      <div><label class="f">Metadata sheet</label><select id="md-sheet">${st.sheets.map(f => `<option>${esc(f.name)}</option>`).join('') || '<option value="">— none —</option>'}</select></div>
+      <div><label class="f">&nbsp;</label><button class="btn sm" id="md-up">Upload .xlsx…</button><input type="file" id="md-file" accept=".xlsx" hidden></div>
+      <span class="spacer"></span>
+      <button class="btn primary" id="md-go" ${st.running ? 'disabled' : ''}>${r ? 'Run again' : 'Validate metadata'}</button></div>
+      <div id="md-st" class="small ${st.error ? 'err' : 'muted'}" style="margin-top:8px">${st.running ? `<div class="bar"><i style="width:${st.progress * 100}%"></i></div>${esc(st.message)}` : esc(st.error || '')}</div></div>
+    ${r?.excel ? `<div class="row" style="margin:16px 0 8px;gap:8px;flex-wrap:wrap"><b>${r.excel.rows} Excel rows</b>
+        <span class="badge b-pass">${r.excel.pass} pass</span><span class="badge b-fail">${r.excel.fail} mismatch</span>
+        <span class="badge b-fail">${r.excel.missing} empty in AEM</span><span class="badge b-warn">${r.excel.case} case / spacing</span>
+        <span class="badge">${r.excel.not_in_aem} no map in AEM</span><span class="spacer"></span>
+        <span class="small muted">${esc(r.sheet)} · ${fmtDate(r.created)}</span>
+        <a class="btn primary sm" href="/api/metadata/metadata-report.pdf">⬇ PDF report</a><a class="btn sm" href="/api/metadata/metadata-report.csv">⬇ CSV</a></div>
+      <div class="card" style="padding:0;overflow-x:auto"><table class="t"><thead><tr><th>Row</th><th>Model</th><th>Result</th><th>Expected (Excel)</th><th>In AEM</th></tr></thead><tbody>
+      ${[...r.excel_rows].sort((a, b) => rank[a.status] - rank[b.status] || a.row - b.row).map(x => `<tr><td>${x.row}</td>
+        <td><b>${esc(x.model)}</b><div class="small muted">${esc(x.category)}</div></td>
+        <td><span class="badge b-${cls[x.status]}">${label[x.status]}</span></td>
+        <td class="small">${esc(x.exp_doc)}<br>${esc(x.exp_page)}</td>
+        <td class="small">${x.maps.map(m => `<a href="${esc(m.url)}" target="_blank" rel="noopener">${esc(m.product)}</a><br>
+          <span style="color:${m.doc_status === 'pass' ? 'inherit' : m.doc_status === 'case' ? 'var(--warn)' : 'var(--fail)'}">${esc(m.doc) || '<i>(empty)</i>'}</span><br>
+          <span style="color:${m.page_status === 'pass' ? 'inherit' : m.page_status === 'case' ? 'var(--warn)' : 'var(--fail)'}">${esc(m.page) || '<i>(empty)</i>'}</span>`).join('<hr>') || '—'}</td></tr>`).join('')}
+      </tbody></table></div>` : r ? '<p class="muted">Run the check again to see the results by Excel row.</p>' : ''}`;
+  $('#md-up').onclick = () => $('#md-file').click();
+  $('#md-file').onchange = async () => {
+    const f = $('#md-file').files[0]; if (!f) return;
+    try { await fetch('/api/metadata/sheet?name=' + encodeURIComponent(f.name), { method: 'POST', body: f }); viewMetadata(); }
+    catch (e) { alert(e.message); }
+  };
+  $('#md-go').onclick = async () => {
+    try { await api('/api/metadata', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sheet: $('#md-sheet').value }) }); viewMetadata(); }
+    catch (e) { const el = $('#md-st'); el.textContent = e.message; el.className = 'small err'; }
+  };
+  if (st.running) poll = setTimeout(() => location.hash.startsWith('#/metadata') && viewMetadata(), 1200);
+}
 
 // ---------------- new comparison (landing page)
 const pick = { baseline: null, candidate: null };  // {path?, file?, name, size}
@@ -360,7 +412,13 @@ async function viewNew(qs) {
         <div class="role">Prod · reference baseline</div><h2 style="margin-top:4px">Production PDF</h2><div class="slot"></div>
       </div>
       <div class="card" id="card-candidate">
-        ${MODE === 'pdf' ? `<div class="role">Stage · candidate</div><h2 style="margin-top:4px">Stage PDF</h2><div class="slot"></div>` : `
+        ${MODE === 'pdf' ? `<div class="role">Stage · candidate</div><h2 style="margin-top:4px">Stage PDF</h2><div class="slot"></div>
+        <div style="margin-top:12px" class="row"><button class="btn" type="button" id="aem-stage-go">⤓ Find &amp; generate in AEM</button>
+          <span class="small muted">from the prod PDF's file name: finds its map, generates the Native PDF with the brand's template, downloads it here (≤ 5 min)</span></div>
+        <details style="margin-top:6px"><summary class="small">Map not found from the file name? Enter it</summary>
+          <div class="row" style="gap:8px;margin-top:6px"><input type="text" id="aem-map" placeholder="w2720i.ditamap or /content/dam/…/Maps/w2720i.ditamap">
+          <button class="btn" type="button" id="aem-map-check">Check</button></div></details>
+        <div id="aem-map-info" class="small muted" style="margin-top:6px">Templates by the map's folder: Zowie · Education (BenQ Edu) · Infra · BenQ / Business. Needs the AEM login below.</div>` : `
         <div class="role">Web page · candidate</div><h2 style="margin-top:4px">HTML page URL</h2>
         <input type="url" id="url" placeholder="https://docs.example.com/manual/sl04" value="${esc(prev?.mode === 'html' ? prev.candidate : '')}" aria-label="Web page URL">
         <p class="small muted" style="margin:8px 0 0">The page is opened in a headless browser and read from its structure (headings, text, tables, images, links).
@@ -421,7 +479,9 @@ async function viewNew(qs) {
           <div><label class="f">Font-size mismatch severity</label><select id="o-sev_font-size"><option>error</option><option>warning</option><option>info</option></select></div>
           <div><label class="f">&nbsp;</label><label><input type="checkbox" id="o-case_sensitive" checked> Case-sensitive text</label><br>
                <label><input type="checkbox" id="o-check_spacing" checked> Check spacing</label><br>
-               <label><input type="checkbox" id="o-normalize_typography"> Ignore quote/dash style (’ vs ')</label></div>
+               <label><input type="checkbox" id="o-ignore_quote_style" checked> Ignore quote / apostrophe style (haven’t vs haven't)</label><br>
+               <label><input type="checkbox" id="o-normalize_typography"> Also ignore dash style (– vs -)</label><br>
+               <label title="Off: typography, CSS and layout are checked on stage only, against the design spec (config/typography.toml). On: also report where stage's fonts, colours, indents, alignment and graphic placement differ from prod's. PDF ⇄ PDF runs only."><input type="checkbox" id="o-css_vs_prod"> Also compare CSS / layout with prod</label></div>
         </div>
         <div class="grid2" style="margin-top:14px">
           <div><label class="f">Skip sections (regex per line, on title)</label><textarea id="o-skip" rows="3" placeholder="^table of contents?$"></textarea></div>
@@ -444,11 +504,46 @@ async function viewNew(qs) {
   let files = [];
   try { files = await api('/api/files'); } catch (e) { /* listing is optional */ }
   if (token !== newToken) return;
-  renderSlot('baseline', files);
-  if (MODE === 'pdf') renderSlot('candidate', files);
+  // prod files (a "prod" folder) only in the Production dropdown, stage files only in the Stage one
+  const isStage = f => /(^|\/)stag/i.test(f.folder), isProd = f => /(^|\/)prod/i.test(f.folder);
+  renderSlot('baseline', files.filter(f => !isStage(f)));
+  if (MODE === 'pdf') renderSlot('candidate', files.filter(f => !isProd(f)));
   else $('#url').oninput = updateGo;
   $('#go').onclick = start;
   $('#aem-check').onclick = () => aemLogin(true);
+  if ($('#aem-stage-go')) {
+    const info = () => $('#aem-map-info');
+    $('#aem-map-check').onclick = async () => {  // which map and preset, and a link to open the map in AEM
+      info().textContent = 'Looking up the map in AEM…';
+      try {
+        const r = await api('/api/aem/preset', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                 body: JSON.stringify({ map: $('#aem-map').value.trim() }) });
+        info().innerHTML = `Map <b>${esc(r.map_path)}</b> → template <b>${esc(r.preset)}</b>` +
+          (r.open ? ` · <a href="${esc(r.open)}" target="_blank" rel="noopener">Open map in AEM ↗</a>` : '');
+      } catch (e) { info().textContent = e.message; }
+    };
+    $('#aem-stage-go').onclick = async () => {  // find the map, generate the stage PDF in AEM, put it in the stage slot
+      const btn = $('#aem-stage-go');
+      if (!pick.baseline) { info().textContent = 'Pick the prod PDF first: its file name tells which map to generate.'; return; }
+      btn.disabled = true;
+      try {
+        if (!(await aemLogin(false))) throw new Error('Log in to AEM first (AEM login card below).');
+        if (!pick.baseline.path) pick.baseline = { ...pick.baseline, path: await upload(pick.baseline.file, 'prod') };
+        let t = await api('/api/aem/stage', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                              body: JSON.stringify({ baseline: pick.baseline.path, map: $('#aem-map').value.trim() }) });
+        while (t.state === 'running') {
+          info().textContent = '⏳ ' + t.message + (t.preset ? ` · template ${t.preset}` : '');
+          await new Promise(r => setTimeout(r, 3000));
+          t = await api('/api/aem/stage/' + t.id);
+        }
+        if (t.state !== 'done') throw new Error(t.message);
+        pick.candidate = { path: t.path, name: t.name };
+        renderSlot('candidate', []); updateGo();
+        info().innerHTML = `✓ ${esc(t.message)} · map <b>${esc(t.map)}</b>`;
+      } catch (e) { info().textContent = '✗ ' + e.message; }
+      btn.disabled = false;
+    };
+  }
   updateGo();
   aemLoad();
 }
@@ -511,7 +606,60 @@ function renderSlot(side, files) {
     const choose = path => { const f = files.find(x => x.path === path); if (f) { pick[side] = { path: f.path, name: f.name, size: f.size }; renderSlot(side, files); updateGo(); } };
     if (sel) sel.onchange = () => choose(sel.value);
     slot.querySelector('a[data-guess]')?.addEventListener('click', e => { e.preventDefault(); choose(guess.path); });
+    if (side === 'baseline') renderLibrary(slot, f => { pick.baseline = { path: f.path, name: f.name, size: f.size }; renderSlot(side, files); updateGo(); });
   }
+}
+
+// ---------------- Prod library: PDFs extracted from the pdf-prod archives, by folder + search
+let LIB = null;
+async function renderLibrary(slot, onPick) {
+  const box = document.createElement('div');
+  box.className = 'lib';
+  box.innerHTML = `<div class="or">or pick from the prod library (pdf-prod archives)</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap"><select data-group style="flex:0 0 auto;width:auto"></select>
+      <select data-product style="flex:1 1 140px;width:auto"></select>
+      <input type="search" data-q placeholder="Search PDF name…" style="flex:1 1 160px"></div>
+    <div data-list style="max-height:240px;overflow:auto;margin-top:6px;border:1px solid var(--line,#ddd);border-radius:6px"></div>
+    <div class="small muted" data-lstat style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"></div>`;
+  slot.appendChild(box);
+  const g = box.querySelector('[data-group]'), pr = box.querySelector('[data-product]'), q = box.querySelector('[data-q]');
+  const list = box.querySelector('[data-list]'), stat = box.querySelector('[data-lstat]');
+  const draw = () => {
+    const files = LIB?.files || [];
+    const groups = [...new Set(files.map(f => f.group))];
+    const gv = g.value;
+    g.innerHTML = `<option value="">All folders</option>` + groups.map(x => `<option ${x === gv ? 'selected' : ''}>${esc(x)}</option>`).join('');
+    const inGroup = files.filter(f => !g.value || f.group === g.value);
+    const pv = pr.value, prods = [...new Set(inGroup.map(f => f.product))];
+    pr.innerHTML = `<option value="">All products (${prods.length})</option>` + prods.map(x => `<option ${x === pv ? 'selected' : ''}>${esc(x)}</option>`).join('');
+    const terms = q.value.toLowerCase().split(/\s+/).filter(Boolean);
+    const shown = inGroup.filter(f => (!pr.value || f.product === pr.value) &&
+      terms.every(t => `${f.product}/${f.sub}/${f.name}`.toLowerCase().includes(t)));
+    list.innerHTML = shown.length ? shown.slice(0, 300).map((f, i) => `<button type="button" data-i="${i}" title="${esc(f.path)}"
+        style="display:flex;width:100%;gap:8px;text-align:left;padding:6px 8px;border:0;border-bottom:1px solid var(--line,#eee);background:none;cursor:pointer;color:inherit">
+        <span>📄</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis"><b>${esc(f.name)}</b>
+        <span class="muted small"> · ${esc(f.group)}/${esc(f.product)}${f.sub ? '/' + esc(f.sub) : ''}</span></span>
+        <span class="muted small">${fmtSize(f.size)}</span></button>`).join('')
+      : `<div class="small muted" style="padding:8px">${files.length ? 'No PDF matches.' : 'No PDFs extracted yet.'}</div>`;
+    list.querySelectorAll('[data-i]').forEach(b => b.onclick = () => onPick(shown[+b.dataset.i]));
+    stat.innerHTML = `<span>${shown.length} of ${files.length} PDF(s)${shown.length > 300 ? ' (first 300 shown)' : ''}</span>` +
+      (LIB?.running ? `<span>Extracting ${LIB.done}/${LIB.total}: ${esc(LIB.current)}…</span>`
+        : LIB?.pending ? `<button class="btn sm" type="button" data-x>Extract PDFs from ${LIB.pending} archive(s)</button>` : '') +
+      (LIB?.errors?.length ? `<span class="err" title="${esc(LIB.errors.join('\n'))}">${LIB.errors.length} failed</span>` : '');
+    stat.querySelector('[data-x]')?.addEventListener('click', async () => {
+      try { LIB = { ...LIB, ...(await api('/api/library/extract', { method: 'POST' })) }; draw(); poll(); }
+      catch (e) { alert(e.message); }
+    });
+  };
+  const poll = async () => {
+    if (!box.isConnected) return;
+    LIB = await api('/api/library'); draw();
+    if (LIB.running) setTimeout(poll, 1500);
+  };
+  g.onchange = () => { pr.value = ''; draw(); };
+  pr.onchange = draw; q.oninput = draw;
+  if (LIB) draw();
+  poll();
 }
 
 function updateGo() {
@@ -664,18 +812,17 @@ async function viewRun(id, qs) {
   app.innerHTML = head + `
       <div class="ractions">
         <a class="btn primary" href="${base}index.html" target="_blank" rel="noopener">Side-by-side viewer ↗</a>
-        ${s.genuine ? `<a class="btn ${s.genuine.total ? 'danger' : ''}" href="${base}genuine-issues.pdf?download=${encodeURIComponent('genuine-issues-' + id + '.pdf')}"
-            title="Only the real problems: missing/duplicated sections, missing/broken/misplaced images, missing data, table and link problems — each with a description and prod/stage screenshots">⬇ Genuine issues (${s.genuine.total})</a>` : ''}
-        <button class="btn" data-report title="Choose the issue types, severities and parts, then download a PDF (with prod/stage screenshots) or CSV">⬇ Report…</button>
-        <a class="btn" href="/api/runs/${id}/source?side=both" title="Everything in the prod${isWeb ? '' : ' and stage'} PDF: raw data (text with fonts and positions, tables, images, links, attachments, fonts) and the document rebuilt as AEM Guides DITA source${isWeb ? '' : '; stage also gets the real topic files from AEM when you are logged in'}. Building takes a few seconds.">⬇ Source${isWeb ? ' (prod)' : ' (prod + stage)'}</a>
-        <details class="more"><summary class="btn" aria-label="More downloads">⋯</summary><div class="menu">
-          ${s.genuine ? `<a href="${base}genuine-issues.pdf?download=${encodeURIComponent('genuine-issues-' + id + '.pdf')}">⬇ Genuine issues (PDF, with screenshots)</a>
-          <a href="${base}genuine-issues.csv?download=${encodeURIComponent('genuine-issues-' + id + '.csv')}">⬇ Genuine issues (CSV / Excel)</a>` : ''}
-          ${d.site?.rows ? `<a href="${base}site-navigation.csv?download=${encodeURIComponent('site-navigation-' + id + '.csv')}">⬇ Site navigation (CSV / Excel)</a>` : ''}
-          <a href="/api/runs/${id}/source?side=baseline">⬇ Prod source (DITA + raw data)</a>
-          ${isWeb ? '' : `<a href="/api/runs/${id}/source?side=candidate">⬇ Stage source (DITA + raw data + AEM files)</a>`}
-          <a href="${base}results.json?download=results.json">results.json</a>
-          <a href="${base}junit.xml?download=junit.xml">junit.xml</a></div></details>
+        ${s.genuine ? `<a class="btn ${s.genuine.total ? 'danger' : ''}" href="${base}genuine-issues.pdf?download=${encodeURIComponent('pdf-report-' + id + '.pdf')}"
+            title="Every issue, each with a description and prod/stage screenshots">⬇ PDF report (${s.genuine.total})</a>
+        <a class="btn" href="${base}genuine-issues.csv?download=${encodeURIComponent('pdf-report-' + id + '.csv')}"
+            title="The same issues as a table (opens in Excel)">⬇ PDF report (CSV / Excel)</a>` : ''}
+        ${(() => { const n = d.sections.reduce((k, x) => k + x.findings.filter(f => f.category === 'css' && !f.genuine).length, 0);
+                   return `<a class="btn" href="${base}css-issues.pdf?download=${encodeURIComponent('css-report-' + id + '.pdf')}"
+            title="Fonts, sizes, colours, line heights and design-spec styles not in the PDF report, with screenshots">⬇ CSS report (${n})</a>`; })()}
+        ${(() => { const n = d.sections.reduce((k, x) => k + x.findings.filter(f => f.check === 'assets'
+                     || (f.types || []).some(t => ['missing image label', 'label in picture', 'text in image'].includes(t))).length, 0);
+                   return `<a class="btn" href="${base}image-issues.pdf?download=${encodeURIComponent('image-report-' + id + '.pdf')}"
+            title="Only picture issues: missing / changed / smaller or bigger / pixelated / blurred pictures, and picture labels missing in stage, with screenshots">⬇ Image report (${n})</a>`; })()}
       </div></div>
     ${job.warning ? `<div class="warnbox" role="alert"><b>⚠ Same file compared twice.</b> ${esc(job.warning)}
        <a class="btn sm" href="#/new?from=${id}">Pick another candidate</a></div>` : ''}
@@ -701,7 +848,7 @@ async function viewRun(id, qs) {
     </div>
     <div id="tab"></div>`;
   app.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { R.tab = b.dataset.tab; writeState(); renderTab(); });
-  app.querySelector('[data-report]').onclick = () => downloadReport();
+  app.querySelector('[data-report]')?.addEventListener('click', () => downloadReport());  // (only the genuine report is offered)
   app.querySelectorAll('[data-kpi]').forEach(b => b.onclick = () => {
     const k = b.dataset.kpi;
     Object.assign(R, { tab: 'issues', types: new Set(), sevs: new Set(), section: '', q: '', shown: 60, open: new Set(), sel: 0,
@@ -993,7 +1140,7 @@ function renderSite(el) {
         ${src.property ? ` · subtitle from AEM <code>${esc(src.page)}/jcr:content/${esc(src.property)}</code>` : ''}</div>
       <span class="spacer"></span>
       <div class="seg" role="group" aria-label="Rows"><button data-sf="issues" aria-pressed="${f === 'issues'}">Problems only</button><button data-sf="all" aria-pressed="${f === 'all'}">All checks</button></div>
-      <a class="btn sm" href="${base}site-navigation.csv?download=${encodeURIComponent('site-navigation-' + R.job.id + '.csv')}">⬇ CSV</a></div></div>
+</div></div>
     <div class="sitegroups">${st.groups.map(x => { const c = sm.groups[x.id]; return `<button class="s-${worst(c)}" data-sg="${x.id}" aria-pressed="${g === x.id}">
       <b>${esc(x.title)}</b><span class="n"><span style="color:var(--fail)">${c.fail} fail</span> · <span style="color:var(--warn)">${c.warn} warn</span> · ${c.pass} pass</span></button>`; }).join('')}</div>
     <div class="card" style="padding:0;overflow-x:auto"><table class="t site"><thead><tr><th>Status</th>${g ? '' : '<th>Check</th>'}<th>Item</th><th>Expected</th><th>Actual</th><th>Page</th><th>Note</th></tr></thead><tbody>
@@ -1104,10 +1251,18 @@ function renderTocPages() {
 }
 
 // a side without a printed TOC (a web page, or a PDF with bookmarks only): show its outline as a list
-// content differences: the quoted prod / stage words in red
-function msgHtml(f) {
-  return f.check !== 'content' ? esc(f.message)
-    : esc(f.message).replace(/“([^”]*)”/g, '“<b style="color:var(--c-content)">$1</b>”');
+// content differences: the quoted prod / stage words in red. A design-spec issue ("…\nFigma: …\nStage: …", or Prod: …):
+// its headline, then a Figma row and a Stage row (short: the headline only, for one-line rows)
+function msgHtml(f, short) {
+  const m = f.message || '';
+  if (!m.includes('\n')) return f.check !== 'content' ? esc(m)
+    : esc(m).replace(/“([^”]*)”/g, '“<b style="color:var(--c-content)">$1</b>”');
+  if (short) return esc(m.split('\n')[0]);
+  return m.split('\n\n').map(block => block.split('\n').map(ln => {
+    const lab = /^(Figma|Prod|Stage): /.exec(ln);
+    return lab ? `<div class="fs"><b class="${lab[1] === 'Figma' ? 'fig' : lab[1] === 'Prod' ? 'prd' : 'stg'}">${lab[1]}</b><span>${esc(ln.slice(lab[0].length))}</span></div>`
+      : `<div>${esc(ln)}</div>`;
+  }).join('')).join('<div class="fgap"></div>');
 }
 
 function outlineList(side) {
@@ -1192,16 +1347,16 @@ function renderIssues(keepScroll) {
     }
     const pa = f.baseline[0] ? 'p.' + (f.baseline[0].page + 1) : '—', pc = f.candidate[0] ? 'p.' + (f.candidate[0].page + 1) : '—';
     const tags = `${f.critical ? '<span class="badge crit">critical</span>' : ''}<span class="sevdot ${f.severity}" title="${f.severity}"></span>
-      <span class="cat" style="--kc:var(--k-${f.category})">${CAT_LABEL[f.category]}</span><span class="type">${esc(f.types.join(', '))}</span>${guidChip(f.aem, true)}`;
+      <span class="cat" style="--kc:${f.color || `var(--k-${f.category})`}">${CAT_LABEL[f.category]}</span><span class="type">${esc(f.types.join(', '))}</span>${guidChip(f.aem, true)}`;
     if (R.view === 'cards') {
-      rows.push(`<article class="issue card-issue ${f.critical ? 'is-crit' : ''}" style="border-left-color:var(--k-${f.category})">
+      rows.push(`<article class="issue card-issue ${f.critical ? 'is-crit' : ''}" style="border-left-color:${f.color || `var(--k-${f.category})`}">
         <div class="meta">${tags}<span>${esc(s.title)}</span><span class="sp">prod ${pa} ⇆ stage ${pc}</span>
           <a href="${viewerLink(f, s)}" target="_blank" rel="noopener">viewer ↗</a></div>
         <div class="msg">${msgHtml(f)}</div>${sourceHtml(f)}${shotsHtml(f, i)}</article>`);
     } else {
       const open = R.open.has(i);
-      rows.push(`<div class="issue-row ${open ? 'open' : ''} ${R.sel === i ? 'sel' : ''} ${f.critical ? 'is-crit' : ''}" data-idx="${i}" tabindex="-1" style="--kc:var(--k-${f.category})">
-        <div class="line"><span class="chev">${open ? '▾' : '▸'}</span>${tags}<span class="m">${msgHtml(f)}</span>
+      rows.push(`<div class="issue-row ${open ? 'open' : ''} ${R.sel === i ? 'sel' : ''} ${f.critical ? 'is-crit' : ''}" data-idx="${i}" tabindex="-1" style="--kc:${f.color || `var(--k-${f.category})`}">
+        <div class="line"><span class="chev">${open ? '▾' : '▸'}</span>${tags}<span class="m">${msgHtml(f, true)}</span>
           <span class="where">${esc(s.title)}</span><span class="pages">${pa} ⇆ ${pc}</span></div>
         ${open ? `<div class="detail">${sourceHtml(f)}${shotsHtml(f, i)}<div class="dactions"><a class="btn sm" href="${viewerLink(f, s)}" target="_blank" rel="noopener">Open this issue in the viewer ↗</a>
           <button class="btn sm" data-sec="${s.id}">Only this section</button><span class="muted small">#${f.id}</span></div></div>` : ''}
@@ -1346,7 +1501,7 @@ function openLightbox(i) {
     i = (k + current.length) % current.length;
     const { f, s } = current[i], sh = f.shots || {};
     lb.innerHTML = `<div class="lb-head"><span class="badge b-${f.severity}">${f.severity}</span><b>${CAT_LABEL[f.category]} · ${esc(f.types.join(', '))}</b>
-      <span class="msg">${esc(s.title)} — ${esc(f.message)}</span><span class="small">${i + 1} / ${current.length} · ← → to browse · Esc to close</span>
+      <span class="msg">${esc(s.title)} — ${esc(f.message.split('\n')[0])}</span><span class="small">${i + 1} / ${current.length} · ← → to browse · Esc to close</span>
       <button class="btn sm" data-x>Close</button></div>
       <div class="lb-body"><figure><figcaption>Prod · p.${sh.baseline_page ?? '?'}${kindNote(sh.baseline_kind)}</figcaption>${sh.baseline ? `<img src="${base}${sh.baseline}" alt="">` : ''}</figure>
       <figure><figcaption>Stage · p.${sh.candidate_page ?? '?'}${kindNote(sh.candidate_kind)}</figcaption>${sh.candidate ? `<img src="${base}${sh.candidate}" alt="">` : ''}</figure></div>`;

@@ -54,7 +54,7 @@ def _style(span) -> Style:
     return Style(family, weight, italic, round(span["size"], 1), f"#{span['color']:06x}")
 
 
-def _line_words(line) -> list[tuple[str, list[float], Style, int | None]]:
+def _line_words(line, decode: dict | None = None) -> list[tuple[str, list[float], Style, int | None]]:
     """Split a rawdict line into words; a word may cross span boundaries.
     The 4th item is the number of whitespace chars after the word (None at line end, 0 = glued).
     In scripts written without spaces (Chinese, Japanese, Thai, ...) every character is a word
@@ -80,6 +80,8 @@ def _line_words(line) -> list[tuple[str, list[float], Style, int | None]]:
             c = ch["c"]
             if symbols:
                 c = symbols.get(c, c)
+            if decode:  # a glyph of a font without a Unicode map, read back by OCR (glyphs.py)
+                c = decode.get((span["font"], c), c)
             if c.isspace():
                 if cur:
                     out.append(cur)
@@ -116,7 +118,94 @@ def _line_words(line) -> list[tuple[str, list[float], Style, int | None]]:
     return [tuple(w) for w in out]
 
 
+def _rejoin(lines: list) -> list:
+    """Lines of a block with fonts read back by glyphs.py: text extraction took a glyph number
+    that happens to be a combining mark ("ി") for a zero-width character and ended the line after
+    it, mid-row. Such a glyph gets an em of width back and the row is one line again."""
+    out = []
+    for line in lines:
+        for span in line["spans"]:
+            for ch in span["chars"]:
+                x0, y0, x1, y1 = ch["bbox"]
+                if x1 - x0 < 0.1 * span["size"] and not ch["c"].isspace():
+                    ch["bbox"] = (x0, y0, x0 + span["size"], y1)
+        if out and line["spans"] and out[-1]["spans"]:
+            prev = out[-1]
+            size = max(prev["spans"][-1]["size"], line["spans"][0]["size"])
+            last = prev["spans"][-1]["chars"][-1]["bbox"] if prev["spans"][-1]["chars"] else prev["bbox"]
+            first = line["spans"][0]["chars"][0]["bbox"] if line["spans"][0]["chars"] else line["bbox"]
+            if abs(prev["spans"][-1]["origin"][1] - line["spans"][0]["origin"][1]) <= 0.2 * size \
+                    and -0.2 * size <= first[0] - last[2] <= 0.6 * size:
+                prev["spans"] = prev["spans"] + line["spans"]
+                b = prev["bbox"]
+                prev["bbox"] = (min(b[0], line["bbox"][0]), min(b[1], line["bbox"][1]),
+                                max(b[2], line["bbox"][2]), max(b[3], line["bbox"][3]))
+                continue
+        out.append(dict(line))
+    return out
+
+
 _RTL = re.compile("[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]")
+
+
+def _column_order(lines: list, width: float, tables: list) -> list:
+    """Read a page set in two columns one column at a time. Text extraction goes by height, so
+    it interleaves the columns ("9. Filmmaker", then "21. Picture mode" from the right column,
+    then "Switches Picture Mode ..."), and the words no longer line up with a one-column stage.
+    A gutter is a vertical line in the middle of the page (30-70 % of its width) that no text
+    line crosses while a good amount of text sits on both sides of it, side by side. Lines that
+    cross it (a full-width heading, a note) and tables split the page into bands; inside each
+    band the left column is read before the right one. Pages without such a gutter keep their order."""
+    if len(lines) < 8:
+        return lines
+    in_table = lambda b: any(t[0] - 1 <= (b[0] + b[2]) / 2 <= t[2] + 1 and t[1] - 1 <= (b[1] + b[3]) / 2 <= t[3] + 1
+                             for t in tables)
+    body = [ln for ln in lines if not in_table(ln[1])]
+    best = None
+    for x in range(int(width * 0.3), int(width * 0.7), 2):
+        left = [ln for ln in body if ln[1][2] <= x]
+        right = [ln for ln in body if ln[1][0] >= x]
+        cross = [ln for ln in body if ln[1][0] < x < ln[1][2]]
+        lc, rc = sum(len(ln[2]) for ln in left), sum(len(ln[2]) for ln in right)
+        if lc < 120 or rc < 120 or len(cross) > 0.15 * len(body):
+            continue
+        # side by side: the two columns share most of their height
+        ly, ry = (min(ln[1][1] for ln in left), max(ln[1][3] for ln in left)), (min(ln[1][1] for ln in right), max(ln[1][3] for ln in right))
+        overlap = min(ly[1], ry[1]) - max(ly[0], ry[0])
+        if overlap < 0.5 * min(ly[1] - ly[0], ry[1] - ry[0]):
+            continue
+        score = min(lc, rc) - 40 * len(cross)
+        if best is None or score > best[0]:
+            best = (score, x)
+    if best is None:
+        return lines
+    x = best[1]
+    # a band ends at a line crossing the gutter, a table, a heading (clearly larger type than the page's
+    # text) and at a gap across the whole page (a full-width picture between two lists): "1.-14. | 15.-25."
+    # above a picture and "26.-30." below it are two bands, not one long left column
+    heights = sorted(ln[1][3] - ln[1][1] for ln in lines)
+    typical = heights[len(heights) // 2] if heights else 12
+    heading = lambda ln: ln[1][3] - ln[1][1] >= 1.35 * typical and len(ln[2]) <= 80
+    spans = lambda ln: in_table(ln[1]) or ln[1][0] < x < ln[1][2] or heading(ln)
+    out, band = [], []
+
+    def flush():
+        band.sort(key=lambda ln: (ln[1][0] >= x, ln[1][1], ln[1][0]))
+        out.extend(band)
+        band.clear()
+    bottom = None
+    for ln in sorted(lines, key=lambda ln: (ln[1][1], ln[1][0])):
+        if spans(ln):
+            flush()
+            out.append(ln)
+            bottom = None
+            continue
+        if bottom is not None and ln[1][1] - bottom > 2.5 * typical:  # nothing in either column across this gap
+            flush()
+        band.append(ln)
+        bottom = max(bottom if bottom is not None else ln[1][3], ln[1][3])
+    flush()
+    return out
 
 
 def _table_order(lines: list, found: list) -> list:
@@ -154,14 +243,27 @@ def _table_order(lines: list, found: list) -> list:
     return out
 
 
-def load(path: str, label: str, cfg: dict) -> Doc:
+# a page number as printed: "12", "- 12 -", "Page 12", "12 / 60", "12 of 60", roman "iv"
+_PAGE_NO = re.compile(r"^\W*(?:page\s*)?(?:\d{1,4}|[ivxlc]{1,7})(?:\s*(?:/|of)\s*\d{1,4})?\W*$", re.I)
+
+
+def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
+    """reference: the other document of the comparison, to read glyphs of fonts without a
+    Unicode map by their shape (glyphs.py)."""
     ecfg, ccfg = cfg["extract"], cfg["content"]
     ignore_re = [re.compile(p) for p in ecfg.get("ignore_patterns", [])]
     ignore_tokens = set(ccfg.get("ignore_tokens", []))
     case = ccfg.get("case_sensitive", True)
-    typo = ccfg.get("normalize_typography", False)
+    # ’ vs ' (and “ ” vs ") is a font / typesetting choice, not a content change: ignored by default;
+    # normalize_typography also folds the dash variants (– — vs -)
+    typo = True if ccfg.get("normalize_typography", False) else "quotes" if ccfg.get("ignore_quote_style", True) else False
 
     pdf = pymupdf.open(path)
+    from . import glyphs
+    try:
+        decode = glyphs.decoder(pdf, path, cfg, reference)
+    except Exception:  # reading glyphs back is a repair: never let it stop the extraction
+        decode = {}
     pages: list[PageInfo] = []
     raw_lines: list[tuple[int, tuple, str, list, int]] = []  # page, bbox, text, words, block no
     images: list[Image] = []
@@ -172,9 +274,11 @@ def load(path: str, label: str, cfg: dict) -> Doc:
         seen = set()
         first = len(raw_lines)
         data = page.get_text("rawdict", clip=clip, sort=True)
+        if decode:
+            glyphs.restore(page, data, decode)
         for bno, block in enumerate(data["blocks"]):
-            for line in block.get("lines", []):
-                words = _line_words(line)
+            for line in (_rejoin(block.get("lines", [])) if decode else block.get("lines", [])):
+                words = _line_words(line, decode)
                 if not words:
                     continue
                 text = "".join(w[0] + ("" if w[3] == 0 else " ") for w in words).rstrip()
@@ -183,10 +287,14 @@ def load(path: str, label: str, cfg: dict) -> Doc:
                     continue
                 seen.add(key)
                 raw_lines.append((pno, tuple(line["bbox"]), text, words, bno))
+        found = None
         if ecfg.get("table_reading_order", True):
             from .checks import tables as tmod
             found = tmod.detect(page)
             tmod._RAW[(path, pno)] = found  # the table check reuses the detection
+        if ecfg.get("column_reading_order", True):
+            raw_lines[first:] = _column_order(raw_lines[first:], page.rect.width, [f[1] for f in found or []])
+        if found is not None:
             raw_lines[first:] = _table_order(raw_lines[first:], found)
         for info in page.get_image_info():
             box = pymupdf.Rect(info["bbox"])
@@ -196,7 +304,7 @@ def load(path: str, label: str, cfg: dict) -> Doc:
                 upright = abs(b) < 1e-6 and abs(c) < 1e-6  # rotated/sheared: box shape is not comparable
                 px = info.get("width", 0) / max(info.get("height", 0), 1)
                 stretch = (box.width / max(box.height, 1e-6)) / px if upright and px else 1.0
-                images.append(Image(pno, tuple(r), stretch=stretch))
+                images.append(Image(pno, tuple(r), stretch=stretch, px=(info.get("width", 0), info.get("height", 0))))
 
     # --- drop running headers/footers: same text (digits masked) at same y on many pages
     removed = set()
@@ -211,6 +319,58 @@ def load(path: str, label: str, cfg: dict) -> Doc:
             k = (re.sub(r"\d+", "#", normalize.clean(text).lower()), round(bbox[1] / pages[pno].height * 100))
             if k in hot:
                 removed.add(i)
+        # the rest of a running header / footer: text on the same line as a removed page number, in the
+        # page's top or bottom band - "5  Important safety instructions" names the chapter, so it
+        # repeats on that chapter's pages only, too few to count as repeating on its own
+        band = ecfg.get("header_footer_band", 0.12)
+        edge = lambda pno, b: b[1] >= (1 - band) * pages[pno].height or b[3] <= band * pages[pno].height
+        marks = defaultdict(list)
+        for i in removed:
+            pno, bbox = raw_lines[i][0], raw_lines[i][1]
+            if edge(pno, bbox):
+                marks[pno].append(bbox)
+        beside, seen_on = [], defaultdict(set)
+        for i, (pno, bbox, text, _, _) in enumerate(raw_lines):
+            if i in removed or not edge(pno, bbox):
+                continue
+            cy = (bbox[1] + bbox[3]) / 2
+            if any(abs(cy - (m[1] + m[3]) / 2) <= max(3.0, (m[3] - m[1]) / 2) for m in marks[pno]):
+                key = re.sub(r"\d+", "#", normalize.clean(text).lower())
+                beside.append((i, key))
+                seen_on[key].add(pno)
+        # only text that runs beside the page number on several pages, or names a chapter of the PDF's
+        # bookmarks (the footer of a one-page chapter): a one-off line there may be content
+        chapters = {re.sub(r"\d+", "#", normalize.clean(t).lower()) for _, t, _ in pdf.get_toc(simple=True)}
+        removed.update(i for i, key in beside if len(seen_on[key]) >= 2 or key.strip("# ") in chapters)
+    # the stripped header / footer lines, kept for the header / footer comparison (checks/footer.py);
+    # a bare page number in the band counts even when it did not repeat enough to be stripped
+    band_f = ecfg.get("header_footer_band", 0.12)
+    furniture = []
+    lowest, highest = defaultdict(float), defaultdict(lambda: 1e9)  # the outermost text line of each page
+    for i, (pno, bbox, text, _, _) in enumerate(raw_lines):
+        if not any(r.search(text) for r in ignore_re):
+            lowest[pno], highest[pno] = max(lowest[pno], bbox[1]), min(highest[pno], bbox[3])
+
+    def bare_page_no(pno, bbox, text, where) -> bool:
+        """A page number on its own: the page's lowest (footer) / highest (header) line, not a list marker."""
+        t = normalize.clean(text)
+        outer = bbox[1] >= lowest[pno] - 1 if where == "footer" else bbox[3] <= highest[pno] + 1
+        return outer and bool(_PAGE_NO.match(t)) and not t.endswith(".") and not re.fullmatch(r"[IVXLC]+", t)
+
+    for i, (pno, bbox, text, wl, _) in enumerate(raw_lines):
+        H = pages[pno].height
+        where = "footer" if bbox[1] >= (1 - band_f) * H else "header" if bbox[3] <= band_f * H else None
+        if where and (i in removed or bare_page_no(pno, bbox, text, where)) and not any(r.search(text) for r in ignore_re):
+            furniture.append({"page": pno, "band": where, "text": normalize.clean(text), "bbox": tuple(bbox),
+                              "words": [(t, tuple(box), st) for t, box, st, _, _ in wl], "stripped": i in removed})
+    # a bare number that was not stripped is a page number only where the document prints its page numbers:
+    # at the same height on at least 3 other pages (not a callout number in a drawing near the page edge)
+    height = lambda f: round(f["bbox"][1] / pages[f["page"]].height * 100)
+    spots = defaultdict(int)
+    for f in furniture:
+        if _PAGE_NO.match(f["text"]):
+            spots[(f["band"], height(f))] += 1
+    furniture = [f for f in furniture if f["stripped"] or spots[(f["band"], height(f))] >= 4]
     for i, (_, _, text, _, _) in enumerate(raw_lines):
         if any(r.search(text) for r in ignore_re):
             removed.add(i)
@@ -249,7 +409,8 @@ def load(path: str, label: str, cfg: dict) -> Doc:
 
     doc = Doc(path, label, pages, words, lines, images,
               [(lvl, t, p) for lvl, t, p in pdf.get_toc(simple=True)],
-              removed_lines=len(removed))
+              removed_lines=len(removed), furniture=furniture)
+    doc.decoded = decode.get("__stats__") if decode else None
     _measure(doc)
     return doc
 

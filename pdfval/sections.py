@@ -16,7 +16,25 @@ def build_anchors(doc: Doc, cfg: dict) -> list[Anchor]:
     else:
         anchors = _from_headings(doc)
     skip = [re.compile(p, re.I) for p in scfg.get("skip", [])]
-    return [a for a in anchors if not any(s.search(a.norm) for s in skip)]
+    anchors = [a for a in anchors if not any(s.search(a.norm) for s in skip)]
+    if not scfg.get("front_matter", False):
+        anchors = _drop_cover(doc, anchors, scfg.get("cover_max_words", 40))
+    return anchors
+
+
+def _drop_cover(doc: Doc, anchors: list[Anchor], max_words: int) -> list[Anchor]:
+    """Headings / bookmarks on the cover page (the product code and manual title on page 1, the real
+    chapters on later pages) are front matter, not sections: comparing them would report the cover as
+    missing or changed sections. Only when the cover holds just a few words and chapters follow."""
+    later = [a for a in anchors if a.page > 0]
+    if not later or len(later) == len(anchors) or len(doc.pages) <= 2:
+        return anchors
+    if sum(1 for w in doc.words if w.page == 0) > max_words:
+        return anchors
+    # a cover has no running text: no body-size line of a few words (a paragraph starts a real section)
+    if any(ln.page == 0 and abs(ln.size - doc.body_size) <= 0.6 and len(ln.text.split()) >= 5 for ln in doc.lines):
+        return anchors
+    return later
 
 
 def _from_outline(doc: Doc, scfg: dict) -> list[Anchor]:
@@ -48,6 +66,8 @@ def _from_outline(doc: Doc, scfg: dict) -> list[Anchor]:
             anchors.append(Anchor(title.strip(), norm, level, ln.page, ln.bbox[1], ln.first_word))
             min_line = li + 1
         else:  # heading text not found: anchor at top of bookmarked page
+            if not doc.lines:
+                break  # no text left at all (a scanned PDF, or everything was page furniture)
             li = next((i for i in range(min_line, len(doc.lines)) if doc.lines[i].page >= page - 1),
                       len(doc.lines) - 1)
             ln = doc.lines[li]
@@ -65,8 +85,23 @@ def _from_headings(doc: Doc) -> list[Anchor]:
                    ln.page, ln.bbox[1], ln.first_word) for ln in heads]
 
 
-def match_anchors(a: list[Anchor], b: list[Anchor], cfg: dict) -> list[tuple[int, int, float]]:
-    """Order-preserving fuzzy alignment (LCS / Needleman-Wunsch without gap cost)."""
+def _text_after(doc, an: Anchor, end: int | None = None, n: int = 60) -> set:
+    """The words that follow a heading up to the next heading (its section's opening text), for telling
+    same-titled headings apart."""
+    if doc is None or not an.located:
+        return set()
+    out, k, end = [], an.word, len(doc.words) if end is None else end
+    while k < end and len(out) < n:
+        if doc.words[k].norm:
+            out.append(doc.words[k].norm.lower())
+        k += 1
+    return set(out[len(an.norm.split()):])  # without the heading's own words
+
+
+def match_anchors(a: list[Anchor], b: list[Anchor], cfg: dict, doc_a=None, doc_b=None) -> list[tuple[int, int, float]]:
+    """Order-preserving fuzzy alignment (LCS / Needleman-Wunsch without gap cost).
+    A title found more than once on a side (a sub-heading "WAN" inside "Information" and the "WAN"
+    chapter itself) is paired with the heading whose opening text matches: a small bonus by content."""
     scfg = cfg["sections"]
     thr = scfg.get("title_match_threshold", 0.85)
     aliases = {normalize.title(k): normalize.title(v) for k, v in scfg.get("aliases", {}).items()}
@@ -80,17 +115,33 @@ def match_anchors(a: list[Anchor], b: list[Anchor], cfg: dict) -> list[tuple[int
 
     n, m = len(a), len(b)
     S = [[sim(a[i], b[j]) for j in range(m)] for i in range(n)]
-    W = lambda x: 1.0 if x == 1.0 else 0.45 * x  # exact titles outweigh fuzzy ones
+    # content bonus (< 0.3: never outweighs a title match) for titles that repeat on either side
+    from collections import Counter as _C
+    ca, cb = _C(x.norm for x in a), _C(y.norm for y in b)
+    bonus: dict[tuple[int, int], float] = {}
+    if doc_a is not None and doc_b is not None:
+        ta: dict[int, set] = {}
+        tb: dict[int, set] = {}
+        nxt = lambda anchors, x: min((y.word for y in anchors if y.located and y.word > x.word), default=None)
+        for i in range(n):
+            for j in range(m):
+                if S[i][j] and (ca[a[i].norm] > 1 or cb[b[j].norm] > 1):
+                    wa = ta.setdefault(i, _text_after(doc_a, a[i], nxt(a, a[i])))
+                    wb = tb.setdefault(j, _text_after(doc_b, b[j], nxt(b, b[j])))
+                    if wa and wb:
+                        bonus[(i, j)] = 0.25 * len(wa & wb) / max(1, min(len(wa), len(wb)))
+    W0 = lambda x: 1.0 if x == 1.0 else 0.45 * x  # exact titles outweigh fuzzy ones
+    W = lambda x, i=None, j=None: W0(x) + bonus.get((i, j), 0.0)
     dp = [[0.0] * (m + 1) for _ in range(n + 1)]
     for i in range(n - 1, -1, -1):
         for j in range(m - 1, -1, -1):
             best = max(dp[i + 1][j], dp[i][j + 1])
             if S[i][j]:
-                best = max(best, dp[i + 1][j + 1] + W(S[i][j]))
+                best = max(best, dp[i + 1][j + 1] + W(S[i][j], i, j))
             dp[i][j] = best
     pairs, i, j = [], 0, 0
     while i < n and j < m:
-        if S[i][j] and dp[i][j] == dp[i + 1][j + 1] + W(S[i][j]):
+        if S[i][j] and dp[i][j] == dp[i + 1][j + 1] + W(S[i][j], i, j):
             pairs.append((i, j, S[i][j]))
             i, j = i + 1, j + 1
         elif dp[i + 1][j] >= dp[i][j + 1]:
