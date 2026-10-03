@@ -71,7 +71,38 @@ def main(argv: list[str] | None = None) -> int:
     md.add_argument("--lang", default="en", help="language folder of the maps in AEM")
     md.add_argument("--config", help="TOML overrides merged over config/default.toml")
 
+    dp = sub.add_parser("aem-pdfs", help="download the PDF of every product map in AEM, one folder per product")
+    dp.add_argument("--out", default="aem-map-pdfs", help="download folder")
+    dp.add_argument("--lang", help="only this language folder (default: all languages)")
+    dp.add_argument("--all-versions", action="store_true", help="also every other PDF generated from each map")
+    dp.add_argument("--generate", action="store_true",
+                    help="generate a NEW PDF of every map in AEM with its brand's preset (Education: BenQ EDU With Image, "
+                         "Consumer/Business: BenQ With Image, ZOWIE: Zowie, INFTYLAB: INFTY; Arabic maps: '<preset> Arabic') "
+                         "and download it")
+    dp.add_argument("--parallel", type=int, default=3, help="maps generated at the same time (--generate)")
+    dp.add_argument("--config", help="TOML overrides merged over config/default.toml")
+
     args = ap.parse_args(argv)
+    if args.cmd == "aem-pdfs":
+        import os
+        from . import aem, aem_pdfs
+        from .app.server import _keychain_get
+        acfg = aem.merge_settings(engine.load_config(args.config).get("aem", {}), _saved_aem_settings())
+        acfg["password"] = os.environ.get("PDFVAL_AEM_PASSWORD") or _keychain_get(acfg.get("user", ""))
+        if args.generate:
+            recs = aem_pdfs.generate(acfg, args.out, args.lang, parallel=args.parallel)
+            bad = [r for r in recs if not r["files"]]
+            print(f"{len(recs)} maps: {len(recs) - len(bad)} new PDF(s) generated and saved to {args.out}/ · {len(bad)} failed")
+            for r in bad:
+                print(f"  failed: {r['map']}  [{r['preset']}]  {r['error']}")
+            return 1 if bad else 0
+        recs = aem_pdfs.run(acfg, args.out, args.lang, args.all_versions)
+        n = sum(len(r["files"]) for r in recs)
+        bad = [r for r in recs if not r["files"]]
+        print(f"{len(recs)} maps: {n} PDF(s) saved to {args.out}/ · {len(bad)} map(s) without a PDF")
+        for r in bad:
+            print(f"  no PDF: {r['map']}  ({r['error']})")
+        return 0
     if args.cmd == "metadata":
         import os
         from . import aem, metadata

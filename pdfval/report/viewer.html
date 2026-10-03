@@ -70,6 +70,13 @@
   .hl.structure { border-color: var(--c-structure); background: rgb(37 99 235 / .10); }
   .hl.at { border-width: 0; border-top: 3px dashed; background: none; height: 0 !important; }
   .hl.focus { outline: 3px solid #facc15; outline-offset: 2px; animation: pulse 1s ease 2; z-index: 3; }
+  /* the issue's description written beside its box, on both PDFs (same number on both sides) */
+  .note { position: absolute; z-index: 4; max-width: 340px; font: 10.5px/1.35 system-ui, sans-serif; color: #111;
+          background: rgb(255 255 255 / .96); border: 1px solid #d0d4da; border-left: 3px solid var(--nc, #e11d48);
+          border-radius: 3px; padding: 3px 6px; white-space: pre-line; cursor: pointer; box-shadow: 0 1px 3px rgb(0 0 0 / .15); }
+  .note b { color: var(--nc, #e11d48); }
+  .note.focus { outline: 2px solid #facc15; z-index: 5; }
+  body.notes-off .note { display: none; }
   @keyframes pulse { 50% { outline-color: transparent; } }
   .sec-marker { position: absolute; left: -10px; right: -10px; border-top: 2px solid var(--accent); z-index: 1; pointer-events: none; }
   .sec-marker span { position: absolute; left: 0; top: -18px; background: var(--accent); color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 3px 3px 0 0; white-space: nowrap; }
@@ -118,6 +125,7 @@
   <div class="stats" id="stats"></div>
   <button class="chip panel" id="open-left" aria-pressed="false" title="Show / hide the sections list ([)">☰ Sections</button>
   <button class="chip sync" id="sync" aria-pressed="true" title="Scroll both PDFs together, aligned by matching text (s)">⇅ Sync scroll</button>
+  <button class="chip sync" id="notes" aria-pressed="true" title="Write each issue's description beside its box on both PDFs">✎ Issue notes</button>
   <label class="chip" title="Fit width: each document's pages fill their pane. Same text size: stage is drawn so its body text is as big as prod's (never wider than the pane)">Scale
     <select id="scale" style="border:0;background:none;font:inherit"><option value="fit">Fit width</option><option value="text">Same text size</option></select></label>
   <div class="toggles" id="check-toggles"></div>
@@ -218,15 +226,27 @@ class Pane {
     d.innerHTML = `<span>${esc(label)}</span>`;
     pg.div.appendChild(d);
   }
-  clear() { this.el.querySelectorAll('.hl,.sec-marker,.sec-end').forEach(n => n.remove()); }
-  box(loc, cls, fi, title) {
+  clear() { this.el.querySelectorAll('.sec-marker,.sec-end').forEach(n => n.remove()); }
+  clearBoxes() { this.el.querySelectorAll('.hl,.note').forEach(n => n.remove()); }
+  box(loc, cls, fi, title, sid, note) {
     const pg = this.pages[loc.page]; if (!pg) return;
     const s = pg.scale, b = loc.bbox, pad = 2, d = document.createElement('div');
-    d.className = 'hl ' + cls; d.dataset.f = fi; d.title = title;
+    d.className = 'hl ' + cls; d.dataset.f = fi; d.dataset.s = sid; d.title = title;
     Object.assign(d.style, { left: b[0] * s - pad + 'px', top: b[1] * s - pad + 'px',
       width: (b[2] - b[0]) * s + 2 * pad + 'px', height: (b[3] - b[1]) * s + 2 * pad + 'px' });
-    d.onclick = () => focusFinding(fi);
+    const open = () => openFinding(sid, fi);
+    d.onclick = open;
     pg.div.appendChild(d);
+    if (note) {  // the description, under the box (above it when the box is near the page bottom)
+      const n = document.createElement('div');
+      n.className = 'note'; n.dataset.f = fi; n.dataset.s = sid; n.innerHTML = note.html;
+      n.style.setProperty('--nc', note.color);
+      const below = b[3] * s + 4, room = pg.div.clientHeight - below;
+      Object.assign(n.style, { left: Math.max(0, Math.min(b[0] * s, pg.div.clientWidth - 340)) + 'px' },
+                    room > 60 ? { top: below + 'px' } : { bottom: pg.div.clientHeight - b[1] * s + 4 + 'px' });
+      n.onclick = open;
+      pg.div.appendChild(n);
+    }
   }
   marker(pos, label, cls = 'sec-marker') {
     const pg = this.pages[pos.page]; if (!pg) return null;
@@ -367,7 +387,7 @@ async function layout() {
 $('#scale').onchange = async e => {
   SCALE_MODE = e.target.value;
   try { localStorage.setItem('pdfval.scale', SCALE_MODE); } catch (err) { /* storage blocked */ }
-  await layout();
+  await layout(); drawAll();
   buildSync();
   if (state.current) await goto(state.current.id);
 };
@@ -385,6 +405,7 @@ function header() {
     const c = b.dataset.check, on = !state.cats.has(c);
     on ? state.cats.add(c) : state.cats.delete(c);
     b.setAttribute('aria-pressed', on);
+    drawAll();
     if (state.current) goto(state.current.id, { keepScroll: true });
   };
   $('#name-a').textContent = DATA.meta.baseline.path.split('/').pop();
@@ -439,14 +460,7 @@ async function goto(id, opts = {}) {
   $(`.sec[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
   $('#cur-a').textContent = '§ ' + s.title;
   $('#cur-b').textContent = '§ ' + s.candidate_title;
-  A.clear(); B.clear();
-  s.findings.forEach((f, i) => {
-    if (!state.cats.has(f.category)) return;
-    f.baseline.forEach(l => A.box(l, f.check, i, f.message));
-    f.candidate.forEach(l => B.box(l, f.check, i, f.message));
-    if (!f.baseline.length && f.baseline_at) A.box(f.baseline_at, f.check + ' at', i, 'Not in baseline — aligned position');
-    if (!f.candidate.length && f.candidate_at) B.box(f.candidate_at, f.check + ' at', i, 'Not in candidate — aligned position');
-  });
+  A.clear(); B.clear();  // section markers; the issue boxes of every section stay drawn (drawAll)
   const ma = A.marker(s.baseline.start, s.title), mb = B.marker(s.candidate.start, s.candidate_title);
   A.marker(s.baseline.end, '', 'sec-end'); B.marker(s.candidate.end, '', 'sec-end');
   if (!opts.keepScroll)
@@ -455,12 +469,43 @@ async function goto(id, opts = {}) {
   return { id, baselineVisible: A.visible(ma), candidateVisible: B.visible(mb), status: s.status, findings: s.findings.length };
 }
 
+// every issue of every section on both PDFs, with its description beside the box: scrolling page by page
+// shows the same issues on both sides, whichever section is selected
+const NOTE_COLOR = { content: '#e11d48', style: '#7c3aed', layout: '#ea580c', assets: '#0d9488', tables: '#0284c7',
+                     integrity: '#b91c1c', structure: '#2563eb', toc: '#9333ea' };
+function drawAll() {
+  A.clearBoxes(); B.clearBoxes();
+  for (const s of DATA.sections) s.findings.forEach((f, i) => {
+    if (!state.cats.has(f.category)) return;
+    const num = f.id || `${s.id}-${i + 1}`;
+    const note = { color: NOTE_COLOR[f.check] || '#e11d48',
+                   html: `<b>${esc(num)} · ${esc((f.types || [f.check]).join(', '))}</b>\n${esc(f.message)}` };
+    f.baseline.forEach((l, k) => A.box(l, f.check, i, f.message, s.id, k === 0 ? note : null));
+    f.candidate.forEach((l, k) => B.box(l, f.check, i, f.message, s.id, k === 0 ? note : null));
+    if (!f.baseline.length && f.baseline_at) A.box(f.baseline_at, f.check + ' at', i, 'Not in baseline — aligned position', s.id,
+                                                  { ...note, html: note.html + '\n(not in prod – where it would be)' });
+    if (!f.candidate.length && f.candidate_at) B.box(f.candidate_at, f.check + ' at', i, 'Not in candidate — aligned position', s.id,
+                                                    { ...note, html: note.html + '\n(not in stage – where it would be)' });
+  });
+}
+
+async function openFinding(sid, i) {
+  if (!state.current || state.current.id !== sid) await goto(sid, { keepScroll: true });
+  return focusFinding(i);
+}
+
+$('#notes').onclick = () => {
+  const on = document.body.classList.toggle('notes-off');
+  $('#notes').setAttribute('aria-pressed', !on);
+};
+
 async function focusFinding(i) {
   const s = state.current, f = s && s.findings[i]; if (!f) return;
   state.finding = i; renderSide();
   $(`.finding[data-f="${i}"]`)?.scrollIntoView({ block: 'nearest' });
-  document.querySelectorAll('.hl.focus').forEach(n => n.classList.remove('focus'));
-  document.querySelectorAll(`.hl[data-f="${i}"]`).forEach(n => n.classList.add('focus'));
+  document.querySelectorAll('.hl.focus,.note.focus').forEach(n => n.classList.remove('focus'));
+  document.querySelectorAll(`.hl[data-s="${CSS.escape(s.id)}"][data-f="${i}"],.note[data-s="${CSS.escape(s.id)}"][data-f="${i}"]`)
+    .forEach(n => n.classList.add('focus'));
   const la = f.baseline[0] || f.baseline_at, lb = f.candidate[0] || f.candidate_at;
   await Promise.all([
     la ? A.scrollTo(la.page, la.bbox[1], true) : A.scrollTo(s.baseline.start.page, s.baseline.start.y, true),
@@ -494,7 +539,7 @@ function togglePanel(side, open) {
   PANEL_T = setTimeout(async () => {
     if (!window.pdfval.ready) return;
     const f = state.finding;
-    await layout();
+    await layout(); drawAll();
     buildSync();
     if (state.current) { await goto(state.current.id); if (f >= 0) await focusFinding(f); }
   }, 120);
@@ -524,7 +569,7 @@ window.pdfval = { ready: false, data: DATA, sections: () => DATA.sections.map(s 
   try {
     try { SCALE_MODE = localStorage.getItem('pdfval.scale') || 'fit'; } catch (e) { /* storage blocked */ }
     $('#scale').value = SCALE_MODE;
-    await layout();
+    await layout(); drawAll();
   } catch (err) {
     $('#loading').innerHTML = `Could not load PDFs (${esc(err.message)}).<br>Open this report through <code>python -m pdfval serve &lt;report-dir&gt;</code>, not file://`;
     return;

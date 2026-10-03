@@ -8,6 +8,8 @@ All but missing links are critical.
 """
 from __future__ import annotations
 
+import re
+
 import pymupdf
 
 from ..model import Doc, Finding, Loc
@@ -171,7 +173,9 @@ def _destination(doc: Doc, ln: dict) -> str:
     if ln.get("kind") not in (pymupdf.LINK_GOTO, pymupdf.LINK_NAMED) or not 0 <= page < len(doc.pages):
         return ""
     y = ln["to"].y if ln.get("to") is not None else 0
-    lines = [l for l in doc.lines if l.page == page and l.bbox[3] >= y - 2]
+    # the first line that reaches below the target point: a line ending at / above it (the last line of
+    # the previous section, right above the heading the jump targets) is not where the reader lands
+    lines = [l for l in doc.lines if l.page == page and l.bbox[3] > y + 1]
     return (min(lines, key=lambda l: l.bbox[1]).text.strip()[:60]) if lines else ""
 
 
@@ -270,6 +274,10 @@ def check(u: Unit) -> list[Finding]:
             clickable = [k for k in range(*u.a_range) if A.words[k].page == pa and A.words[k].norm
                          and _in_any(A.words[k].bbox, same)] or missing
             shown = snippet(A, clickable, 12)
+            # AEM prints “on page 0” after a cross-reference it could not resolve: that is the page-zero issue
+            after = " ".join(B.words[k].text for k in range(max(b_idx) + 1, min(max(b_idx) + 5, len(B.words))))
+            if re.match(r"\W*on\s+page\s+0\b", after, re.I):
+                continue  # one issue, not two: reported as “Page reference on page 0” (genuine._page_zero)
             findings.append(Finding(
                 "integrity", icfg.get("missing_link_severity", "error"),
                 (f"Link not clickable in stage: “{shown}” looks like a link in stage ({look}) but has no "
@@ -298,6 +306,15 @@ def check(u: Unit) -> list[Finding]:
             a_idx = [al.b2a[j] for j in extra]
             if _linked_lines(A, a_idx):
                 continue  # prod links the same sentence, on other words of it
+            # a web address printed as text (“Support.BenQ.com”) that stage makes clickable, or words prod
+            # already shows as a link (link colour / underline, only the hyperlink is missing in prod):
+            # stage works as the reader expects - not an issue
+            words = re.sub(r"[^a-z0-9.]", " ", snippet(B, extra, 10).lower()).split()
+            host = re.sub(r"^www\.", "", (lb.get("uri") or "").lower().split("//")[-1].split("/")[0])
+            if host and any(w.strip(".").removeprefix("www.") == host for w in words):
+                continue
+            if _link_look(A, a_idx):
+                continue
             findings.append(Finding(
                 "integrity", icfg.get("extra_link_severity", "warning"),
                 f"Extra link in stage: “{snippet(B, extra, 10)}” is a link in stage (to {_target(lb)}) but plain "

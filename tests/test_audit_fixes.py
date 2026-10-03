@@ -7,6 +7,7 @@ import pymupdf
 import pytest
 from PIL import Image as PILImage
 
+from conftest import all_checks
 from pdfval import compare, load_config, normalize
 from pdfval.checks import layout
 from pdfval.extract import _symbol_map
@@ -16,7 +17,7 @@ from pdfval.extract import _symbol_map
 def cfg():
     c = load_config()
     c["sections"]["front_matter"] = False
-    return c
+    return all_checks(c)  # these tests cover the CSS / layout detectors the default reports leave out
 
 
 def found(r, check=None):
@@ -144,7 +145,7 @@ def test_captions_side_by_side_not_level_in_stage(tmp_path, cfg):
     r = compare(a, _caption_row_pdf(tmp_path / "b.pdf", 19), cfg)
     rows = [f for f in found(r) if "row alignment" in f["types"]
             or any("row alignment" in p["types"] for p in f["detail"].get("parts", []))]
-    assert rows and "“GR10 Mobile Dock” 19 pt lower" in rows[0]["message"] and rows[0]["genuine"], [f["message"] for f in found(r)]
+    assert rows and "“GR10 Mobile Dock” 19 pt lower" in rows[0]["message"] and not rows[0]["genuine"]  # layout: not in the PDF report, [f["message"] for f in found(r)]
     # level in stage, or stacked into one column (a reflow): no row finding
     for b in (_caption_row_pdf(tmp_path / "c.pdf", 0), _caption_row_pdf(tmp_path / "d.pdf", 0, stack=True)):
         assert not [f for f in found(compare(a, b, cfg)) if "row alignment" in f["types"]]
@@ -290,7 +291,7 @@ def test_text_in_another_order_is_not_an_issue_but_bold_vs_plain_is(tmp_path, cf
         [f["message"] for f in found(r) if {"moved text", "reordered"} & set(f["types"])]
     assert not [f for f in found(r, "content") if f["severity"] != "info"]
     bold = compare(a, _package_list(tmp_path / "b2.pdf", [110, 129, 140], bold_item="Webcam accessory"), cfg)
-    em = [f for f in found(bold, "style") if "emphasis" in f["types"]]
+    em = [f for f in found(bold, "content") if "emphasis" in f["types"]]  # bold vs plain: a content issue
     assert em and em[0]["genuine"] and "Webcam" in em[0]["message"] and "plain in prod → bold in stage" in em[0]["message"], \
         [f["message"] for f in found(bold)]
 

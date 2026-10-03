@@ -5,6 +5,7 @@ import re
 import pymupdf
 import pytest
 
+from conftest import all_checks
 from pdfval import compare, load_config
 
 BODY = "The quick brown fox jumps over the lazy dog near the river bank."
@@ -35,7 +36,7 @@ def make_pdf(path, *, heading_size=18, body_color=(0, 0, 0), body_text=BODY, ind
 def cfg():
     c = load_config()
     c["sections"]["front_matter"] = False
-    return c
+    return all_checks(c)  # these tests cover the CSS / layout detectors the default reports leave out
 
 
 def checks(result, name):
@@ -430,7 +431,7 @@ def test_image_outside_its_note_box(tmp_path, cfg):
     a = _note_pdf(tmp_path / "a.pdf", True)
     out = [f for f in checks(compare(a, _note_pdf(tmp_path / "b.pdf", False), cfg), "assets")
            if "image outside box" in f["types"]]
-    assert out and "Note: keep the ventilation" in out[0]["message"] and out[0]["genuine"]
+    assert out and "Note: keep the ventilation" in out[0]["message"] and not out[0]["genuine"]  # layout: full report only
     same = [f for f in checks(compare(a, _note_pdf(tmp_path / "c.pdf", True), cfg), "assets")
             if "image outside box" in f["types"]]
     assert not same
@@ -470,7 +471,7 @@ def test_toc_issues_are_in_the_genuine_report(tmp_path, cfg):
     a = make_toc_pdf(tmp_path / "a.pdf", [(1, "Overview", 2), (1, "Setup", 3), (1, "Mounting", 4), (1, "Settings", 5)], heads)
     b = make_toc_pdf(tmp_path / "b.pdf", [(1, "Overview", 2), (1, "Setup", 3), (1, "Mounting", 9), (1, "Settings", 5)], heads)
     toc = lambda r: [f for s in r["sections"] for f in s["findings"] if f["check"] == "toc" and "Mounting" in f["message"]]
-    assert [f for f in toc(compare(a, b, cfg)) if f["genuine"] and f.get("issue") == "TOC page number wrong"]
+    assert [f for f in toc(compare(a, b, cfg)) if f["genuine"]]  # TOC: in the genuine report by default
     cfg["genuine"]["exclude_checks"] = ["toc"]
     r = compare(a, b, cfg)
     assert toc(r) and not any(f["genuine"] for s in r["sections"] for f in s["findings"] if f["check"] == "toc")
@@ -550,6 +551,7 @@ def _figure_pdf(path, labels_as_text: bool, labels=("50 cm", "60±10 cm")):
 @pytest.mark.skipif(not __import__("shutil").which("tesseract"), reason="needs tesseract")
 def test_labels_drawn_in_the_stage_picture_are_not_missing(tmp_path, cfg):
     cfg["genuine"]["everything"] = False  # the selective genuine report: only the listed types
+    cfg["genuine"]["report_visually_present"] = True  # the detector itself (the default leaves these out)
     a = _figure_pdf(tmp_path / "a.pdf", True)
     b = _figure_pdf(tmp_path / "b.pdf", False)
     r = compare(a, b, cfg)
@@ -597,12 +599,13 @@ def _badge_pdf(path, badge_as_picture: bool, letter="A"):
 
 
 def test_badge_drawn_as_a_picture_is_a_layout_issue_not_missing_text(tmp_path, cfg):
+    cfg["genuine"]["report_visually_present"] = True  # the detector itself (the default leaves these out)
     a = _badge_pdf(tmp_path / "a.pdf", False)
     r = compare(a, _badge_pdf(tmp_path / "b.pdf", True), cfg)
     assert not [f for f in checks(r, "content") if "missing text" in f["types"]]
     fs = [f for f in checks(r, "layout") if "text as graphic" in f["types"]]
     assert len(fs) == 1 and "“A”" in fs[0]["message"]
-    assert fs[0]["genuine"] and fs[0]["issue"] == "Text shown as a graphic"  # in the genuine report, not as data missing
+    assert not fs[0]["genuine"]  # the reader sees the text: not reported as data missing
     # another letter in the stage badge: the prod text really is not there
     r2 = compare(a, _badge_pdf(tmp_path / "b2.pdf", True, letter="W"), cfg)
     assert [f for f in checks(r2, "content") if "missing text" in f["types"]]
@@ -911,3 +914,30 @@ def test_change_does_not_run_into_callouts_below(tmp_path, cfg):
     changed = [x for x in f if "today" in x["message"]]
     assert changed and all("1" not in re.sub(r"“[^”]*” in “[^”]*”$", "", x["message"]).split("→")[0].replace("today", "")
                            for x in changed), [x["message"] for x in f]
+
+
+def test_stage_only_callout_label_is_never_a_changed_text():
+    """“Ambient light sensor” -> “NOTE:”: prod text and a stage-only note label at the same spot are two
+    things - the label is template (info), the prod text is judged on its own."""
+    from pdfval.checks.content import _peel_labels
+    at = ["ambient", "light", "sensor"]
+    bt = ["<label:note>"]
+    ops = _peel_labels([("replace", 0, 3, 0, 1)], at, bt)
+    assert ops == [("delete", 0, 3, 0, 0), ("insert", 3, 3, 0, 1)]
+    assert _peel_labels([("replace", 0, 1, 0, 1)], ["<label:note>"], ["<label:tip>"]) == [("replace", 0, 1, 0, 1)]
+
+
+def test_spacing_issue_says_where_the_space_is():
+    """“interface” → “interface .” said nothing: the message names the gap and shows the real text."""
+    from pdfval.checks.content import _gap_note
+    assert _gap_note("interface on page 36.", "interface on page 36 .") == "stage has a space before “.”"
+    assert _gap_note("(1 GB)", "( 1 GB)") == "stage has a space after “(”"
+    assert _gap_note("Power button", "Powerbutton") == "prod has a space stage does not"
+
+
+def test_text_the_reader_sees_in_the_stage_picture_is_not_reported(tmp_path, cfg):
+    """Default: a badge drawn as a picture in stage is visibly the same - no finding, and no missing text."""
+    a = _badge_pdf(tmp_path / "a.pdf", False)
+    r = compare(a, _badge_pdf(tmp_path / "b.pdf", True), cfg)
+    assert not [f for s in r["sections"] for f in s["findings"]
+                if set(f["types"]) & {"text as graphic", "label in picture", "text in image", "missing text"}]

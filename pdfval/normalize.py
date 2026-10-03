@@ -17,6 +17,8 @@ _QUOTE_STYLE = str.maketrans({
     "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'", "\u2032": "'",
     "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u2033": '"',
 })
+# a double quote and a single quote / apostrophe are the same kind of mark to a reviewer ("BenQ.com" vs 'BenQ.com')
+_QUOTE_TYPE = str.maketrans({'"': "'"})
 _LEADER = re.compile(r"(\.\s*){3,}\d*$")  # TOC dot leaders (+ page number)
 _NUMBERING = re.compile(r"^(\d+(\.\d+)*\.?|[A-Z]\.)\s+")
 
@@ -65,9 +67,9 @@ def clean(text: str, typography: bool | str = True) -> str:
     text = _KEEP_WIDTH.sub(lambda m: m.group() if _WIDE.match(m.group()) else unicodedata.normalize("NFKC", m.group()),
                            text).translate(_INVISIBLE)
     if typography == "quotes":
-        text = text.translate(_QUOTE_STYLE)
+        text = text.translate(_QUOTE_STYLE).translate(_QUOTE_TYPE)
     elif typography:
-        text = text.translate(_TYPOGRAPHY)
+        text = text.translate(_TYPOGRAPHY).translate(_QUOTE_TYPE)
     return re.sub(r"\s+", " ", text).strip()
 
 

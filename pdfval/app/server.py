@@ -32,21 +32,27 @@ mimetypes.add_type("image/webp", ".webp")
 
 
 class Jobs:
-    """Runs live in <runs>/<id>/ with a job.json; one comparison runs at a time."""
+    """Runs live in <runs>/<id>/ with a job.json. Up to `parallel` comparisons run at the same time, each in
+    its own process (pdfval.app.worker); the others wait in the queue."""
 
-    def __init__(self, runs_dir: Path):
+    def __init__(self, runs_dir: Path, recover: bool = True, parallel: int | None = None):
         self.dir = runs_dir
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "_uploads").mkdir(exist_ok=True)
         self.lock = threading.Lock()
-        self.run_lock = threading.Lock()
+        n = parallel or int((engine.load_config().get("ui") or {}).get("parallel_runs", 0))
+        if n <= 0:  # auto: every core but one (the UI and AEM downloads keep running)
+            n = max(1, (os.cpu_count() or 2) - 1)
+        self.run_sem = threading.BoundedSemaphore(max(1, n))
+        self.procs: dict = {}  # run id -> its worker process (to stop it)
+        self.stopping: set = set()  # runs stopped by the user (their worker's exit is not an error)
         # web-page passwords live in memory only (never in job.json), per (site, user),
         # so Rerun works until the server restarts
         self.passwords: dict[tuple[str, str], str] = {}
         # AEM login: never written to disk by this tool; kept in the macOS Keychain (when available) so a
         # restart of the UI does not silently turn every GUID link into a link to the editor's Explorer
         self.aem_password = os.environ.get("PDFVAL_AEM_PASSWORD", "") or _keychain_get(self._saved_user())
-        for job in self.list():  # server restarted mid-run
+        for job in self.list() if recover else ():  # server restarted mid-run
             if job["status"] in ("queued", "running"):
                 self.update(job["id"], status="error", message="Interrupted (server restarted)")
 
@@ -62,7 +68,7 @@ class Jobs:
         with self.lock:
             job = self.get(jid)
             job.update(kw)
-            (self.path(jid) / "job.json").write_text(json.dumps(job, indent=1))
+            _write_atomic(self.path(jid) / "job.json", json.dumps(job, indent=1))  # read by the UI while a worker writes
             return job
 
     def list(self) -> list[dict]:
@@ -74,7 +80,7 @@ class Jobs:
                 pass
         return sorted(jobs, key=lambda j: j["created"], reverse=True)
 
-    def create(self, baseline: str, candidate: str, name: str, options: dict) -> dict:
+    def create(self, baseline: str, candidate: str, name: str, options: dict, batch: str = "") -> dict:
         """candidate is a PDF path, or a URL when options['mode'] == 'html'."""
         if not Path(baseline).is_file():
             raise ValueError(f"File not found: {baseline}")
@@ -96,7 +102,7 @@ class Jobs:
         job = {"id": jid, "name": name or f"{Path(baseline).stem} vs {Path(candidate).stem}",
                "created": datetime.now().isoformat(timespec="seconds"), "baseline": baseline, "candidate": candidate,
                "options": options, "mode": options.get("mode", "pdf"), "status": "queued", "progress": 0.0,
-               "message": "Queued", "summary": None}
+               "message": "Queued", "summary": None, **({"batch": batch} if batch else {})}
         (self.path(jid) / "job.json").write_text(json.dumps(job, indent=1))
         threading.Thread(target=self._run, args=(jid,), daemon=True).start()
         return job
@@ -158,7 +164,7 @@ class Jobs:
         keep = {k: str(req[k]).strip() for k in ("author", "link", "dam_root", "user", "search_root") if k in req}
         keep["products"] = {str(k).strip(): str(v).strip() for k, v in (req.get("products") or {}).items()
                             if str(k).strip() and str(v).strip()}
-        (self.dir / "aem-settings.json").write_text(json.dumps(keep, indent=1))
+        _write_atomic(self.dir / "aem-settings.json", json.dumps(keep, indent=1))  # several workers may learn products
         return keep
 
     def aem_login(self, req: dict) -> dict:
@@ -190,7 +196,8 @@ class Jobs:
             writer.write_genuine_csv(result, run_dir / "genuine-issues.csv")
             writer.write_viewer(result, run_dir)
             pdf_report.build(result, run_dir, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
-            pdf_report.build(result, run_dir, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
+            if (run_dir / "css-issues.pdf").exists():  # a batch run builds it when first opened
+                pdf_report.build(result, run_dir, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
             pdf_report.build(result, run_dir, options=pdf_report.IMAGE_REPORT, filename="image-issues.pdf")
             if (run_dir / "report.pdf").exists():
                 from ..report import shots as shotmod
@@ -231,10 +238,91 @@ class Jobs:
         return out
 
     def delete(self, jid: str) -> None:
+        self.stop(jid)
         shutil.rmtree(self.path(jid), ignore_errors=True)
 
+    def stop(self, jid: str) -> bool:
+        """Stop a queued or running run: a queued one never starts, a running worker is ended with every
+        process it started. The run stays in the list as "stopped"."""
+        import signal
+        try:
+            job = self.get(jid)
+        except (KeyError, FileNotFoundError):
+            return False
+        if job["status"] not in ("queued", "running"):
+            return False
+        self.stopping.add(jid)
+        self.update(jid, status="stopped", message="Stopped by user")
+        proc = self.procs.get(jid)
+        if proc and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            self.update(jid, status="stopped", message="Stopped by user")  # the worker may have written since
+        return True
+
+    def stop_all(self) -> int:
+        return sum(self.stop(j["id"]) for j in self.list() if j["status"] in ("queued", "running"))
+
+    def clear(self) -> int:
+        """Stop everything, then remove every run - finished ones (and their reports) included."""
+        self.stop_all()
+        gone = [j["id"] for j in self.list()]
+        for jid in gone:
+            shutil.rmtree(self.path(jid), ignore_errors=True)
+        return len(gone)
+
     def _run(self, jid: str) -> None:
-        with self.run_lock:
+        """Wait for a free slot, then run the comparison in its own process (CPU-bound: threads would share one
+        core). The passwords go to the worker in its environment, never on disk."""
+        import subprocess
+        import sys
+        with self.run_sem:
+            try:
+                job = self.get(jid)
+            except (KeyError, FileNotFoundError):
+                return  # deleted while queued
+            if job["status"] == "stopped":
+                return  # stopped while queued
+            env = {**os.environ, "PDFVAL_AEM_PASSWORD": self.aem_password or ""}
+            # one worker per CPU core already gives process-level parallelism; without this, numpy's own
+            # BLAS backend (Accelerate / OpenBLAS) ALSO spawns several threads per worker for the image
+            # correlation math in assets.py, so running several workers at once oversubscribes the CPU
+            # many times over and can crash a worker outright (seen as "Worker stopped: <no Python frame>",
+            # a native fatal error with no Python traceback) under memory/CPU pressure, not a code bug
+            for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS",
+                       "NUMEXPR_NUM_THREADS"):
+                env.setdefault(var, "1")
+            o = job.get("options", {})
+            if o.get("mode") == "html":
+                env["PDFVAL_HTML_PASSWORD"] = self.passwords.get((urlparse(job["candidate"]).netloc, o.get("html_user", "")), "")
+            self.update(jid, status="running", message="Starting")
+            # its own process group: Stop ends the worker and everything it started (browsers, OCR)
+            proc = subprocess.Popen([sys.executable, "-m", "pdfval.app.worker", str(self.dir), jid], env=env,
+                                    cwd=str(PROJECT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                    start_new_session=True)
+            self.procs[jid] = proc
+            out, err = proc.communicate()
+            self.procs.pop(jid, None)
+            r = subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+            try:
+                job = self.get(jid)
+            except (KeyError, FileNotFoundError):
+                return
+            if job["status"] == "stopped" or jid in self.stopping:
+                return
+            if job["status"] in ("queued", "running"):  # the worker died without reporting
+                tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [f"exit code {r.returncode}"]
+                self.update(jid, status="error", message=f"Worker stopped: {tail[0][:300]}")
+
+    def execute(self, jid: str) -> None:
+        """The comparison itself (in the worker process)."""
+        if True:
             job = self.update(jid, status="running", message="Starting")
             try:
                 if job["options"].get("aem_map"):  # generate the stage PDF in AEM first (Native PDF, map's preset)
@@ -267,13 +355,86 @@ class Jobs:
                                                       "width": o.get("html_width") or 1280, "wait_ms": o.get("html_wait") or 1500})
                 else:
                     result = engine.compare(job["baseline"], job["candidate"], cfg, progress=step)
-                writer.write_all(result, str(self.path(jid)), job["options"].get("screenshots", "all"),
-                                 progress=lambda f, m: self.update(jid, progress=round(0.45 + 0.55 * f, 3), message=m))
+                # a batch run builds only what the batch delivers (genuine-issues + image report, with their
+                # screenshots); the full report and the CSS report are built when first opened
+                batch = bool(job.get("batch"))
+                writer.write_all(result, str(self.path(jid)), "reports" if batch else job["options"].get("screenshots", "all"),
+                                 progress=lambda f, m: self.update(jid, progress=round(0.45 + 0.55 * f, 3), message=m),
+                                 full=not batch)
                 self._learn_product(result)
-                self.update(jid, status="done", progress=1.0, message="Done", summary=result["summary"])
+                self.update(jid, status="done", progress=1.0, message="Done", summary=result["summary"],
+                            finished=datetime.now().isoformat(timespec="seconds"))
             except Exception as e:  # surface the failure in the UI
                 traceback.print_exc()
                 self.update(jid, status="error", message=f"{type(e).__name__}: {e}")
+
+
+def _batches(jobs: Jobs) -> list[dict]:
+    """Runs started together from the pairs list: progress and how many reports are ready."""
+    out: dict[str, dict] = {}
+    for j in jobs.list():
+        if not j.get("batch"):
+            continue
+        b = out.setdefault(j["batch"], {"id": j["batch"], "created": j["created"], "runs": 0, "done": 0, "error": 0,
+                                         "running": 0, "queued": 0})
+        b["runs"] += 1
+        b[j["status"] if j["status"] in ("done", "error", "running", "queued") else "error"] += 1
+        b["created"] = min(b["created"], j["created"])
+    return sorted(out.values(), key=lambda b: b["created"], reverse=True)
+
+
+def _batch_zip(jobs: Jobs, bid: str) -> Path:
+    """One zip with the PDF report (genuine issues) and the image report of every finished run of the batch,
+    one folder per publication."""
+    import tempfile
+    import zipfile
+    runs = [j for j in jobs.list() if j.get("batch") == bid]
+    if not runs:
+        raise KeyError(bid)
+    fd, tmp = tempfile.mkstemp(suffix=".zip", dir=jobs.dir)
+    os.close(fd)
+    used: set[str] = set()
+    lines = ["Publication\tStatus\tGenuine issues\tRun"]
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for j in sorted(runs, key=lambda j: j["name"].lower()):
+            folder = re.sub(r"[^\w .()&+-]+", "_", j["name"]).strip() or j["id"]
+            while folder in used:
+                folder += "_"
+            used.add(folder)
+            gen = ((j.get("summary") or {}).get("genuine") or {}).get("total", "")
+            lines.append(f"{j['name']}\t{j['status']}\t{gen}\t{j['id']}")
+            if j["status"] != "done":
+                continue
+            run_dir = jobs.path(j["id"])
+            img = run_dir / "image-issues.pdf"
+            if not img.exists() and (run_dir / "results.json").exists():  # a run made before the image report existed
+                from ..report import pdf_report as _pr
+                _pr.build(json.loads((run_dir / "results.json").read_text()), run_dir, options=_pr.IMAGE_REPORT,
+                          filename="image-issues.pdf")
+            for src, name in (("genuine-issues.pdf", "pdf-report"), ("image-issues.pdf", "image-report")):
+                if (run_dir / src).exists():
+                    z.write(run_dir / src, f"{folder}/{name}-{j['id']}.pdf")
+        z.writestr("summary.tsv", "\n".join(lines) + "\n")
+        pdf, csv_ = _batch_consolidated(jobs, bid)
+        z.write(pdf, "consolidated-report.pdf")
+        z.write(csv_, "consolidated-report.csv")
+    return Path(tmp)
+
+
+def _batch_consolidated(jobs: Jobs, bid: str) -> tuple[Path, Path]:
+    """The batch's consolidated report (every product with its content match %), rebuilt on each request
+    so it shows the runs finished so far."""
+    from ..report import batch_report
+    runs = [j for j in jobs.list() if j.get("batch") == bid]
+    if not runs:
+        raise KeyError(bid)
+    return batch_report.build(bid, runs, jobs.dir, jobs.dir / "_batches")
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 def _sha256(path: str) -> str:
@@ -415,6 +576,22 @@ def make_handler(jobs: Jobs, root: Path):
                     return self._json(meta.status())
                 if m := re.fullmatch(r"/api/metadata/(metadata-report\.(?:pdf|csv))", p):
                     return self._file(meta.dir / m[1], download=m[1])
+                if p == "/api/batches":
+                    return self._json(_batches(jobs))
+                if m := re.fullmatch(r"/api/batches/(batch-[\w-]+)/consolidated\.(pdf|csv)", p):
+                    try:
+                        pdf, csv_ = _batch_consolidated(jobs, m[1])
+                    except KeyError:
+                        return self._json({"error": "unknown batch"}, 404)
+                    return self._file(pdf if m[2] == "pdf" else csv_, download=f"{m[1]}-consolidated.{m[2]}")
+                if m := re.fullmatch(r"/api/batches/(batch-[\w-]+)/reports\.zip", p):
+                    path = _batch_zip(jobs, m[1])
+                    try:
+                        return self._file(path, download=f"{m[1]}-reports.zip")
+                    finally:
+                        path.unlink(missing_ok=True)
+                if p == "/api/pairs":
+                    return self._json(PAIRS.suggest())
                 if p == "/api/library":
                     return self._json(LIBRARY.status())
                 if p == "/api/files":
@@ -438,6 +615,12 @@ def make_handler(jobs: Jobs, root: Path):
                     if not target.is_relative_to(base):
                         return self._json({"error": "forbidden"}, 403)
                     dl = parse_qs(u.query).get("download", [None])[0]
+                    if target.name in writer.DEFERRED and not target.exists() and (base / "results.json").exists():
+                        writer.build_deferred(base, target.name)  # a batch run: built on first open
+                    if target.name == "side-by-side.pdf" and not target.exists() and (base / "results.json").exists():
+                        # the side-by-side page report: built on first download
+                        from ..report import page_report as _sp
+                        _sp.build(json.loads((base / "results.json").read_text()), base)
                     if target.name == "image-issues.pdf" and not target.exists() and (base / "results.json").exists():
                         # a run finished before the image report existed: build it on first download
                         from ..report import pdf_report as _pr
@@ -470,6 +653,13 @@ def make_handler(jobs: Jobs, root: Path):
                     return self._json(meta.status())
                 if p.path == "/api/metadata":
                     return self._json(meta.start(json.loads(self._body() or b"{}")))
+                if p.path == "/api/pairs/run":
+                    req = json.loads(self._body() or b"{}")
+                    bid = "batch-" + datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+                    made = [jobs.create(x["baseline"], x["candidate"], x.get("name", ""), req.get("options") or {"mode": "pdf"},
+                                        batch=bid)
+                            for x in req.get("pairs", []) if x.get("baseline") and x.get("candidate")]
+                    return self._json({"batch": bid, "runs": [j["id"] for j in made]}, 201)
                 if p.path == "/api/library/extract":
                     return self._json(LIBRARY.start())
                 if p.path == "/api/aem":
@@ -494,6 +684,12 @@ def make_handler(jobs: Jobs, root: Path):
                     return self._rerun(m[1])
                 if m := re.fullmatch(r"/api/runs/([\w-]+)/report", p.path):
                     return self._custom_report(m[1], json.loads(self._body() or b"{}"))
+                if p.path == "/api/runs/stop-all":
+                    return self._json({"stopped": jobs.stop_all()})
+                if p.path == "/api/runs/clear":
+                    return self._json({"removed": jobs.clear()})
+                if m := re.fullmatch(r"/api/runs/([\w-]+)/stop", p.path):
+                    return self._json({"stopped": jobs.stop(m[1])})
                 if p.path == "/api/runs":
                     req = json.loads(self._body() or b"{}")
                     job = jobs.create(req.get("baseline", ""), req.get("candidate", ""), req.get("name", ""),
@@ -622,6 +818,57 @@ class Library:
 
 
 LIBRARY = Library(PROJECT / "pdf-prod", PROJECT / "pdf-prod-pdfs")
+
+
+class Pairs:
+    """Prod vs stage pairs for a batch of comparisons: every stage PDF downloaded from AEM (aem-map-pdfs/<lang>/
+    <Brand>/<Category>/<product>/) with its prod PDF from the prod library. A stage map is paired through the
+    migration Excel (the map's model row -> its file, e.g. GW2291_EN_V0 = the prod archive), else by name."""
+
+    def __init__(self, stage_dir: Path):
+        self.dir = stage_dir
+
+    def stage_files(self) -> list[dict]:
+        out = []
+        for p in sorted(self.dir.rglob("*.pdf")) if self.dir.is_dir() else []:
+            rel = p.relative_to(self.dir)
+            if "other-outputs" in rel.parts or len(rel.parts) < 3:
+                continue
+            out.append({"path": str(p.resolve()), "name": p.name, "lang": rel.parts[0], "product": rel.parts[-2],
+                        "folder": "/".join(rel.parts[1:-1]), "size": p.stat().st_size})
+        return out
+
+    def suggest(self) -> dict:
+        from .. import metadata
+        prod = [f for f in LIBRARY.status()["files"]]
+        main: dict[str, dict] = {}
+        for f in prod:  # the library lists each product's manual first; a "…_marked" review copy is not the manual
+            if f["product"] not in main or ("marked" in main[f["product"]]["name"].lower() and "marked" not in f["name"].lower()
+                                            and not f["sub"].lower().count("images")):
+                main[f["product"]] = f
+        norm = {k: metadata._norm(k) for k in main}
+        try:
+            rows = metadata.load_sheet(metadata.default_sheet())
+        except Exception:
+            rows = []
+        stage = self.stage_files()
+        for s in stage:
+            row = metadata.match(s["product"], s["product"], rows) if rows else None
+            keys = [k for k in ((row or {}).get("file"), (row or {}).get("model"), s["product"]) if k]
+            hit, via = None, ""
+            for n_k, k in enumerate(keys):
+                nk = metadata._norm(k)
+                hit = next((p for p, n in norm.items() if n and n == nk), None) or \
+                    next((p for p, n in norm.items() if nk and len(nk) >= 3 and (n.startswith(nk) or nk.startswith(n) and len(n) >= 4)), None)
+                if hit:
+                    via = "Excel" if row and n_k < 2 else "name"
+                    break
+            s["prod"], s["via"] = (main[hit]["path"] if hit else ""), via
+            s["model"] = (row or {}).get("model", "")
+        return {"stage": stage, "prod": prod, "stage_dir": str(self.dir)}
+
+
+PAIRS = Pairs(PROJECT / "aem-map-pdfs")
 
 
 class MetadataCheck:

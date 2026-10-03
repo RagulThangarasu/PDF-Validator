@@ -402,23 +402,24 @@ def check(u: Unit) -> list[Finding]:
             [], [Loc(s.page, s.box)], "extra row", a_at=al.loc_in_a(s.idx[0]))
 
     # ---- cells merged / split, reported once per prod table
-    cell_diffs: dict[tuple, list] = defaultdict(list)
-    for k, r in enumerate(rows_a):
-        if fwd[k] and len(target.get(fwd[k][0][0], [])) == 1:
-            s = rows_b[fwd[k][0][0]]
-            if s.cells != r.cells and min(s.cells, r.cells) >= 1 and max(s.cells, r.cells) >= 2 \
-                    and id(r) not in rep_a:
-                cell_diffs[r.table].append((r, s))
-    for key, diffs in cell_diffs.items():
-        for kind, sel in (("cells merged", lambda r, s: s.cells < r.cells), ("cells split", lambda r, s: s.cells > r.cells)):
-            ds = [(r, s) for r, s in diffs if sel(r, s)]
-            if not ds:
-                continue
-            ex = ", ".join(f"“{rtext(A, r, 4)}” {r.cells}→{s.cells}" for r, s in ds)
-            add(tcfg.get("cells_severity", "warning"),
-                f"{'Cells merged' if kind == 'cells merged' else 'Cells split'} in stage: {len(ds)} row(s) have "
-                f"{'fewer' if kind == 'cells merged' else 'more'} cells than in prod (e.g. {ex})",
-                [Loc(r.page, r.box) for r, _ in ds], [Loc(s.page, s.box) for _, s in ds], kind)
+    if tcfg.get("check_cells", True):
+        cell_diffs: dict[tuple, list] = defaultdict(list)
+        for k, r in enumerate(rows_a):
+            if fwd[k] and len(target.get(fwd[k][0][0], [])) == 1:
+                s = rows_b[fwd[k][0][0]]
+                if s.cells != r.cells and min(s.cells, r.cells) >= 1 and max(s.cells, r.cells) >= 2 \
+                        and id(r) not in rep_a:
+                    cell_diffs[r.table].append((r, s))
+        for key, diffs in cell_diffs.items():
+            for kind, sel in (("cells merged", lambda r, s: s.cells < r.cells), ("cells split", lambda r, s: s.cells > r.cells)):
+                ds = [(r, s) for r, s in diffs if sel(r, s)]
+                if not ds:
+                    continue
+                ex = ", ".join(f"“{rtext(A, r, 4)}” {r.cells}→{s.cells}" for r, s in ds)
+                add(tcfg.get("cells_severity", "warning"),
+                    f"{'Cells merged' if kind == 'cells merged' else 'Cells split'} in stage: {len(ds)} row(s) have "
+                    f"{'fewer' if kind == 'cells merged' else 'more'} cells than in prod (e.g. {ex})",
+                    [Loc(r.page, r.box) for r, _ in ds], [Loc(s.page, s.box) for _, s in ds], kind)
 
     # ---- tables: missing / extra / merged / split / turned into text
     row_table_b = {m: rows_b[m].table for m in range(len(rows_b))}
@@ -539,7 +540,92 @@ def check(u: Unit) -> list[Finding]:
         findings += _borders(u, al, ta, tb)
     if tcfg.get("check_row_background", True):
         findings += _row_background(u, tb)
+    if tcfg.get("check_header_align", True):
+        findings += _header_align(u, tb)
     return findings
+
+
+def _is_header_bar(doc: Doc, row: TRow) -> bool:
+    """The row sits on a dark header bar (the spec's #333333, white text)."""
+    bg = _background(doc, row.page, row.box)
+    if not bg:
+        return False
+    r, g, b = (int(bg[k:k + 2], 16) for k in (1, 3, 5))
+    return (r + g + b) / 3 < 110
+
+
+def _centred_in_prod(A: Doc, idx: list[int], tol: float) -> bool:
+    """The prod header cell holding these words has them centred in its column (False when the cell or
+    its table cannot be found: nothing to compare with)."""
+    if not idx:
+        return False
+    w0 = A.words[idx[0]]
+    cx = (w0.bbox[0] + w0.bbox[2]) / 2
+    for _, box, _, grid in _raw(A, w0.page):
+        if not (box[0] - 1 <= cx <= box[2] + 1 and box[1] - 1 <= w0.bbox[1] <= box[3] + 1):
+            continue
+        col = next(((x0, x1) for x0, x1 in grid if x0 - 1 <= cx <= x1 + 1), None)
+        if not col:
+            return False
+        line = [i for i in idx if A.words[i].line == w0.line]
+        left = min(A.words[i].bbox[0] for i in line) - col[0]
+        right = col[1] - max(A.words[i].bbox[2] for i in line)
+        return left >= 0 and right >= 0 and abs(left - right) / 2 <= tol
+    return False
+
+
+def _header_align(u: Unit, tb: list) -> list[Finding]:
+    """Table header cells: each line of header text is centred in its column (design spec, stage only).
+    A header that is left / right aligned, or off centre by more than header_align_tolerance pt, is reported
+    with the prod header at the same words."""
+    tol = u.cfg["tables"].get("header_align_tolerance", 4.0)
+    sev = u.cfg["tables"].get("header_align_severity", "error")
+    A, B = u.a, u.b
+    b2a = {j: i for i, j in u.pairs}
+    rcfg = u.cfg["report"]
+    out = []
+    for t in tb:
+        raw = next((r for r in _raw(B, t.page) if r[0] == t.key[1]), None)
+        if not raw or not is_data_table(B, t):
+            continue
+        grid = raw[3]
+        head = t.rows[0]
+        if not _is_header_bar(B, head):
+            continue
+        bad = []
+        for x0, x1 in grid:
+            words = [i for i in head.idx if x0 - 1 <= (B.words[i].bbox[0] + B.words[i].bbox[2]) / 2 <= x1 + 1]
+            if not words:
+                continue
+            by_line: dict[int, list[int]] = defaultdict(list)
+            for i in words:
+                by_line[B.words[i].line].append(i)
+            hows = []
+            for ln, ws in by_line.items():
+                left = min(B.words[i].bbox[0] for i in ws) - x0
+                right = x1 - max(B.words[i].bbox[2] for i in ws)
+                if left < 0 or right < 0:
+                    continue  # text wider than the column: nothing to centre
+                off = (left - right) / 2
+                if abs(off) > tol:
+                    hows.append("left-aligned" if off < 0 and left < 2 * tol + 4 else "right-aligned" if off > 0 and right < 2 * tol + 4
+                                else f"off centre by {abs(off):.0f}pt")
+            if hows and not _centred_in_prod(A, [b2a[j] for j in words if j in b2a], tol):
+                continue  # judged against prod: only a header prod centres has to be centred in stage
+            if hows:  # one entry per header cell, however many lines it wraps to
+                bad.append((sorted(words, key=lambda i: (B.words[i].line, B.words[i].bbox[0])), hows[0]))
+        if not bad:
+            continue
+        idx = [i for ws, _ in bad for i in ws]
+        names = "; ".join(f"“{' '.join(B.words[i].text for i in ws)}” {how}" for ws, how in bad)
+        a_idx = [b2a[j] for j in idx if j in b2a]
+        out.append(Finding(
+            "tables", sev,
+            f"Table header not centred in stage ({len(bad)} cell{'s' if len(bad) > 1 else ''}): {names}"
+            + " — centred in its column in prod",
+            locs(A, a_idx, rcfg["max_locs"]) if a_idx else [], locs(B, idx, rcfg["max_locs"]),
+            {"kind": "table header alignment", "cells": len(bad)}, types=["table header alignment"]))
+    return out
 
 
 _BG: "OrderedDict[tuple, tuple]" = None  # (path, page) -> (RGB samples, width, height) of the page at 1 px/pt

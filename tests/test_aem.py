@@ -198,3 +198,40 @@ def test_map_found_whatever_its_case_or_language_suffix():
     assert aem.best_map("EW270Q-en.ditamap", maps, root) == maps[2]
     assert aem.best_map("SL04_and_SH04_EN", maps, root) == maps[3]
     assert aem.best_map("nothing-here", maps, root) == ""
+
+
+def test_guid_resolves_only_to_the_topic_whose_root_id_it_is():
+    """The GUID is mentioned by the map and by a topic that links to it: only the topic whose root
+    element has the GUID as its id is its file."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import parse_qs, urlparse
+    G = "GUID-11111111-2222-3333-4444-555555555555"
+    files = {"/content/dam/g/en/p/Maps/p.ditamap": f'<map><topicref href="{G}.dita"/></map>',
+             "/content/dam/g/en/p/Topics/other.dita": f'<topic id="GUID-aaaaaaaa-0000-0000-0000-000000000000"><xref href="{G}"/></topic>',
+             "/content/dam/g/en/p/Topics/Safety.dita": f'<?xml version="1.0"?><!DOCTYPE topic><topic id="{G}"><title>Safety</title></topic>'}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if u.path == "/bin/querybuilder.json":
+                q = parse_qs(u.query)
+                hits = [] if q.get("nodename", [""])[0].startswith("GUID") else [{"jcr:path": p} for p in files]
+                body = json.dumps({"hits": hits}).encode()
+            else:
+                body = files.get(u.path.replace("/jcr:content/renditions/original", ""), "").encode()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    cfg = {"author": f"http://127.0.0.1:{srv.server_address[1]}", "user": "u", "password": "p"}
+    aem._PATHS.clear()
+    paths, err = aem.resolve([(G, "en")], cfg)
+    srv.shutdown()
+    assert paths == {G: "/content/dam/g/en/p/Topics/Safety.dita"}, (paths, err)

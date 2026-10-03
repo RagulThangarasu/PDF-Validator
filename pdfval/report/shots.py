@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 import pymupdf
+from ..genuine import concise
 from PIL import Image, ImageDraw, ImageFont
 
 COLORS = {"content": (220, 38, 38), "style": (124, 58, 237), "layout": (234, 88, 12),
@@ -25,7 +26,8 @@ FOOTER_BAND = 0.12  # share of the page height at the top / bottom that is the r
 ANCHOR_WORDS = 4  # words of text just above / below a picture, looked up on the other side to find the same picture
 SAME_SHAPE = 0.2  # two pictures whose width:height differs by at most this share are the same picture, redrawn
 TEXT_BOX = 0.1  # a drawn box whose area is at least this share words is a note box / table, not an illustration
-SEVERITIES = {"errors": {"error"}, "warnings": {"error", "warning"}, "all": {"error", "warning", "info"}, "none": set()}
+SEVERITIES = {"errors": {"error"}, "warnings": {"error", "warning"}, "all": {"error", "warning", "info"}, "none": set(),
+              "reports": set()}  # reports: only what the genuine-issues and image reports show (batch runs)
 
 
 class _PageCache:
@@ -68,10 +70,33 @@ def _strip(pc: _PageCache, page: int, y0: float, y1: float) -> tuple[Image.Image
     return img, top.height + gap
 
 
+# set per finding by render(): an image issue is marked by one box around each picture it concerns,
+# never by boxes on the text inside the picture
+_PIC_MODE = False
+IMAGE_KINDS = {"missing image", "image changed", "image combined", "size / aspect", "image alignment", "placement",
+               "image outside box", "broken image", "image blacked out", "image distorted", "image pixelated",
+               "missing image label", "label in picture", "extra image", "image order", "raster vs vector"}
+
+
+def _to_pictures(pc: "_PageCache", page: int, boxes: list) -> list:
+    """Each box inside (or mostly over) a picture of the page becomes that picture's box, once."""
+    out = []
+    for b in boxes:
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        hit = next((r for r in _pictures(pc, page) if r[0] - 2 <= cx <= r[2] + 2 and r[1] - 2 <= cy <= r[3] + 2), None)
+        r = tuple(hit) if hit else tuple(b)
+        if r not in out:
+            out.append(r)
+    return out
+
+
 def _crop(pc: _PageCache, page: int, boxes: list, color, note: str | None, window: tuple[float, float],
           next_boxes: list | None = None) -> Image.Image:
     """The page from window[0] to window[1] (pt), full width, with the finding's boxes drawn on it
     (and next_boxes on the next page, when the window continues there)."""
+    if _PIC_MODE:
+        boxes = _to_pictures(pc, page, boxes)
+        next_boxes = _to_pictures(pc, page + 1, next_boxes or [])
     z = pc.zoom
     y0, y1 = window
     img, cont = _strip(pc, page, y0, y1)
@@ -250,11 +275,23 @@ def _plan(sides: dict, line: dict, page_h: dict) -> dict:
 
 def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 2.5,
            progress: Callable[[float, str], None] | None = None) -> int:
-    """Adds f["shots"] = {"baseline": rel, "candidate": rel} to each rendered finding."""
+    """Adds f["shots"] = {"baseline": rel, "candidate": rel} to each rendered finding.
+    [report] full_page_shots (default on): each screenshot is the whole page the issue is on, prod and stage
+    alike, so the two never show different crops."""
+    global _PIC_MODE
+    try:
+        from .. import engine as _engine
+        full_page = _engine.load_config().get("report", {}).get("full_page_shots", True)
+    except Exception:
+        full_page = True
     want = SEVERITIES.get(mode, SEVERITIES["all"])
     # genuine issues always get screenshots (unless none at all): they go into the genuine-issues report
+    from .pdf_report import is_image_issue
     todo = [(s, f) for s in result["sections"] for f in s["findings"]
-            if f["severity"] in want or (want and f.get("genuine"))]
+            if f["severity"] in want or (mode != "none" and f.get("genuine"))
+            or (mode == "reports" and is_image_issue(f))]
+    # a finding already pictured (a batch run's genuine / image issues) is not rendered again
+    todo = [(s, f) for s, f in todo if "shots" not in f]
     if not todo:
         return 0
     out = Path(out_dir)
@@ -358,12 +395,19 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 2
                     what[side] = (page, "aligned", lambda w, c=caches[side], p=page, y=y, t=f"Not in {name} - marker shows {how}",
                                   b=spot: _crop_marker(c, p, y, color, t, w, b))
         windows = _plan(where, line, page_h)
+        if full_page:
+            for side in what:
+                pg = what[side][0]
+                if pg is not None and pg >= 0:
+                    windows[side] = (0.0, caches[side].get(pg).height / caches[side].zoom)
+        _PIC_MODE = bool(set(f.get("types") or []) & IMAGE_KINDS)
         for side in ("baseline", "candidate"):
             page, kind, draw = what[side]
             # the prod picture says what is expected, the stage picture what is actually there
-            img = _caption(draw(windows.get(side)), "PROD" if side == "baseline" else "STAGE", title, f["message"], color)
+            img = _caption(draw(windows.get(side)), "PROD" if side == "baseline" else "STAGE", title,
+                           concise(f["message"]).replace("  ·  ", "\n"), color)
             rel = f"shots/{f['id']}_{'prod' if side == 'baseline' else 'stage'}.webp"
-            img.save(out / rel, "WEBP", quality=92)
+            img.save(out / rel, "WEBP", quality=92, method=0)  # fastest encoder: same quality, ~8 % larger, 2-3x faster
             f["shots"][side] = rel
             f["shots"][side + "_page"] = page + 1
             f["shots"][side + "_kind"] = kind

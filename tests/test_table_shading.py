@@ -63,7 +63,7 @@ def test_group_rows_shaded_in_prod_plain_in_stage(tmp_path, cfg):
     assert m.startswith("Table row background — 3 row(s) shaded in prod, plain in stage")
     assert "“Dimension & Weight”" in m and "“Power mode”" in m and "“Networking”" in m
     assert "\nProd: rows shaded" in m and "\nStage: the same rows plain #FFFFFF" in m
-    assert got[0]["genuine"]
+    assert not got[0]["genuine"]  # CSS: full report only
     assert len(got[0]["links"]) == 3  # both screenshots mark the same rows
 
 
@@ -80,7 +80,9 @@ def test_header_bar_repeated_on_the_next_page_is_not_extra_text(tmp_path, cfg):
     fs = _findings(r)
     assert not [f for f in fs if f["check"] == "content" and f.get("genuine")], [f["message"] for f in fs if f.get("genuine")]
     # a header repeated on the next page is expected: not reported at all
-    assert not [f for f in fs if "GR10" in f["message"] and f["check"] in ("content", "tables")], [f["message"] for f in fs]
+    # (the synthetic header is left-aligned: "Table header not centred" is right, and not what this test is about)
+    assert not [f for f in fs if "GR10" in f["message"] and f["check"] in ("content", "tables")
+                and "table header alignment" not in (f.get("types") or [])], [f["message"] for f in fs]
 
 
 def test_word_soft_hyphenated_at_a_line_break_is_no_difference(tmp_path, cfg):

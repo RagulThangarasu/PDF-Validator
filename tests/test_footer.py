@@ -9,6 +9,9 @@ from pdfval import engine
 def cfg():
     c = engine.load_config()
     c["sections"]["front_matter"] = False
+    # footer validation is off by default ([footer] enabled = false): these tests check the footer check itself
+    c.setdefault("footer", {})["enabled"] = True
+    c["ignore"]["types"] = [t for t in c["ignore"]["types"] if t not in ("footer", "header", "spec page number")]
     return c
 
 TITLES = ["Package contents", "Positioning", "Connection", "Operation", "Maintenance", "Specifications"]

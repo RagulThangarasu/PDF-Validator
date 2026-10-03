@@ -51,8 +51,9 @@ def check(u: Unit) -> list[Finding]:
         return []
     if not lcfg.get("compare_with_prod", True):
         # layout is judged on stage against the spec; the list markers themselves (a bullet or number
-        # missing, another numbering style / format, out of sequence) are content and still compared
-        return _bullets(u, positions=False)
+        # missing, another numbering style / format, out of sequence) are content and still compared;
+        # where the bullets sit (marker position, gap to the text, hanging indent) too, unless turned off
+        return _bullets(u, positions=lcfg.get("compare_bullets_with_prod", True))
     tol_i, tol_a, tol_lh = lcfg["indent_tolerance"], lcfg["align_tolerance"], lcfg["line_height_tolerance_em"]
     A, B = u.a, u.b
     starts = [(i, j) for i, j in u.pairs if A.words[i].line_start and B.words[j].line_start]
@@ -223,6 +224,7 @@ def _list_items(doc: Doc, rng: tuple[int, int], is_marker, tol_em: float, max_ga
 
     items: dict[int, dict] = {}
     owner: dict[int, dict | None] = {}  # line -> the list item it belongs to (None: plain text line)
+    marker_claims: dict[int, int] = {}  # marker word -> first text word of the item it introduces
     cur = page = None
     for li in range(l0, l1):  # reading order: items and their wrapped lines
         if li in lone:
@@ -239,8 +241,13 @@ def _list_items(doc: Doc, rng: tuple[int, int], is_marker, tol_em: float, max_ga
             m, t = f, f + 1
         elif not is_marker(w.text):
             m, t = marker_left_of(f), f
-        if m is not None:
+        if m is not None and m in marker_claims:
+            # The same marker can be seen from multiple extracted lines (e.g. wrapped text in a table cell).
+            # Reuse the original item instead of creating duplicate "marker missing" findings.
+            cur = items.get(marker_claims[m])
+        elif m is not None:
             cur = items[t] = {"marker": m, "text": t, "ref": None, "hang": None, "line": li}
+            marker_claims[m] = t
         elif cur is not None and doc.lines[li].block == doc.lines[doc.words[cur["text"]].line].block:
             if cur["hang"] is None:  # first wrapped line of the item
                 cur["hang"] = w.bbox[0] - doc.words[cur["text"]].bbox[0]
@@ -393,6 +400,16 @@ def _item_pairs(u: Unit, ia: dict, ib: dict, min_words: int = 3) -> list[tuple[i
 MARKER_KINDS = {"bullet marker", "numbering style", "numbering format", "numbering sequence", "marker glued"}
 
 
+def _marker_same_row(doc: Doc, wb, mark_text: str) -> bool:
+    """The marker's exact text sits elsewhere on the word's row (a table's own "No." column, read as
+    its own cell next to the text, not glued before it like a hanging-indent list): present, only
+    laid out differently - not a missing marker."""
+    cy = (wb.bbox[1] + wb.bbox[3]) / 2
+    half = max((wb.bbox[3] - wb.bbox[1]) / 2, 1.0)
+    return any(w.page == wb.page and w is not wb and w.text == mark_text
+               and abs((w.bbox[1] + w.bbox[3]) / 2 - cy) <= half for w in doc.words)
+
+
 def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
     """Bullet / numbered list alignment, compared on items whose text matched.
     positions=False: only the markers (missing, different, numbering), not where they sit."""
@@ -491,6 +508,8 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
             added = x == "none"
             for xa, xb, i, j in items:
                 mark = (B.words[xb["marker"]] if added else A.words[xa["marker"]]).text
+                if not added and _marker_same_row(B, B.words[j], mark):
+                    continue  # the number is there, read as its own table cell/column, not glued to the text
                 a1, b1 = ([i] if added else [xa["marker"], i]), ([xb["marker"], j] if added else [j])
                 findings.append(Finding(
                     check, lcfg.get("severity", {}).get("indent", "warning"),
@@ -519,7 +538,8 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
             text,
             locs(A, a_idx, rcfg["max_locs"]), locs(B, b_idx, rcfg["max_locs"]),
             {"role": role, "property": "indent", "kind": prop, "baseline": x, "candidate": y, "lines": len(items)},
-            types=["indent", "bullet"], links=paired_locs(A, B, pairs, rcfg["max_locs"]),
+            types=[prop, "bullet"] if prop in MARKER_KINDS else ["indent", "bullet"],
+            links=paired_locs(A, B, pairs, rcfg["max_locs"]),
         ))
     return findings + level_findings
 

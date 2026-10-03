@@ -67,6 +67,7 @@
   table.t tr.click { cursor: pointer; } table.t tr.click:hover td { background: var(--soft); }
   td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
   .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+  .b-stopped { background: color-mix(in srgb, var(--muted, #64748b) 16%, transparent); color: var(--muted, #64748b); }
   .b-fail, .b-error { background: color-mix(in srgb, var(--fail) 14%, transparent); color: var(--fail); }
   .b-warn, .b-warning { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
   .b-pass, .b-done { background: color-mix(in srgb, var(--pass) 14%, transparent); color: var(--pass); }
@@ -286,7 +287,7 @@
 <body>
 <header class="top">
   <a class="brand" href="#/new" title="Home – new comparison" style="color:inherit;text-decoration:none"><span class="logo">⇆</span>PDF Parity</a>
-  <nav><a href="#/new" data-nav="new">New comparison</a><a href="#/runs" data-nav="runs">Runs</a><a href="#/metadata" data-nav="metadata">Metadata</a></nav>
+  <nav><a href="#/new" data-nav="new">New comparison</a><a href="#/runs" data-nav="runs">Runs</a><a href="#/pairs" data-nav="pairs">Prod ⇄ Stage pairs</a><a href="#/metadata" data-nav="metadata">Metadata</a></nav>
   <div class="theme" role="group" aria-label="Theme">
     <button data-theme-set="light">Light</button><button data-theme-set="dark">Dark</button><button data-theme-set="system" title="Follow the operating system">System</button>
   </div>
@@ -332,10 +333,82 @@ async function route() {
   document.querySelectorAll('[data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === (view || 'new') || (view === 'run' && a.dataset.nav === 'runs')));
   if (view === 'runs') return viewRuns();
   if (view === 'metadata') return viewMetadata();
+  if (view === 'pairs') return viewPairs();
   if (view === 'run' && id) return viewRun(id, qs);
   return viewNew(qs);
 }
 addEventListener('hashchange', route);
+
+// ---------------- prod ⇄ stage pairs: every stage PDF (aem-map-pdfs) with its prod PDF (prod library), run as a batch
+function viewPairs() { return pairsPanel(app, false); }
+
+async function pairsPanel(root, embedded) {
+  root.innerHTML = '<p class="muted">Loading matched publications…</p>';
+  let d;
+  try { d = await api('/api/pairs'); } catch (e) { root.innerHTML = ''; return; }
+  if (!root.isConnected) return;
+  if (!d.stage.length) { root.innerHTML = embedded ? '' : '<p class="muted">No stage PDFs yet: download the AEM map PDFs first (python -m pdfval aem-pdfs).</p>'; return; }
+  const label = f => `${f.group}/${f.product}${f.sub ? '/' + f.sub : ''}/${f.name}`;
+  const byLabel = new Map(d.prod.map(f => [label(f), f.path]));
+  const byPath = new Map(d.prod.map(f => [f.path, label(f)]));
+  const langs = [...new Set(d.stage.map(s => s.lang))];
+  const P = { q: '', lang: langs.includes('en') ? 'en' : '', only: '' };
+  d.stage.forEach((s, k) => { s.k = k; s.on = false; });  // nothing ticked: the user picks what to test
+  const $ = sel => root.querySelector(sel);
+  root.innerHTML = `<div class="row">${embedded ? '<div><div class="role">Batch · prod ⇄ stage</div><h2 style="margin-top:4px">Matched publications</h2></div>' : '<h1>Prod ⇄ Stage pairs</h1>'}<span class="spacer"></span>
+      <span class="small muted" id="pr-count"></span><button class="btn primary" id="pr-run">Validate selected</button></div>
+    ${embedded ? '<p class="small muted" style="margin:4px 0 10px">Each stage PDF (AEM map) with its matched prod PDF. Tick the ones to test and press <b>Validate selected</b> — they run with the options below and appear on the Runs page.</p>' : ''}
+    <p class="muted" ${embedded ? 'hidden' : ''}>Stage = the PDFs generated from the AEM maps (<code>${esc(d.stage_dir)}</code>), prod = the prod library.
+      Each stage map is paired with its prod PDF through the migration Excel (model row → file = prod archive), else by name.
+      Change any prod PDF by typing in its box; tick the pairs to compare and run them – they queue on the Runs page.</p>
+    <div ${embedded ? '' : 'class="card"'}><div class="row" style="gap:8px;flex-wrap:wrap">
+      <select id="pr-lang" style="width:auto;flex:0 0 auto"><option value="">All languages</option>${langs.map(l => `<option ${l === P.lang ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+      <select id="pr-only" style="width:auto;flex:0 0 auto"><option value="">All pairs</option><option value="paired">Paired</option><option value="unpaired">No prod PDF</option></select>
+      <input type="search" id="pr-q" placeholder="Search product, folder or file…" style="flex:1 1 220px;width:auto">
+      <button class="btn sm" id="pr-all">Tick all shown</button><button class="btn sm" id="pr-none">Untick all shown</button></div></div>
+    <datalist id="pr-prod">${d.prod.map(f => `<option value="${esc(label(f))}">`).join('')}</datalist>
+    <div style="overflow:auto;max-height:${embedded ? '380px' : '70vh'};margin-top:10px;border:1px solid var(--line, #ddd);border-radius:8px">
+      <table class="t" style="margin:0"><thead style="position:sticky;top:0;z-index:1;background:var(--card, #fff)"><tr><th></th><th>Stage (AEM map PDF)</th>
+      <th>Prod PDF</th><th>Paired by</th></tr></thead><tbody id="pr-body"></tbody></table></div>`;
+  const shown = () => d.stage.filter(s => (!P.lang || s.lang === P.lang) && (!P.only || (P.only === 'paired') === !!s.prod) &&
+    (!P.q || `${s.folder}/${s.name} ${byPath.get(s.prod) || ''}`.toLowerCase().includes(P.q)));
+  const count = () => { const n = d.stage.filter(s => s.on && s.prod).length; $('#pr-count').textContent = `${n} pair(s) selected`; $('#pr-run').disabled = !n; };
+  const draw = () => {
+    $('#pr-body').innerHTML = shown().map(s => `<tr data-k="${s.k}">
+      <td><input type="checkbox" data-on ${s.on && s.prod ? 'checked' : ''} ${s.prod ? '' : 'disabled'}></td>
+      <td><b>${esc(s.product)}</b> <span class="badge">${esc(s.lang)}</span><div class="small muted">${esc(s.folder)}/${esc(s.name)}</div></td>
+      <td style="min-width:340px"><input list="pr-prod" data-prod value="${esc(byPath.get(s.prod) || '')}" placeholder="— pick the prod PDF —" style="width:100%"></td>
+      <td>${s.via ? `<span class="badge ${s.via === 'Excel' ? 'b-pass' : 'b-warn'}">${esc(s.via)}</span>` : '<span class="badge b-fail">none</span>'}</td></tr>`).join('');
+    count();
+  };
+  $('#pr-body').onchange = e => {
+    const s = d.stage[+e.target.closest('tr').dataset.k];
+    if (e.target.matches('[data-on]')) s.on = e.target.checked;
+    if (e.target.matches('[data-prod]')) {
+      const path = byLabel.get(e.target.value.trim()) || '';
+      s.prod = path; s.on = !!path; s.via = path ? 'manual' : '';
+      draw();
+    }
+    count();
+  };
+  $('#pr-lang').onchange = e => { P.lang = e.target.value; draw(); };
+  $('#pr-only').onchange = e => { P.only = e.target.value; draw(); };
+  $('#pr-q').oninput = e => { P.q = e.target.value.toLowerCase(); draw(); };
+  $('#pr-all').onclick = () => { shown().forEach(s => s.on = !!s.prod); draw(); };
+  $('#pr-none').onclick = () => { shown().forEach(s => s.on = false); draw(); };
+  $('#pr-run').onclick = async () => {
+    const pairs = d.stage.filter(s => s.on && s.prod).map(s => ({ baseline: s.prod, candidate: s.path, name: `${s.product} (${s.lang})` }));
+    const options = { mode: 'pdf', screenshots: 'all' };
+    if (embedded) document.querySelectorAll('[id^="o-"]').forEach(el => options[el.id.slice(2)] = el.type === 'checkbox' ? el.checked : el.value);
+    if (!pairs.length || !confirm(`Queue ${pairs.length} prod ⇄ stage comparison(s)? They run one after another.`)) return;
+    $('#pr-run').disabled = true;
+    try { const r = await api('/api/pairs/run', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                   body: JSON.stringify({ pairs, options }) });
+          location.hash = '#/runs'; }
+    catch (e) { alert(e.message); $('#pr-run').disabled = false; }
+  };
+  draw();
+}
 
 // ---------------- metadata: Document Title / Page Title of every product map in AEM vs the migration sheet
 async function viewMetadata() {
@@ -446,6 +519,7 @@ async function viewNew(qs) {
         </details>`}
       </div>
     </div>
+    ${MODE === 'pdf' ? '<div class="card" id="pairs-panel" style="margin-top:16px"></div>' : ''}
     <div class="card" id="aem-card" style="margin-top:16px">
       <div class="row"><b>AEM login</b><span class="muted small">— so every issue links to its exact topic file in AEM (stage PDFs from AEM Guides)</span>
         <span class="spacer"></span><span id="aem-state" class="small"></span></div>
@@ -489,7 +563,8 @@ async function viewNew(qs) {
         </div>
       </details>
       <div id="go-status" class="small muted" style="margin-top:10px"></div>
-    </div>`;
+    </div>
+`;
   // restore the previous run's general options
   Object.entries(o).forEach(([k, v]) => {
     const el = document.getElementById('o-' + k);
@@ -510,6 +585,7 @@ async function viewNew(qs) {
   if (MODE === 'pdf') renderSlot('candidate', files.filter(f => !isProd(f)));
   else $('#url').oninput = updateGo;
   $('#go').onclick = start;
+  if ($('#pairs-panel')) pairsPanel($('#pairs-panel'), true);
   $('#aem-check').onclick = () => aemLogin(true);
   if ($('#aem-stage-go')) {
     const info = () => $('#aem-map-info');
@@ -708,7 +784,29 @@ async function start() {
 // ---------------- runs list
 async function viewRuns() {
   const runs = await api('/api/runs');
-  app.innerHTML = `<div class="row"><h1>Runs</h1><span class="spacer"></span><a class="btn primary" href="#/new">New comparison</a></div>
+  let batches = [];
+  try { batches = await api('/api/batches'); } catch (e) { /* optional */ }
+  const batchCards = batches.slice(0, 5).map(b => {
+    const left = b.queued + b.running;
+    return `<div class="card" style="margin-top:12px"><div class="row" style="gap:10px;flex-wrap:wrap">
+      <div><div class="role">Batch · ${fmtDate(b.created)}</div><b>${b.runs} publication(s)</b></div>
+      <span class="badge b-pass">${b.done} done</span>${b.running ? `<span class="badge b-running">${b.running} running</span>` : ''}
+      ${b.queued ? `<span class="badge">${b.queued} queued</span>` : ''}${b.error ? `<span class="badge b-fail">${b.error} failed</span>` : ''}
+      <div class="bar" style="width:160px"><i style="width:${100 * (b.done + b.error) / b.runs}%"></i></div>
+      <span class="spacer"></span>
+      ${b.done ? `<a class="btn ${left ? '' : 'primary'} sm" href="/api/batches/${b.id}/reports.zip"
+          title="PDF report + image report of every finished publication, one folder each">⬇ Download reports (zip)${left ? ` — ${b.done} of ${b.runs} ready` : ''}</a>`
+        : '<span class="small muted">reports appear here as runs finish</span>'}
+      ${b.done ? `<a class="btn sm" href="/api/batches/${b.id}/consolidated.pdf" target="_blank" rel="noopener"
+          title="Every product with its content match %, section results and issue counts">📊 Consolidated report</a>
+        <a class="btn sm" href="/api/batches/${b.id}/consolidated.csv" title="The same as a spreadsheet">CSV</a>` : ''}</div></div>`;
+  }).join('');
+  const active = runs.filter(r => r.status === 'running' || r.status === 'queued').length;
+  app.innerHTML = `<div class="row"><h1>Runs</h1><span class="spacer"></span>
+    <button class="btn" data-stopall ${active ? '' : 'disabled'} title="Stop every running and queued run">■ Stop all${active ? ` (${active})` : ''}</button>
+    <button class="btn danger" data-clear title="Stop everything and remove every run, including finished reports">Clear</button>
+    <a class="btn primary" href="#/new">New comparison</a></div>
+    ${batchCards}
     <div class="card" style="margin-top:14px;padding:0;overflow-x:auto">
     ${runs.length ? `<table class="t"><thead><tr><th>Run</th><th>Created</th><th>Status</th><th>Result</th>
       <th class="n">Content</th><th class="n">Critical</th><th class="n">CSS issues</th><th class="n">Sections fail / warn / pass</th><th></th></tr></thead><tbody>
@@ -724,10 +822,22 @@ async function viewRuns() {
           <td class="n">${s?.critical ? (s.critical.total ? `<span class="badge crit">${s.critical.total}</span>` : '0') : ''}</td>
           <td class="n">${s?.css?.issues ?? ''}</td>
           <td class="n">${s ? `${s.fail} / ${s.warn} / ${s.pass}` : ''}</td>
-          <td style="white-space:nowrap"><button class="btn sm" data-rerun="${r.id}" title="Run again with the same inputs">↻ Rerun</button>
+          <td style="white-space:nowrap">${r.status === 'running' || r.status === 'queued' ? `<button class="btn sm" data-stop="${r.id}" title="Stop this run">■ Stop</button>` : ''}
+            <button class="btn sm" data-rerun="${r.id}" title="Run again with the same inputs">↻ Rerun</button>
             <button class="btn sm danger" data-del="${r.id}" title="Delete run">Delete</button></td></tr>`;
       }).join('')}</tbody></table>` : `<div class="empty">No runs yet. <a href="#/new">Start a comparison</a>.</div>`}</div>`;
   app.onclick = async e => {
+    if (e.target.closest('[data-stopall]')) {
+      if (confirm('Stop every running and queued run?')) { await api('/api/runs/stop-all', { method: 'POST' }); viewRuns(); }
+      return;
+    }
+    if (e.target.closest('[data-clear]')) {
+      if (confirm('Stop all runs and remove EVERY run, including finished ones and their reports?')) {
+        await api('/api/runs/clear', { method: 'POST' }); viewRuns(); }
+      return;
+    }
+    const st = e.target.closest('[data-stop]');
+    if (st) { e.stopPropagation(); st.disabled = true; await api(`/api/runs/${st.dataset.stop}/stop`, { method: 'POST' }); viewRuns(); return; }
     const rr = e.target.closest('[data-rerun]');
     if (rr) { e.stopPropagation(); const j = await api(`/api/runs/${rr.dataset.rerun}/rerun`, { method: 'POST' }); location.hash = '#/run/' + j.id; return; }
     const del = e.target.closest('[data-del]');
@@ -790,9 +900,16 @@ async function viewRun(id, qs) {
   });
   if (job.status === 'queued' || job.status === 'running') {
     app.innerHTML = head + `</div><div class="card" style="margin-top:18px"><div class="row"><b>${job.status === 'queued' ? 'Waiting for another run to finish…' : 'Validating…'}</b>
-      <span class="spacer"></span><span class="muted">${Math.round(job.progress * 100)}%</span></div>
+      <span class="spacer"></span><span class="muted">${Math.round(job.progress * 100)}%</span>
+      <button class="btn sm" data-stop-this style="margin-left:10px">■ Stop</button></div>
       <div class="bar" style="margin:10px 0"><i style="width:${job.progress * 100}%"></i></div><div class="small muted">${esc(job.message)}</div></div>`;
+    const sb = document.querySelector('[data-stop-this]');
+    if (sb) sb.onclick = async () => { sb.disabled = true; clearTimeout(poll); await api(`/api/runs/${id}/stop`, { method: 'POST' }); viewRun(id, qs); };
     poll = setTimeout(() => viewRun(id, qs), 1000);
+    return;
+  }
+  if (job.status === 'stopped') {
+    app.innerHTML = head + `</div><div class="card" style="margin-top:18px"><b>Run stopped</b><div class="muted">${esc(job.message)} - use Rerun to start it again.</div></div>`;
     return;
   }
   if (job.status === 'error') {
@@ -823,6 +940,8 @@ async function viewRun(id, qs) {
                      || (f.types || []).some(t => ['missing image label', 'label in picture', 'text in image'].includes(t))).length, 0);
                    return `<a class="btn" href="${base}image-issues.pdf?download=${encodeURIComponent('image-report-' + id + '.pdf')}"
             title="Only picture issues: missing / changed / smaller or bigger / pixelated / blurred pictures, and picture labels missing in stage, with screenshots">⬇ Image report (${n})</a>`; })()}
+        <a class="btn" href="${base}side-by-side.pdf?download=${encodeURIComponent('side-by-side-report-' + id + '.pdf')}"
+           title="Page by page: each prod page beside the matching stage page, the issues boxed and numbered on both, with their full description">⬇ Side-by-side report</a>
       </div></div>
     ${job.warning ? `<div class="warnbox" role="alert"><b>⚠ Same file compared twice.</b> ${esc(job.warning)}
        <a class="btn sm" href="#/new?from=${id}">Pick another candidate</a></div>` : ''}

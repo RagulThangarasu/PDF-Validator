@@ -41,10 +41,17 @@ case_sensitive = true
 ignore_quote_style = true     # true = ’ ‘ “ ” are the same as ' " (haven’t = haven't): not reported
 normalize_typography = false  # true = also treat – — as - (ignore typographic dash changes)
 check_spacing = true          # double / missing spaces between words on the same line
+ignore_superscript_spacing = true  # the space before / after a superscript (® ™ ¹, a raised footnote mark) is not reported
 ignore_relocated = true       # a missing/extra block whose words all exist unmatched on the other side
                               # (wrapped to the next line, another cell order) is not reported
+relocated_overlap = 0.85      # ... or at least this share of them (a two-column table read in another row/column
+                              # order rarely resolves every single word to the exact same token): the rest is
+                              # reported as a smaller, correctly scoped diff instead of the whole block "missing"
+relocated_overlap_min_words = 15  # ... only for a block at least this big; a one- or two-word block is already
+                              # near 100% "covered" by definition, so relaxing it there would hide a genuine
+                              # one-word difference (a changed punctuation mark) behind the move
 ignore_repeated_headers = true  # a table header row repeated at the top of a continuation page is pagination
-check_paragraphs = true       # report text starting a new paragraph / a line broken on purpose on one side only
+check_paragraphs = false      # report text starting a new paragraph / a line broken on purpose on one side only
                               # (prod "9. Filmmaker" / "Switches ..." on two lines, stage on one)
 dehyphenate = true            # a word split by a hyphen at a line break is one word (line breaks are layout)
 ignore_toc_page_numbers = true  # "Title ...... 17": page numbers shift whenever the layout differs
@@ -76,18 +83,25 @@ row_match_ratio = 0.5         # a prod table row is MISSING (critical) when < 50
 missing_row_severity = "error"
 extra_row_severity = "warning"
 overflow_severity = "error"
+check_cells = false           # report cells merged (fewer cells in stage) or split (more cells in stage) in mapped rows
+cells_severity = "warning"
 check_borders = true          # every border of a prod table (outer edges, lines between rows / columns) must be drawn in stage
 check_row_background = true   # rows shaded in prod (group rows between the data rows) must be shaded in stage, and the other way round
 row_background_severity = "warning"
 border_severity = "error"     # a prod table border missing in stage
 border_color_tolerance = 150  # euclidean RGB distance: border colour differs (black -> light grey), not anti-aliasing
 border_color_severity = "warning"   # text in a stage table that runs across its cell border (not in prod)
+check_header_align = true     # stage table header cells (dark header bar): text centred in its column (design spec)
+header_align_tolerance = 4.0  # pt the text may sit off the column centre
+header_align_severity = "error"
 
 [integrity]
 glyphs = true                 # broken glyphs in stage (U+FFFD, private-use, NUL) -> critical
 offpage = true                # text drawn outside the page -> critical
 links = true                  # broken link targets -> critical; prod links missing in stage -> error
 missing_link_severity = "error"
+check_link_text_in_content = true  # verify "missing text" against link text on stage; suppress false positives
+ignore_link_text_missing = true    # when missing prod text is found in stage links, suppress the finding
 
 [toc]
 # The printed table of contents is compared on its own: entries, levels (from indentation) and
@@ -110,6 +124,7 @@ title_match_threshold = 0.8   # fuzzy score to pair prod and stage entries
 # font family, weight, size, line height, colour, page size and margins. true = also report where
 # stage's fonts differ from prod's (the prod -> stage style map).
 compare_with_prod = false
+check_emphasis = false        # report bold vs plain and italic vs upright emphasis differences
 properties = ["family", "weight", "italic", "size", "color"]
 size_tolerance = 0.5          # pt
 color_tolerance = 24          # euclidean RGB distance (0-441)
@@ -133,8 +148,13 @@ line_height_tolerance_em = 0.3
 heading_space_tolerance_em = 0.8
 min_lines = 1
 check_placement = true        # graphics: inline vs own line, and which word they follow (via text alignment)
+ignore_center_placement = true  # a centred graphic only moving between inline and its own line (same
+                              # neighbouring text both sides) is a reflow, not reported; a move next to
+                              # different/missing text is still reported
 check_wrap = false            # true = report the same text wrapping to the next line at a different word (line-wrap)
 check_bullets = true          # bullet / numbered list alignment, reported as indent issues (see list_marker)
+compare_bullets_with_prod = true  # bullet alignment (marker position, gap to the text, hanging indent) compared with
+                              # prod even when compare_with_prod = false (also in tables and Note / Warning boxes)
 bullet_glued_em = 0.12        # a list number / bullet closer than this to its text (em) touches it: "15.12 V", "16.RS-232"
 # a line's first word is a list marker when it is an enumerator (1. 2) a. (b) iv.) ...
 # Roman numerals: i v x only ("(mm)" - millimetres - is not item 2000)
@@ -157,7 +177,16 @@ line-wrap = "warning"
 [assets]
 blurred_ratio = 0.35          # stage picture blurred: its edge sharpness is below this share of prod's
 blurred_severity = "error"
-marks_severity = "error"      # red highlight marks (outlines drawn over a screenshot) on one side only: a different image
+similar_image_severity = "warning"   # the same picture re-captured / re-cropped / without prod's highlight marks:
+similar_picture_distance = 0.5       # an image difference (warning), not an error; above this visual distance
+                                     # the stage picture is another picture: changed_severity (error)
+tiny_label_pt = 5.0           # picture labels smaller than this (an IP address on a screenshot) count as drawn into the
+                              # stage picture when its other labels are found there (too small to read back)
+small_label_pt = 7.0          # all of a picture's labels smaller than this, and stage shows the same picture (a bitmap too
+                              # coarse to read back, e.g. icon captions "0-40°C"): the labels are in that picture
+combined_slice_score = 0.72   # a prod picture built from slices (an OSD menu cut in strips): once one slice is found in a
+                              # stage picture, the next ones need this correlation inside it (red highlight frames lower it)
+marks_severity = "warning"    # red highlight marks (outlines drawn over a screenshot) on one side only: a different image
 marks_min_pixels = 20         # ... at least this many strong-red pixels on the picture drawn 400 px wide
 marks_ratio = 0.3             # ... and the other side's picture has less than this share of them
 marks_max_share = 0.1         # ... and they cover at most this share of the picture (a thin outline, not a red icon)
@@ -181,8 +210,11 @@ picture_min_width = 0.15      # ... judged only for pictures at least this share
 blackout_fraction = 0.15      # share of a picture that is black in stage but not in prod -> blacked out
 raster_vs_vector_severity = "info"  # same artwork, bitmap on one side and vector paths on the other
 artwork_match_score = 0.6      # min cross-correlation when searching the other page for the same artwork
+check_alignment = true        # report image alignment differences (left/right/center/full width)
+ignore_center_alignment = true # suppress center alignment changes (only report left/right differences)
 
 [report]
+full_page_shots = true        # PDF report screenshots: the whole prod page and the whole stage page (not a crop)
 max_locs = 40                 # highlight boxes per finding
 max_findings_per_check = 0    # per check and section; 0 = no cap, every finding is reported (a cap only ever
                               # thins CSS / layout findings: critical and genuine issues are always kept)
@@ -208,6 +240,7 @@ footer = ""
 breadcrumb = ""
 
 [genuine]
+report_visually_present = false   # text drawn into a stage picture (label in picture, text in image, text as graphic): the reader sees it - not reported
 # The issues that mean something is really wrong in stage (the "genuine issues" report and
 # `pdfval compare --genuine`): every issue type, including the TOC and the design-spec typography / layout.
 # Only info notes stay out (still in the full report): text on another line, a callout label on one side
@@ -217,38 +250,30 @@ breadcrumb = ""
 # Bullets: a bullet point missing, added or changed, and bullet alignment (marker position, the gap
 # to the text, hanging indent of wrapped lines).
 types = [
-  "spec pagination", "spec page structure",                      # page breaks: split callouts, headings at a page bottom, tables
-  # content: missing, extra, changed text; case, punctuation, spacing, paragraph / line breaks
+  # content differences
   "missing text", "extra text", "changed text", "case", "punctuation", "case + punctuation", "spacing",
-  "superscript", "paragraph break", "content in wrong section", "duplicate content", "text as graphic",
-  "emphasis",                                                        # the same words bold / italic vs plain
-  "missing section", "duplicate section", "extra section",          # whole blocks of content missing / repeated
-  # bullets and numbered lists
-  "bullet", "bullet marker", "numbering style", "numbering format", "numbering sequence", "marker glued", "list level",
-  "row alignment",                                                  # list items / captions side by side, not level in stage
-  "bracket spacing",                                                  # the number inside ( ): centred, spaced, present
-  # tables
-  "missing table", "missing row", "missing header", "tables merged", "rows merged", "table split", "extra table",
-  "extra row", "row split", "cells merged", "cells split", "table to text", "text to table",
-  "text outside table border", "table border", "table border added", "row order", "row background",
-  # running footers / headers, prod vs stage: page number missing / moved / restyled, footer text missing / changed
-  "footer", "header",
-  # images and icons: missing, broken, size, alignment, pixelated, any visual difference
-  "missing image", "broken image", "image blacked out", "image changed", "duplicate image", "image in wrong section",
-  "image outside box", "extra image", "image distorted", "size / aspect", "image pixelated", "placement",
-  "image blurred", "image alignment",
-  "image order",                                                    # pictures in another sequence
-  # the user's main scenarios that come from other checks: callout variations, page numbers, content
-  # sequence, text alignment / indent
-  "spec callout title", "spec callout icon", "spec callout content", "spec callout background",
-  "spec page number", "order differs", "text-align", "indent", "spec text-align",
-  "image combined", "missing image label",
-  # TOC
-  "missing entry", "extra entry", "title differs", "wrong page", "level differs", "heading differs",
-  # links: redirection (wrong target), missing, extra in stage, broken; attachments, broken characters
+  "superscript", "paragraph break", "content in wrong section", "duplicate content",
+  "missing section", "duplicate section", "extra section",
+  "emphasis",                                                        # bold / italic missing (or added)
+  "label joined",                                                    # bold label + its plain text on one line (prod: 2 lines)
+  # hyperlinks
   "broken link", "missing link", "extra link", "link to wrong section", "link target differs",
-  "link lands elsewhere", "link page number", "link quotes",
-  "missing file", "broken glyph", "text off page",
+  "link lands elsewhere", "link page number", "page zero",   # “on page 0”: a cross-reference that did not resolve
+  # lists: 1, 2, 3 instead of a, b, c, bullets missing / different
+  "bullet", "bullet marker", "numbering style", "numbering format", "numbering sequence", "marker glued",
+  "indent",                                                   # bullet position / gap to the text / hanging indent
+  # images: blur, alignment, labels missing, artwork missing
+  "image blurred", "image alignment", "placement", "missing image label", "missing image", "image smaller",
+  "broken image", "duplicate image", "image changed", "image blacked out", "image distorted", "image in wrong section",
+  # content order, hyperlink title quotes
+  "reordered", "order differs", "link quotes",
+  # table of contents: entries missing / added, title or level differs, wrong page number
+  "missing entry", "extra entry", "title differs", "level differs", "wrong page",
+  # notes (callouts) that differ
+  "callout style",   # a NOTE: label vs an icon only is house style (info, full report only)
+  # tables: header (missing / not centred as in prod), rows and cells merged or split
+  "missing header", "table header alignment", "rows merged", "row split", "cells merged", "cells split",
+  "missing row", "missing table", "tables merged",
 ]
 data_missing_words = 1        # "missing text" is genuine when >= N of its words are absent from stage (1 = any)
 moved_min_words = 5           # content in the wrong section: blocks of >= N words ...
@@ -267,6 +292,18 @@ types = [
   "table width", "column width",            # table widths follow the DITA rendering rules
   "table border", "table border added",     # table layout: borders drawn by the template
   "spec table header", "spec table border", # table header bar / border colours
+  "footer", "header", "spec page number",   # running footers / headers and their page numbers: not validated
+  # CSS / layout: only spacing and indentation are validated (indent, bullet alignment, list level, spacing);
+  # fonts, sizes, colours, line heights, alignment and the design-spec styling are not
+  "font-size", "font-family", "font-weight", "font-style", "color", "line-height", "text-align", "space-above",
+  "line-wrap", "row alignment",
+  "spec font-size", "spec font-family", "spec font-weight", "spec color", "spec line-height", "spec text-decoration",
+  "spec text-align", "spec bullet", "spec list numbering", "spec callout title", "spec callout background",
+  "spec callout content", "spec callout icon", "spec cover", "spec page margin", "spec page size", "spec pagination",
+  "spec page structure",
+  # images: text inside a picture blurred / drawn into it is not reported
+  "image blurred", "text as graphic",
+  "superscript",                            # the same text raised / not raised (MacBook® vs MacBook^®): looks the same
 ]
 in_table_cells = ["paragraph break", "line-wrap",   # text wrapping inside table cells
                   "emphasis", "indent", "text-align", "spec text-align"]  # table layout: header weight, alignment
@@ -315,3 +352,18 @@ poll_s = 10
 [aem.products]                # ditamap name (without .ditamap, exact or regex) = DAM folder of that product
 # "sl04_and_sh04" = "/content/dam/benq-aem-guides/en/board/sl04-sh04"
 "sl04_and_sh04" = "/content/dam/benq-aem-guides/en/Education/Signage/SL04-and-SH04"
+
+[notes]
+# Notes / callouts, prod against stage: the usual look of each note type (filled box and its colour, bar on the
+# left, border). One finding per type when they differ. Notes without a title (icon only) are not read.
+compare_style = true
+compare_outliers = true       # also flag a single note whose look does not match its paired note, even when
+                              # most notes of the type agree (an outlier the type-wide finding would miss)
+min_notes = 2                 # compare a type only when both sides have at least this many titled notes
+severity = "warning"
+
+[ui]
+parallel_runs = 0             # comparisons run at the same time (each in its own process); 0 = auto: every CPU core but one
+
+[footer]
+enabled = false               # running header / footer (page numbers, footer text) prod vs stage: not validated

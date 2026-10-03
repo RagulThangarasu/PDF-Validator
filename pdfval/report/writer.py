@@ -15,10 +15,16 @@ from . import shots as shotmod
 VIEWER = Path(__file__).with_name("viewer.html")
 
 
+# built when first opened (batch runs): the full report and the CSS report, with every finding's screenshot
+DEFERRED = ("report.pdf", "css-issues.pdf")
+
+
 def write_all(result: dict, out_dir: str, shots: str = "all",
-              progress: Callable[[float, str], None] | None = None) -> Path:
-    """shots: all | warnings | errors | none — which findings get prod/stage screenshots
-    (and therefore appear with images in report.pdf). progress(fraction, message) is optional."""
+              progress: Callable[[float, str], None] | None = None, full: bool = True) -> Path:
+    """shots: all | warnings | errors | reports | none — which findings get prod/stage screenshots
+    (and therefore appear with images in report.pdf). progress(fraction, message) is optional.
+    full=False (batch runs): only the genuine-issues and image reports are built now, with their
+    screenshots; report.pdf and css-issues.pdf are built by build_deferred() when first opened."""
     report = progress or (lambda f, m: None)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -27,13 +33,17 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
     report(0.72, "Rendering TOC pages")
     _toc_images(result, out)
     report(0.75, "Building PDF report")
-    # every issue of every severity: the screenshot setting only decides which issues get pictures
-    pdf_report.build(result, out, progress=lambda f, m: report(0.75 + 0.23 * f, m))
+    if full:
+        # every issue of every severity: the screenshot setting only decides which issues get pictures
+        pdf_report.build(result, out, progress=lambda f, m: report(0.75 + 0.23 * f, m))
+    else:
+        result["meta"]["deferred"] = list(DEFERRED)
     report(0.98, "Building PDF report (issues)")
     pdf_report.build(result, out, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
     write_genuine_csv(result, out / "genuine-issues.csv")
-    report(0.99, "Building CSS report")
-    pdf_report.build(result, out, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
+    if full:
+        report(0.99, "Building CSS report")
+        pdf_report.build(result, out, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
     report(0.995, "Building image report")
     pdf_report.build(result, out, options=pdf_report.IMAGE_REPORT, filename="image-issues.pdf")
     if (result.get("site") or {}).get("rows"):
@@ -45,6 +55,23 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
     for name, meta in (("baseline.pdf", result["meta"]["baseline"]), ("candidate.pdf", result["meta"]["candidate"])):
         _link_or_copy(meta["path"], out / name)
     return write_viewer(result, out)
+
+
+def build_deferred(run_dir: str | Path, name: str) -> Path:
+    """A report a batch run left out (DEFERRED): render the screenshots it needs, then build it."""
+    out = Path(run_dir)
+    result = json.loads((out / "results.json").read_text())
+    shotmod.render(result, out, "all")
+    for n in result["meta"].get("deferred", []):
+        if n == "report.pdf":
+            pdf_report.build(result, out)
+        elif n == "css-issues.pdf":
+            pdf_report.build(result, out, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
+    result["meta"]["deferred"] = []
+    result["meta"]["screenshots"] = "all"
+    (out / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
+    write_viewer(result, out)
+    return out / name
 
 
 def write_viewer(result: dict, out: Path) -> Path:
@@ -60,16 +87,17 @@ def write_genuine_csv(result: dict, path: Path) -> Path:
         w = csv.writer(fh)
         w.writerow(["#", "Section", "Issue", "Severity", "Prod pages", "Stage pages", "AEM topic", "GUID", "Element",
                     "Open in AEM", "Description", "Why it matters", "Prod screenshot", "Stage screenshot"])
+        from .pdf_report import is_image_issue
         for s in result["sections"]:
             for f in s["findings"]:
-                if f.get("genuine"):
+                if f.get("genuine") or is_image_issue(f):  # the same issues as the PDF report
                     pa, pc = where(f)
                     shots = f.get("shots") or {}
                     a = f.get("aem") or {}
                     # Excel shows the GUID as a link that opens the topic in AEM
                     guid = f'=HYPERLINK("{a["url"]}","{a["guid"]}")' if a.get("url") else a.get("guid", "")
-                    w.writerow([f["id"], s["title"], f["issue"], f["severity"], pa, pc, a.get("topic", ""), guid,
-                                a.get("element", ""), a.get("url", ""), f["description"],
+                    w.writerow([f["id"], s["title"], f.get("issue") or f.get("check", ""), f["severity"], pa, pc, a.get("topic", ""), guid,
+                                a.get("element", ""), a.get("url", ""), f.get("description") or f.get("message", ""),
                                 f.get("why", ""), shots.get("baseline", ""), shots.get("candidate", "")])
     return path
 

@@ -161,9 +161,9 @@ def snippet(doc: Doc, idxs, n: int = 0) -> str:
     return normalize.join_words(doc.words[i] for i in idxs)
 
 
-from . import brackets, assets, content, integrity, layout, placement, rows, style, tables, typography  # noqa: E402
+from . import joined, brackets, assets, content, integrity, layout, placement, rows, style, tables, typography  # noqa: E402
 
 # content must run first: it produces the word pairs every other check relies on;
 # placement needs the image pairs from assets
-PIPELINE = [content.check, brackets.check, style.check, typography.check, layout.check, rows.check, tables.check, assets.check,
+PIPELINE = [content.check, joined.check, brackets.check, style.check, typography.check, layout.check, rows.check, tables.check, assets.check,
             placement.check, integrity.check]

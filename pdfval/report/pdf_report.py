@@ -16,6 +16,8 @@ from typing import Callable
 import pymupdf
 from PIL import Image
 
+from ..genuine import concise
+
 SEV_COLOR = {"error": "#d92d20", "warning": "#b45309", "info": "#64748b"}
 STATUS_COLOR = {"fail": "#d92d20", "warn": "#b45309", "pass": "#16a34a"}
 CHECK_COLOR = {"toc": "#9333ea", "structure": "#2563eb", "content": "#dc2626", "tables": "#0284c7", "assets": "#0d9488",
@@ -65,7 +67,7 @@ INCLUDE_ALL = {"summary": True, "genuine": True, "critical": True, "sections": T
 GENUINE = {"include": {"summary": True, "categories": False, "genuine": "counts", "css": False, "toc_compare": True,
                        "critical": False, "sections": False,
                        "toc": False, "stylemap": False, "issues": True, "screenshots": True},
-           "filter": {"genuine_only": True}}
+           "filter": {"genuine_only": True, "plus_images": True}}  # one report: every image issue is in it too
 
 # the CSS report: every CSS / typography / layout issue that is not in the PDF report (fonts, sizes, colours,
 # line heights, spec styles), with its screenshots
@@ -79,8 +81,15 @@ IMAGE_REPORT = {"include": {**GENUINE["include"], "genuine": False},
                 "filter": {"images": True}}
 
 
+# what the image report shows: picture size, alignment, a picture over its box (overlay), picture labels and
+# missing / different artwork - not text (missing text, blurred text inside a picture)
+IMAGE_REPORT_TYPES = {"size / aspect", "image alignment", "placement", "image outside box", "image combined",
+                      "missing image label", "missing image", "image changed", "broken image", "image blacked out",
+                      "image distorted"}
+
+
 def is_image_issue(f: dict) -> bool:
-    return f.get("check") == "assets" or bool(set(f.get("types") or []) & IMAGE_TYPES)
+    return bool(set(f.get("types") or []) & IMAGE_REPORT_TYPES)
 
 
 def _actual_cell(st: dict) -> str:
@@ -159,7 +168,7 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
                               f"{escape(st['color'])}</td><td>{_actual_cell(st)}</td></tr>" for st in typo["styles"]) + "</table>")
     gen = [(s, f) for s in result["sections"] for f in s["findings"] if f.get("genuine")]
     if inc["genuine"] == "counts":  # metrics only: how many of each issue, the issues follow with screenshots
-        by = Counter(f["issue"] for _, f in gen)
+        by = Counter(f.get("issue") or f.get("check", "") for _, f in gen)
         html.append(f"<h2 style='color:#b42318'>Issues ({len(gen)})</h2><p>"
                     + " · ".join(f"<b style='color:{next((f.get('color') for _, f in gen if f['issue'] == k and f.get('color')), '#1d2330')}'>"
                                  f"{n}</b> × {escape(k)}" for k, n in by.most_common()) + "</p>")
@@ -237,7 +246,13 @@ class _Canvas:
 
     def __init__(self, doc: pymupdf.Document):
         self.doc = doc
-        self.regular, self.bold = pymupdf.Font("notos"), pymupdf.Font("notosbo")
+        # the bundled Noto fonts occasionally fail to load under concurrent/parallel runs (a race in
+        # mupdf's own font-resource extraction) - "cannot find builtin font ..." - a core PDF font
+        # (always available, no CJK glyphs) lets the report still build rather than crash the run
+        try:
+            self.regular, self.bold = pymupdf.Font("notos"), pymupdf.Font("notosbo")
+        except Exception:
+            self.regular = self.bold = pymupdf.Font("helv")
         self.page, self.y = None, 0.0
         self.width = self.PAGE.width - 2 * self.M
 
@@ -413,7 +428,7 @@ def genuine_html(gen: list[tuple]) -> str:
     if not gen:
         return ("<h2 style='color:#16a34a'>Issues: none</h2><p>No missing or duplicated sections, missing or "
                 "broken images, misplaced images or content, missing data, table or link problems.</p>")
-    by = Counter(f["issue"] for _, f in gen)
+    by = Counter(f.get("issue") or f.get("check", "") for _, f in gen)
     out = [f"<h2 style='color:#b42318'>Issues ({len(gen)})</h2><p>"
            + " · ".join(f"<b>{n}</b> × {escape(k)}" for k, n in by.most_common()) + "</p>",
            _topics_html(gen),
@@ -472,7 +487,8 @@ def select_issues(result: dict, flt: dict | None = None, severities: set[str] | 
             if f["severity"] not in sev or (cats and f.get("category") not in cats) \
                     or (types and not set(f.get("types") or []) & types) or (flt.get("critical_only") and not f.get("critical")) \
                     or (q and q not in f["message"].lower() and q not in s["title"].lower()) \
-                    or (flt.get("genuine_only") and not f.get("genuine")) \
+                    or (flt.get("genuine_only") and not f.get("genuine")
+                        and not (flt.get("plus_images") and is_image_issue(f))) \
                     or (flt.get("non_genuine") and f.get("genuine")) \
                     or (flt.get("images") and not is_image_issue(f)):
                 continue
@@ -579,9 +595,9 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
         shots = f.get("shots", {}) if inc["screenshots"] else {}
         imgs = {side: _jpeg_bytes(out / shots[side]) if shots.get(side) else None for side in ("baseline", "candidate")}
         img_h = max((min(col_w * im[1], max_h) for im in imgs.values() if im), default=0)
-        text = f["description"] if f.get("genuine") and (opts.get("filter") or {}).get("genuine_only") else f["message"]
+        text = f["description"] if f.get("genuine") and (opts.get("filter") or {}).get("genuine_only") else concise(f["message"])
         # the issue in full, never shortened; several differences at one spot: one line each
-        parts = [p.strip() for p in (text.split("\n\n") if "\n" in text else text.split("  ·  ")) if p.strip()]
+        parts = [p.strip() for block in text.split("\n\n") for p in block.split("  ·  ") if p.strip()]
         rows_txt = []
         for k, part in enumerate(parts, 1):
             head, *rest = part.split("\n")  # a design-spec issue: headline, "Figma: …", "Stage: …"
@@ -644,7 +660,10 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
 
     if progress:
         progress(0.95, "PDF report: saving")
-    footer = pymupdf.Font("notos")
+    try:
+        footer = pymupdf.Font("notos")
+    except Exception:
+        footer = pymupdf.Font("helv")
     for i, page in enumerate(doc):
         if not page.is_wrapped:  # Story pages leave the CTM unbalanced
             page.wrap_contents()

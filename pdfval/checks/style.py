@@ -38,7 +38,10 @@ def diff(sa: Style, sb: Style, scfg: dict) -> tuple:
 def check(u: Unit) -> list[Finding]:
     scfg, rcfg = u.cfg["style"], u.cfg["report"]
     if not scfg.get("compare_with_prod", True):  # typography is checked on stage against the spec,
-        return _emphasis(u, scfg, rcfg)        # but bold vs plain / italic vs upright is the text's own
+        if scfg.get("check_emphasis", True):     # but bold vs plain / italic vs upright is the text's own
+            return _emphasis(u, scfg, rcfg)
+        else:
+            return []
     sev_map = scfg.get("severity", {})
     groups: dict[tuple, list[tuple[int, int]]] = defaultdict(list)
     for i, j in u.pairs + u.style_pairs:

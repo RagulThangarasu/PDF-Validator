@@ -192,24 +192,47 @@ def resolve(guids: list[tuple[str, str]], cfg: dict) -> tuple[dict[str, str], st
             out[guid] = _PATHS[(author, guid)]
             continue
         try:
-            # the file named after the GUID; else a topic file that contains it (.dita or .xml topics);
-            # else any file under the folder that mentions it; else the same, in the whole search root
-            hits = query({"nodename": f"{guid}*"}) or query({"fulltext": guid, "nodename": "*.dita"}) \
-                or query({"fulltext": guid, "nodename": "*.xml"}) or query({"fulltext": guid})
-            if not hits and wide and wide != root:
-                hits = query({"fulltext": guid, "path": wide}) or query({"nodename": f"{guid}*", "path": wide})
+            # the file named after the GUID is that topic. Else every topic file that mentions the GUID is a
+            # candidate - but maps and other topics mention it too (topicrefs, xrefs, conrefs), so a
+            # candidate counts only when its own root element carries the GUID as its id
+            named = query({"nodename": f"{guid}*"})
+            if not named and wide and wide != root:
+                named = query({"nodename": f"{guid}*", "path": wide})
+            named = [h for h in named if re.search(r"\.(dita|xml)$", h, re.I)]
+            cands = []
+            if not named:
+                for params in ({"fulltext": guid, "nodename": "*.dita"}, {"fulltext": guid, "nodename": "*.xml"},
+                               {"fulltext": guid, "path": wide}):
+                    cands += [h for h in query(params) if re.search(r"\.(dita|xml)$", h, re.I) and h not in cands]
+                cands = [h for h in cands if _topic_id(author, auth, h) == guid]
         except HTTPError as e:
             return out, ("AEM refused the login (user name or password wrong)" if e.code in (401, 403)
                          else f"AEM search failed: HTTP {e.code}")
         except (URLError, OSError, ValueError) as e:
             return out, f"AEM not reachable: {e}"
-        hits = [h for h in hits if re.search(r"\.(dita|xml)$", h, re.I)] or hits
+        hits = named or cands
         if hits:
             hits.sort(key=lambda h: (f"/{lang}/" not in h if lang else False, len(h)))
             out[guid] = _PATHS[(author, guid)] = hits[0]
         else:
             err = err or f"{guid} not found in AEM under {root}"
     return out, err
+
+
+def _topic_id(author: str, auth: str, path: str) -> str:
+    """The id of a DITA file's root element (<topic id="GUID-…">, <concept …>, <task …>), read from the
+    start of the file in AEM; "" when it cannot be read."""
+    from urllib import request as _rq
+    from urllib.parse import quote as _quote
+    try:
+        req = _rq.Request(f"{author}{_quote(path, safe='/')}/jcr:content/renditions/original",
+                          headers={"Authorization": auth, "Range": "bytes=0-8191"})
+        with _rq.urlopen(req, timeout=15) as r:
+            head = r.read(8192).decode("utf-8", "replace")
+    except Exception:
+        return ""
+    m = re.search(r"<(?![?!])[\w:-]+\b[^>]*?\sid\s*=\s*[\"']([^\"']+)[\"']", head)
+    return m.group(1) if m else ""
 
 
 def find_map(name: str, cfg: dict) -> str:
@@ -321,7 +344,9 @@ def relink(result: dict, acfg: dict) -> bool:
     base = {"map": a.get("map", ""), "product": a["product"], "folder": a["folder"], "map_path": a["map_path"]}
     urls = {}
     for t in a["topics"]:
-        t["path"] = paths.get(t["guid"], t.get("path", ""))
+        # a clean lookup decides (an earlier, wrong file is dropped); without a login keep what the run had
+        searched = bool(acfg.get("password")) and not a["resolve_error"]
+        t["path"] = paths.get(t["guid"], "" if searched else t.get("path", ""))
         t["url"] = urls[t["guid"]] = url_for({**base, **t}, acfg)
         t["topic_url"] = url_for({**base, **t}, acfg, "topic") if t["path"] else ""
     a["resolved"] = sum(bool(t["path"]) for t in a["topics"])
@@ -539,3 +564,37 @@ def find_map_for(filename: str, cfg: dict) -> str:
         if hits:
             return hits[0]
     raise RuntimeError(f"No map found in AEM for “{filename}” (tried {', '.join(map_candidates(filename)) or 'nothing'})")
+
+
+# ---------------------------------------------------------------- the map's AEM Sites output
+
+def site_for_map(map_path: str, cfg: dict, lang: str = "") -> str:
+    """The AEM Sites page published from a map: the language page every topic page of the map points
+    back to (jcr:content/basePath = the map, indexPath = its site root). Several outputs of one map
+    (a copy outside the brand tree, an old version folder) - the one under a brand site, in the map's
+    language, with the most topic pages. Returns the author URL of that page (…/<lang>.html), or ""."""
+    import json
+    from collections import Counter
+    from urllib import request as _rq
+    from urllib.parse import urlencode
+    author, auth = _auth(cfg)
+    q = {"path": cfg.get("sites_root") or "/content/guide", "type": "cq:PageContent", "property": "basePath",
+         "property.value": map_path, "p.limit": "-1", "p.hits": "selective", "p.properties": "indexPath"}
+
+    def ask(q: dict) -> Counter:
+        with _rq.urlopen(_rq.Request(f"{author}/bin/querybuilder.json?{urlencode(q)}", headers={"Authorization": auth}),
+                         timeout=60) as r:
+            return Counter(h.get("indexPath", "") for h in json.load(r).get("hits", []) if h.get("indexPath"))
+    roots = ask(q)
+    if not roots:  # published from a copy of the map in another DAM tree (/content/dam/hashout/…): same file name
+        roots = ask({**q, "property.value": "%/" + map_path.rsplit("/", 1)[-1], "property.operation": "like"})
+    if not roots:
+        return ""
+    lang = (lang or next((s for s in map_path.lower().split("/") if re.fullmatch(r"[a-z]{2}(-[a-z]{2})?", s)), "en")).lower()
+    brands = set((cfg.get("site_brands") or "benq business consumer education zowie inftylab").split())
+
+    def rank(path: str):
+        seg = path.split("/")
+        return (len(seg) > 3 and seg[3] in brands, seg[-1].lower() == lang, roots[path], -len(path))
+    best = max(roots, key=rank)
+    return f"{author}{best}.html"

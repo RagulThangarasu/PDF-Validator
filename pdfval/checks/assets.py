@@ -21,6 +21,7 @@ with the aligned position on the other side for the screenshot.
 from __future__ import annotations
 
 import numpy as np
+from collections import defaultdict
 import pymupdf
 from PIL import Image as PILImage
 from PIL import ImageChops, ImageFilter
@@ -123,37 +124,51 @@ def find_artwork(img_doc: Doc, im: Image, other: Doc, at, min_score: float, max_
     hay_img = PILImage.fromarray(hay_full.astype(np.uint8))
     hay_cache: dict[float, "np.ndarray"] = {}
 
+    blur = 0
+
     def at_scale(s: float) -> tuple[float, tuple] | None:
         # correlate at a resolution where the picture is ~48 px wide (and, for a wide banner,
         # ~20 px tall): enough to recognise a label, logo or strip of illustrations, and cheap
         # (the cost grows with template area x search area)
         w_pt = max(base_w * s, 1)
         k = round(min(0.6, max(96 / w_pt, 20 / max(w_pt * im_aspect(im), 1))), 3)
-        if k not in hay_cache:
+        if (k, blur) not in hay_cache:
             size = (max(1, round(hay_img.width * k)), max(1, round(hay_img.height * k)))
-            hay_cache[k] = np.asarray(hay_img.resize(size, PILImage.BOX), np.float32)
-        hay = hay_cache[k]
+            h = hay_img.resize(size, PILImage.BOX)
+            hay_cache[(k, blur)] = np.asarray(h.filter(ImageFilter.GaussianBlur(blur)) if blur else h, np.float32)
+        hay = hay_cache[(k, blur)]
         tw = round(base_w * s * k)
         th = round(base_w * s * k * im_aspect(im))
         if tw < 12 or th < 8 or tw >= hay.shape[1] or th >= hay.shape[0]:
             return None
-        ncc = _ncc(hay, np.asarray(tpl_full.resize((tw, th), PILImage.BOX), np.float32))
+        t = tpl_full.resize((tw, th), PILImage.BOX)
+        ncc = _ncc(hay, np.asarray(t.filter(ImageFilter.GaussianBlur(blur)) if blur else t, np.float32))
         if ncc is None:
             return None
         iy, ix = np.unravel_index(int(ncc.argmax()), ncc.shape)
         x0, yy0 = ix / k, y0 + iy / k
         return float(ncc[iy, ix]), (x0, yy0, x0 + tw / k, yy0 + th / k)
 
-    best, best_s = None, 1.0
-    for s in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.3, 1.5):
-        hit = at_scale(s)
-        if hit and (best is None or hit[0] > best[0]):
-            best, best_s = hit, s
-    # the correlation peak of a large picture is narrow in scale: refine between the grid steps
-    for f in (0.92, 0.96, 1.04, 1.08):
-        hit = at_scale(best_s * f)
-        if hit and (best is None or hit[0] > best[0]):
-            best = hit
+    def search() -> tuple | None:
+        best, best_s = None, 1.0
+        for s in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.3, 1.5):
+            hit = at_scale(s)
+            if hit and (best is None or hit[0] > best[0]):
+                best, best_s = hit, s
+        # the correlation peak of a large picture is narrow in scale: refine between the grid steps
+        for f in (0.92, 0.96, 1.04, 1.08):
+            hit = at_scale(best_s * f)
+            if hit and (best is None or hit[0] > best[0]):
+                best = hit
+        return best
+
+    best = search()
+    if not best or best[0] < min_score:
+        # fine detail (a QR code's modules) shrunk to the search size aliases, and the match then depends on
+        # where the window starts: compare the softened pictures (the shape, not the grid) - the visual
+        # hash and pixel tests below still decide whether it is the same picture
+        blur = 1.2
+        best = search()
     if not best or best[0] < min_score:
         return None
     hit = Image(at.page, best[1])
@@ -186,6 +201,32 @@ def _fast_len(n: int) -> int:
             m += 1
         _FAST[n] = m
     return _FAST[n]
+
+
+def _plain_twin(u, y: Image, at: Loc, claimed: list, acfg: dict) -> tuple | None:
+    """A prod vector drawing near `at` that looks like the stage picture `y` (visual hash) at up to 2x
+    another size - simple artwork the correlation search rejects as "no artwork" (a plain grey card)."""
+    try:
+        pg = u.a.pdf_page(at.page) if hasattr(u.a, "pdf_page") else pymupdf.open(u.a.path)[at.page]
+        clusters = [tuple(r) for r in pg.cluster_drawings() if r.width >= 12 and r.height >= 12]
+    except Exception:
+        return None
+    thr = acfg.get("visual_match_threshold", 0.25)
+    wy = y.bbox[2] - y.bbox[0]
+    span = acfg.get("twin_reach", 160)
+    best = None
+    for r in clusters:
+        if any(p == at.page and abs(c[0] - r[0]) < 2 and abs(c[1] - r[1]) < 2 for p, c in claimed):
+            continue
+        if abs((r[1] + r[3]) / 2 - at.bbox[1]) > span:
+            continue
+        ratio = _rel_width(u.a, Image(at.page, r)) / max(_rel_width(u.b, y), 1e-6)
+        if not 0.5 <= ratio <= 2.0 or (r[2] - r[0]) > 3 * wy + 50:
+            continue
+        d = visual_distance(u.b, y, u.a, Image(at.page, r))
+        if d <= thr and (best is None or d < best[0]):
+            best = (d, r)
+    return best[1] if best else None
 
 
 def _ncc(hay: "np.ndarray", tpl: "np.ndarray") -> "np.ndarray | None":
@@ -332,6 +373,33 @@ def _drawing_near(doc: Doc, rng: tuple[int, int], at, claimed: list, pic_doc: Do
     return best[1] if best else None
 
 
+def _whole_figure(doc: Doc, rng: tuple[int, int], page: int, rect: tuple, pic_doc: Doc, pic: Image,
+                  gap: float = 40) -> tuple | None:
+    """The figure a drawn part belongs to: a figure drawn as vectors in pieces (a screen above, the
+    devices below, labels between them as live text) is one picture in the other PDF. Grows `rect` by
+    the drawings and text lines right above / below it (within `gap` pt), as long as the result keeps
+    nearer the other picture's shape. The grown area, or None when nothing was added."""
+    from .tables import _figure_rects
+    want = (pic.bbox[3] - pic.bbox[1]) / max(pic.bbox[2] - pic.bbox[0], 1)  # height : width of the picture
+    out = [o for _, o in _outside(doc, rng, page)]
+    parts = [tuple(r) for r in _figure_rects(doc, page)] + \
+        [tuple(l.bbox) for l in doc.lines if l.page == page and len(l.text.split()) <= 4]  # short labels only
+    parts = [r for r in parts if not any(pymupdf.Rect(o).contains(pymupdf.Point((r[0] + r[2]) / 2, (r[1] + r[3]) / 2)) for o in out)]
+    box, grown = pymupdf.Rect(rect), False
+    off = lambda b: abs((b.height / max(b.width, 1)) - want)
+    while True:
+        cand = [pymupdf.Rect(r) for r in parts if not box.contains(pymupdf.Rect(r))
+                and pymupdf.Rect(r).x1 > box.x0 - 60 and pymupdf.Rect(r).x0 < box.x1 + 60
+                and (0 <= pymupdf.Rect(r).y0 - box.y1 <= gap or 0 <= box.y0 - pymupdf.Rect(r).y1 <= gap
+                     or pymupdf.Rect(r).intersects(box))]
+        nxt = min(cand, key=lambda r: min(abs(r.y0 - box.y1), abs(box.y0 - r.y1)), default=None)
+        if nxt is None or off(box | nxt) > off(box):
+            break
+        box |= nxt
+        grown = True
+    return tuple(box) if grown else None
+
+
 def section_images(doc: Doc, rng: tuple[int, int]) -> list[Image]:
     start, end = _pos(doc, rng[0]), _pos(doc, rng[1])
     return [im for im in doc.images if start <= (im.page, im.bbox[1] + 1) < end]
@@ -383,12 +451,14 @@ def _repair_by_look(u: Unit, ia, ib, used: set, pairs: list, changed: list, miss
             if (item in held and y is item[1]) or _rel_width(u.b, y) < icon_w:
                 continue  # its own picture was judged already; icons are not pictures
             # a picture: its pixels decide (the hash of a line drawing is fooled by crops and
-            # margins, 0.99 pixel-alike pictures can hash 0.28 apart); an icon: its look
+            # margins, 0.99 pixel-alike pictures can hash 0.28 apart); an icon: its look - but also by
+            # its pixels when the look-alike hash misses it (reflowed onto another page, re-rendered
+            # at another size: the same instructional icon, found by its pixels even though small)
             vis = visual_distance(u.a, x, u.b, y)
             if big(x) and sim(x, n) >= sim_same:
                 cands.append((1 - sim(x, n), k, n))
-            elif not big(x) and vis <= same_look:
-                cands.append((vis, k, n))
+            elif not big(x) and (vis <= same_look or sim(x, n) >= sim_same):
+                cands.append((min(vis, 1 - sim(x, n)), k, n))
     taken_a: dict[int, tuple[int, float]] = {}
     taken_b: set[int] = set()
     for vis, k, n in sorted(cands):
@@ -455,10 +525,14 @@ def _combined(u: Unit, ib, used: set, missing: list, changed: list, art_score: f
     # browser screenshot that already pairs with prod's own screenshot
     bigs = sorted((y for y in ib if _rel_width(u.b, y) >= min_pic), key=lambda y: idx[id(y)] in used)
     out = []
+    merged: set[int] = set()  # stage pictures already holding other prod pictures (slices of one screen)
+    merged_score = u.cfg["assets"].get("combined_slice_score", 0.72)
 
     def inside(x):
         for y in bigs:
-            free = idx[id(y)] not in used
+            # a picture that already holds slices of the same prod screen is that screen: the next slice only
+            # needs the strong correlation too (prod's red highlight frames fail the look-alike test)
+            free = idx[id(y)] not in used or idx[id(y)] in merged
             if area(y) < (1.0 if free else 1.5) * area(x):
                 continue
             # one search over the whole stage picture: a tall part (a remote control beside the
@@ -466,9 +540,11 @@ def _combined(u: Unit, ib, used: set, missing: list, changed: list, art_score: f
             mid, half = (y.bbox[1] + y.bbox[3]) / 2, (y.bbox[3] - y.bbox[1]) / 2
             # an unclaimed stage picture needs only a strong correlation: the look-alike test would reject the
             # same screen with prod's red marks on it; an already paired one needs both signals, as before
+            # a known combination of prod slices: the slice must lie inside it (checked below) and correlate well;
+            # prod's red highlight frames on a slice cost it some correlation
+            need = merged_score if idx[id(y)] in merged else max(art_score, 0.85) if free else art_score
             hit = find_artwork(u.a, x, u.b, Loc(y.page, (y.bbox[0], mid, y.bbox[2], mid + 1)),
-                               max(art_score, 0.85) if free else art_score, 1.0 if free else same_look,
-                               reach=max(220, half + 30))
+                               need, 1.0 if free else same_look, reach=max(220, half + 30))
             r = hit[1] if hit else None
             # inside the stage picture - mostly: the prod picture's own white margin (beside its
             # callout numbers) may stick out past the stage picture's edge
@@ -506,7 +582,14 @@ def _combined(u: Unit, ib, used: set, missing: list, changed: list, art_score: f
         return held[key]
 
     recropped = []
-    for item in candidates:
+    # a second pass: slices checked before the first one was found in the stage picture
+    for item in candidates + [None] + candidates:
+        if item is None:
+            if not merged:
+                break
+            continue
+        if item not in missing and item not in changed:
+            continue  # placed in the first pass
         if item in changed and own_partner(item[0], item[1]) and not holds_other(item[1], item[0]):
             if same_screen is not None:
                 same_screen.add((id(item[0]), id(item[1])))
@@ -523,6 +606,7 @@ def _combined(u: Unit, ib, used: set, missing: list, changed: list, art_score: f
                 if same_screen is not None:
                     same_screen.add((id(item[0]), id(y)))
             else:
+                merged.add(idx[id(y)])
                 out.append((item[0], *found))
     changed.extend(recropped)
     return out
@@ -639,6 +723,34 @@ def _block(doc: Doc, im: Image) -> int:
         return min(kx, ky)
     except Exception:
         return 1
+
+
+_INK: dict[tuple, str | None] = {}
+
+
+def _cdist(a: str, b: str) -> float:
+    return sum((int(a[k:k + 2], 16) - int(b[k:k + 2], 16)) ** 2 for k in (1, 3, 5)) ** 0.5
+
+
+def _ink_color(doc: Doc, im: Image) -> str | None:
+    """The colour of a picture's coloured pixels (white, black and greys left out), as rendered on the page:
+    None when it has hardly any (a black / grey icon)."""
+    key = (doc.path, im.page, tuple(round(v, 1) for v in im.bbox))
+    if key not in _INK:
+        _INK[key] = None
+        try:
+            pdf = (_DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path)))
+            z = 64 / max(im.bbox[2] - im.bbox[0], 1)
+            pix = pdf[im.page].get_pixmap(clip=pymupdf.Rect(im.bbox), matrix=pymupdf.Matrix(z, z),
+                                          colorspace=pymupdf.csRGB, alpha=False)
+            a = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3).astype(np.int16)
+            sat = a.max(axis=2) - a.min(axis=2) > 50
+            if sat.mean() >= 0.08:
+                m = a[sat].mean(axis=0)
+                _INK[key] = "#%02x%02x%02x" % tuple(int(v) for v in m)
+        except Exception:
+            pass
+    return _INK[key]
 
 
 _MARKS: dict[tuple, tuple] = {}
@@ -781,6 +893,8 @@ def check(u: Unit) -> list[Finding]:
     black_share = acfg.get("blackout_fraction", 0.15)
     min_pic = acfg.get("picture_min_width", 0.15)  # small logos lose detail when scaled: no "different" verdict
     blacked = []
+    confirmed_diff: set = set()  # pairs moved to "changed" by the pixel check: truly a different
+                                 # picture, even when the perceptual hash still reads them as close
     for item in list(pairs) + list(changed):
         x, y, vis = item
         if _rel_width(u.a, x) < icon_w:
@@ -793,9 +907,12 @@ def check(u: Unit) -> list[Finding]:
         elif home is pairs and sim < sim_diff and _rel_width(u.a, x) >= min_pic:
             pairs.remove(item)
             changed.append((x, y, vis))
+            confirmed_diff.add((id(x), id(y)))
         elif home is changed and sim >= sim_same:
             changed.remove(item)
             pairs.append(item)
+        elif home is changed and sim < sim_diff:
+            confirmed_diff.add((id(x), id(y)))  # already "changed": the pixels confirm it, not just the hash
     _repair_by_look(u, ia, ib, used, pairs, changed, missing, anchor, icon_w, same_look, sim_same, min_pic)
     # Icons are paired like any image (so a resized icon is a size finding, not
     # missing+extra); only *unpaired* icons are subject to the `icons` setting,
@@ -859,13 +976,18 @@ def check(u: Unit) -> list[Finding]:
             [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)], {"kind": "blackout", "dark_share": round(dark, 3)}, critical=True))
     for x, y, vis in changed:
         same = (id(x), id(y)) in same_screen
+        # the same picture re-captured, re-cropped or with / without highlight marks: an image difference to
+        # look at (a warning), not an error - only a picture that is not prod's picture at all is an error
+        # (the pixel check, when it ran, overrides the hash guess: it already proved the two apart)
+        similar = same or (vis <= acfg.get("similar_picture_distance", 0.5) and (id(x), id(y)) not in confirmed_diff)
         findings.append(Finding(
-            "assets", acfg.get("changed_severity", "error"),
-            (f"Image changed in stage: the same picture, but not identical - cropped differently or with other "
+            "assets", acfg.get("similar_image_severity", "warning") if similar else acfg.get("changed_severity", "error"),
+            (f"Image differs in stage: the same picture, but not identical - cropped differently or with other "
              f"marks (e.g. highlight boxes, labels) (prod p.{x.page + 1} ↔ stage p.{y.page + 1}, visual similarity "
              f"{1 - vis:.0%})" if same else
-             f"Different image in stage: another version of the picture at this spot (re-captured or edited) "
-             f"(prod p.{x.page + 1} ↔ stage p.{y.page + 1}, visual similarity {1 - vis:.0%})" if vis <= 0.5 else
+             f"Image differs in stage: another version of the same picture (re-captured or edited, e.g. without "
+             f"prod's highlight marks) (prod p.{x.page + 1} ↔ stage p.{y.page + 1}, visual similarity {1 - vis:.0%})"
+             if similar else
              f"Different image in stage: the picture at this spot is not the prod picture "
              f"(prod p.{x.page + 1} ↔ stage p.{y.page + 1}, visual similarity {1 - vis:.0%})"),
             [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
@@ -902,16 +1024,47 @@ def check(u: Unit) -> list[Finding]:
     for y, at, icon in pending:
         near = _drawing_near(u.a, u.a_range, at, claimed_a, u.b, y) if not icon and at is not None else None
         if near:
+            # the drawing may be one part of a figure drawn in pieces: the whole figure, when it is the picture
+            whole = _whole_figure(u.a, u.a_range, at.page, near, u.b, y)
+            if whole is not None:
+                xw = Image(at.page, whole)
+                if visual_distance(u.b, y, u.a, xw) <= same_look or pixel_compare(u.a, xw, u.b, y)[0] >= sim_same:
+                    claimed_a.append((at.page, whole))
+                    findings.append(Finding(
+                        "assets", vec_sev, f"Same artwork, but drawn as vector/text in prod and an embedded image in stage "
+                                           f"(prod p.{at.page + 1} ↔ stage p.{y.page + 1}, drawn in parts in prod)",
+                        [Loc(at.page, whole)], [Loc(y.page, y.bbox)], {"kind": "raster-vs-vector"}))
+                    continue
             # prod has a drawing of its own at this spot (vector artwork, e.g. with callout numbers stage's
             # picture lacks), of about the picture's size, not the same artwork: another picture at the same
             # place, from this section only
             claimed_a.append((at.page, near))
             vis = visual_distance(u.b, y, u.a, Image(at.page, near))
+            # (a note, not an error: the drawing is often the same artwork drawn otherwise, or one part of a
+            # combined stage picture - nothing says the picture changed)
             findings.append(Finding(
-                "assets", acfg.get("changed_severity", "error"),
-                f"Different image in stage: prod draws another picture at this spot (vector artwork) "
+                "assets", "info",
+                f"Picture at this spot: drawn as vectors in prod, an embedded image in stage "
                 f"(prod p.{at.page + 1} ↔ stage p.{y.page + 1}, visual similarity {1 - vis:.0%})",
-                [Loc(at.page, near)], [Loc(y.page, y.bbox)], {"kind": "changed", "visual_distance": round(vis, 3)}))
+                [Loc(at.page, near)], [Loc(y.page, y.bbox)], {"kind": "raster-vs-vector", "visual_distance": round(vis, 3)},
+                types=["raster vs vector"]))
+            continue
+        twin = _plain_twin(u, y, at, claimed_a, acfg) if at is not None else None
+        if twin:
+            # prod draws the same simple artwork (a grey booklet, a plain card) as vectors near this spot - too
+            # plain for the artwork search - at another size: the same picture, scaled differently
+            claimed_a.append((at.page, twin))
+            x = Image(at.page, twin)
+            rel_x, rel_y = _rel_width(u.a, x), _rel_width(u.b, y)
+            grow = rel_y / max(rel_x, 1e-6) - 1
+            if abs(rel_x - rel_y) > acfg["width_tolerance"] or abs(grow) > acfg.get("size_ratio_tolerance", 0.2):
+                wx, hx, wy, hy = twin[2] - twin[0], twin[3] - twin[1], y.bbox[2] - y.bbox[0], y.bbox[3] - y.bbox[1]
+                findings.append(Finding(
+                    "assets", acfg.get("size_severity", "warning"),
+                    f"Image size differs: the same picture drawn {abs(grow):.0%} {'larger' if grow > 0 else 'smaller'} in stage "
+                    f"(prod p.{at.page + 1} ↔ stage p.{y.page + 1}): {wx:.0f}×{hx:.0f} pt → {wy:.0f}×{hy:.0f} pt, "
+                    f"width {rel_x:.0%} → {rel_y:.0%} of content box",
+                    [Loc(at.page, twin)], [Loc(y.page, y.bbox)], {"kind": "size"}, types=["size / aspect"]))
             continue
         findings.append(Finding(
             "assets", acfg.get("icons", "warning") if icon else acfg.get("count_severity", "error"),
@@ -939,6 +1092,48 @@ def check(u: Unit) -> list[Finding]:
                 {"kind": "pixelated", "baseline_ppi": round(pa), "candidate_ppi": round(pb)}, types=["image pixelated"]))
     # red highlight marks (boxes / outlines drawn over a screenshot to point at a field): on one side only, the
     # pictures are "the same" by their look, but the reader does not see the same thing
+    # icon colour: the same icon in another colour (a blue settings gear in prod, purple in stage)
+    col_tol = acfg.get("icon_color_tolerance", 60)
+    by_col: dict[tuple, list] = defaultdict(list)
+    for x, y, _ in pairs:
+        if min(_rel_width(u.a, x), _rel_width(u.b, y)) >= icon_w:
+            continue
+        ca, cb = _ink_color(u.a, x), _ink_color(u.b, y)
+        if ca and cb and _cdist(ca, cb) > col_tol:
+            by_col[(ca, cb)].append((x, y))
+    # icons left unpaired (an icon in another colour looks like another icon): the most alike unused stage icon
+    free_b = [y for n, y in enumerate(ib) if n not in used and _rel_width(u.b, y) < icon_w and _ink_color(u.b, y)]
+    for x, _, is_icon in missing:
+        if not is_icon or not (ca := _ink_color(u.a, x)) or not free_b:
+            continue
+        # the shape decides (the look hash changes with the colour): the best pixel correlation
+        y = max(free_b, key=lambda y: pixel_compare(u.a, x, u.b, y)[0])
+        if pixel_compare(u.a, x, u.b, y)[0] >= 0.4 and visual_distance(u.a, x, u.b, y) <= 0.45 \
+                and (cb := _ink_color(u.b, y)) and _cdist(ca, cb) > col_tol:
+            free_b.remove(y)
+            by_col[(ca, cb)].append((x, y))
+    # a recoloured icon set changes consistently (blue gear -> purple gear everywhere); icons that come in several
+    # colours by design (red / green / orange LED states) mix: one prod colour to several stage colours, or many
+    # prod colours at once - icons told apart by their colour, not a colour change
+    shade = lambda c: tuple(round(int(c[k:k + 2], 16) / 48) for k in (1, 3, 5))
+    # ... and a colour some icon keeps (a purple note icon purple in stage too) was not recoloured: another
+    # icon of that colour "changed" is a mismatched pair (a note icon against a red LED dot)
+    kept = {shade(ca) for x, y, _ in pairs if min(_rel_width(u.a, x), _rel_width(u.b, y)) < icon_w
+            and (ca := _ink_color(u.a, x)) and (cb := _ink_color(u.b, y)) and _cdist(ca, cb) <= col_tol}
+    by_col = {k: v for k, v in by_col.items() if shade(k[0]) not in kept}
+    to = defaultdict(set)
+    for ca, cb in by_col:
+        to[shade(ca)].add(shade(cb))
+    if len(to) >= 3 or any(len(v) > 1 for v in to.values()):
+        by_col = {}
+    for (ca, cb), xs in by_col.items():
+        la, lb = [Loc(x.page, x.bbox) for x, _ in xs], [Loc(y.page, y.bbox) for _, y in xs]
+        findings.append(Finding(
+            "assets", acfg.get("icon_color_severity", "error"),
+            f"Icon colour differs — {len(xs)} icon(s) (prod p.{xs[0][0].page + 1} ↔ stage p.{xs[0][1].page + 1})"
+            f"\nProd: icon in {ca.upper()}\nStage: the same icon in {cb.upper()}",
+            la, lb, {"kind": "icon color", "baseline_color": ca, "candidate_color": cb},
+            types=["image changed"], links=list(zip(la, lb))))
     min_px, keep = acfg.get("marks_min_pixels", 20), acfg.get("marks_ratio", 0.3)
     max_share = acfg.get("marks_max_share", 0.1)
     for x, y, _ in pairs:
@@ -982,8 +1177,14 @@ def check(u: Unit) -> list[Finding]:
                     types=["image blurred"]))
         problems = []
         al_x, al_y = alignment(u.a, x.page, x.bbox), alignment(u.b, y.page, y.bbox)
-        if max(rel_x, rel_y) >= icon_w and al_x != al_y and not (al_x.startswith("indented") and al_y.startswith("indented")):
-            problems.append(f"alignment {al_x} → {al_y}")
+        if acfg.get("check_alignment", True):
+            # skip center alignment changes if configured; only report left/right differences
+            skip_center = (acfg.get("ignore_center_alignment", True) and 
+                          ("centred" in al_x or "centred" in al_y))
+            if (max(rel_x, rel_y) >= icon_w and al_x != al_y and 
+                not (al_x.startswith("indented") and al_y.startswith("indented")) and
+                not skip_center):
+                problems.append(f"alignment {al_x} → {al_y}")
         if abs(ar_x - ar_y) / ar_x > acfg["aspect_tolerance"]:
             problems.append(f"aspect {ar_x:.2f} → {ar_y:.2f}")
         grow = rel_y / max(rel_x, 1e-6) - 1

@@ -22,13 +22,17 @@ import pymupdf
 
 from . import ocr
 from .checks import Aligner, Unit, locs, snippet
-from .checks.assets import icon_max, pixel_compare, section_images, visual_distance
+from .checks.assets import icon_max, pixel_compare, section_images, visual, visual_distance
 from .checks.tables import is_curve
 from .checks.integrity import links as page_links
 from .model import Doc, Finding, Image, Loc
 
 _TOKEN = re.compile(r"[\w%]+")
 _GOTO = (pymupdf.LINK_GOTO, pymupdf.LINK_NAMED)
+
+
+# text a reader sees in stage, only not as live text: dropped unless [genuine] report_visually_present = true
+VISUALLY_PRESENT = {"label in picture", "text in image", "text as graphic"}
 
 
 def cross_section(results: list[tuple[Unit, list[Finding]]], A: Doc, B: Doc, cfg: dict, mode: str = "pdf",
@@ -48,6 +52,13 @@ def cross_section(results: list[tuple[Unit, list[Finding]]], A: Doc, B: Doc, cfg
     _image_labels(results, A, B, cfg)
     _label_wording(results, A, B, cfg)
     _text_in_matched_artwork(results)
+    if not gcfg.get("report_visually_present", False):
+        # the text is there for the reader, only drawn into the stage picture instead of live text: not an issue
+        # (the steps above still used these to know the words are not missing)
+        for _, findings in results:
+            findings[:] = [f for f in findings if not (set(f.types or []) and set(f.types) <= VISUALLY_PRESENT)]
+    # suppress false "missing text" findings when the text appears in stage links
+    _suppress_link_text_missing(results, B, cfg)
     if cfg["integrity"].get("links", True):
         for u, findings in results:
             findings.extend(_links(u, units, mode))
@@ -70,6 +81,70 @@ def _unit_of(units: list[Unit], side: str, idx: int | None) -> Unit | None:
         if r[0] <= idx < r[1]:
             return u
     return None
+
+
+def _link_text_pool(doc: Doc) -> set[str]:
+    """Extract all text that appears inside links (clickable regions). Returns normalized words."""
+    pool = set()
+    try:
+        for page_num in range(len(doc.pages)):
+            for link in page_links(doc, page_num):
+                if link.get("from"):
+                    link_rect = pymupdf.Rect(link["from"])
+                    # find all words whose bbox overlaps the link region
+                    for word in doc.words:
+                        if word.page == page_num and word.norm:
+                            w_rect = pymupdf.Rect(word.bbox)
+                            if w_rect.intersects(link_rect):
+                                pool.add(word.norm.lower())
+    except Exception:
+        pass
+    return pool
+
+
+def _suppress_link_text_missing(results, B: Doc, cfg: dict) -> None:
+    """Suppress false "missing text" findings when text appears in stage links.
+    When missing prod text is found in stage link regions, downgrade/remove the finding."""
+    icfg = cfg.get("integrity", {})
+    if not icfg.get("check_link_text_in_content", True):
+        return
+    
+    ignore_missing = icfg.get("ignore_link_text_missing", True)
+    link_pool = _link_text_pool(B)
+    
+    if not link_pool:
+        return
+    
+    for u, findings in results:
+        # check all "missing text" findings in this unit
+        to_remove = []
+        for f in findings:
+            if f.check != "content" or "missing text" not in (f.types or []) or not f.baseline:
+                continue
+            
+            # extract words from the missing text
+            missing_words = set()
+            if f.detail and "baseline_text" in f.detail:
+                missing_words = {w.lower() for w in _TOKEN.findall(f.detail["baseline_text"])}
+            
+            # check if all (or most) missing words appear in links
+            if missing_words:
+                found_in_links = sum(1 for w in missing_words if w in link_pool)
+                pct_found = found_in_links / len(missing_words) if missing_words else 0.0
+                
+                # if >= 50% of missing words are in links, it's likely a false positive
+                if pct_found >= 0.5:
+                    if ignore_missing:
+                        # suppress the finding entirely
+                        to_remove.append(f)
+                    else:
+                        # downgrade severity for visibility (but don't fail validation)
+                        f.severity = "info"
+                        f.message = f"{f.message} [found in link text]"
+        
+        # remove suppressed findings
+        for f in to_remove:
+            findings.remove(f)
 
 
 def _images(results, A: Doc, B: Doc, cfg: dict) -> None:
@@ -186,6 +261,20 @@ def _figures(A: Doc, cfg: dict) -> dict[int, list[pymupdf.Rect]]:
                     merged.remove(m)
                 merged.append(r)
             out.setdefault(pno, []).extend(m for m in merged if m.width >= 30 and m.height >= 30)
+            # artwork drawn as many small filled shapes, no strokes (a QR code, a pixel icon): a dense
+            # cluster of them is a figure too (a table's cell fills are few and large)
+            fills = [pymupdf.Rect(d["rect"]) for d in page.get_drawings()
+                     if d.get("fill") is not None and d["rect"].width < 20 and d["rect"].height < 20]
+            groups: list[list] = []  # [box, count]
+            for r in fills:
+                hit = [g for g in groups if (g[0] + (-3, -3, 3, 3)).intersects(r)]
+                box, n = pymupdf.Rect(r), 1
+                for g in hit:
+                    box |= g[0]
+                    n += g[1]
+                    groups.remove(g)
+                groups.append([box, n])
+            out[pno].extend(g[0] for g in groups if g[1] >= 30 and g[0].width >= 30 and g[0].height >= 30)
     return out
 
 
@@ -451,30 +540,61 @@ def _image_labels(results, A: Doc, B: Doc, cfg: dict) -> None:
         return im.page == l.page and x0 >= im.bbox[0] - pad_x and x1 <= im.bbox[2] + pad_x \
             and y0 >= im.bbox[1] - pad_y and y1 <= im.bbox[3] + pad_y
 
-    def caption(l, im):
+    def beside(l, im, gap=20, pad_y=20):
+        # a label set just right / left of a drawing, inside its height (callouts at the end of leader
+        # lines: “Inside the VESA cover”): it starts at the drawing's edge, however long it runs
+        x0, y0, x1, y1 = l.bbox
+        return im.page == l.page and y0 >= im.bbox[1] - pad_y and y1 <= im.bbox[3] + pad_y \
+            and (-4 <= x0 - im.bbox[2] <= gap or -4 <= im.bbox[0] - x1 <= gap)
+
+    def caption(l, im, gap=32):
+        # just above / below the picture, overlapping it horizontally; a label touching the picture's frame
+        # (its leader line runs into the drawing) may overlap the frame's edge a little
         x0, y0, x1, y1 = l.bbox
         return im.page == l.page and x0 < im.bbox[2] and x1 > im.bbox[0] \
-            and (0 <= im.bbox[1] - y1 <= 32 or 0 <= y0 - im.bbox[3] <= 32)
+            and (-8 <= im.bbox[1] - y1 <= gap or -8 <= y0 - im.bbox[3] <= gap)
 
     def stage_copy(x: Image, near: Loc | None, u: Unit):
         pages = {near.page + d for d in (-1, 0, 1)} if near else \
             {B.words[k].page for k in range(*u.b_range)} if u.b_range[1] > u.b_range[0] else set()
         best = None
-        for y in (y for y in stage_pics if y.page in pages):
+        # embedded images and pictures drawn as vectors (an AEM illustration is often an SVG)
+        for y in [y for y in stage_pics if y.page in pages] + [y for p in sorted(pages) if 0 <= p < len(B.pages)
+                                                                for y in _vector_pictures(B, p)]:
             d = visual_distance(A, x, B, y)
             if best is None or d < best[0]:
                 best = (d, y)
-        if best and (best[0] <= thr or pixel_compare(A, x, B, best[1])[0] >= same):
+        if not best:
+            return None
+        # a sanity check before trusting the hash / pixel correlation: two unrelated line-art diagrams
+        # (a tall, narrow remote control vs. a wide rear-panel view) can still hash or correlate alike -
+        # both sparse line drawings on white, with scattered callout numbers - so a very different shape
+        # rules a match out whatever the other two signals say
+        _, xw, xh = visual(A, x)
+        _, yw, yh = visual(B, best[1])
+        shape_alike = min(xw, xh) > 0 and 0.5 <= (xh / xw) / max(yh / yw, 1e-6) <= 2.0
+        if shape_alike and (best[0] <= thr or pixel_compare(A, x, B, best[1])[0] >= same):
             return best[1]
         return None
 
     for u, fs in results:
         for f in fs:
-            if f.check != "content" or "missing text" not in (f.types or []) or not f.baseline:
+            # missing prod text - or prod text the diff paired with unrelated stage text ("Alignment arrow" ->
+            # "NOTE:", the label of the note box under the stage picture): a picture label either way
+            changed = "changed text" in (f.types or []) and "missing text" not in (f.types or [])
+            if f.check != "content" or not ("missing text" in (f.types or []) or changed) or not f.baseline:
                 continue
             n = len(_tokens(f.detail.get("baseline_text")))
             if n < 1:
                 continue
+            # a list bullet the diff glued onto the block ("… -20-60°C •"): not a label, and not on the picture
+            def glyph_only(l):
+                ws = [w for w in A.words if w.page == l.page and w.bbox[0] >= l.bbox[0] - 1 and w.bbox[2] <= l.bbox[2] + 1
+                      and w.bbox[1] >= l.bbox[1] - 1 and w.bbox[3] <= l.bbox[3] + 1]
+                return bool(ws) and all(not any(c.isalnum() for c in w.text) for w in ws)
+            marks = [l for l in f.baseline if glyph_only(l)]
+            if marks and len(marks) < len(f.baseline):
+                f.baseline = [l for l in f.baseline if l not in marks]
             page = f.baseline[0].page
             raster_here, drawn_here = [x for x in rasters if x.page == page], _vector_pictures(A, page)
             if n == 1 and not any(all(on(l, im, 4, 4) for l in f.baseline) for im in raster_here + drawn_here):
@@ -483,18 +603,50 @@ def _image_labels(results, A: Doc, B: Doc, cfg: dict) -> None:
             # on the picture; a drawn illustration's short labels may also sit right beside it (a dimension)
             pic = next((im for im in raster_here + drawn_here if all(on(l, im, 4, 4) for l in f.baseline)), None) or \
                 (next((im for im in drawn_here if all(on(l, im, 70, 20) for l in f.baseline)), None) if short else None)
-            is_caption = pic is None and n <= 12 and any(caption(l, im) for l in f.baseline for im in raster_here)
+            is_caption = pic is None and n <= 12 and (any(caption(l, im) for l in f.baseline for im in raster_here) or
+                                                      (short and any(caption(l, im, 40) for l in f.baseline for im in drawn_here)))
+            if pic is None and not is_caption and short:
+                # last resort: short labels starting right beside a drawing, however long they run
+                pic = next((im for im in drawn_here if all(beside(l, im) or on(l, im, 70, 20) for l in f.baseline)), None)
             if pic is None and not is_caption:
-                continue
-            f.types = ["missing image label"] + [t for t in f.types if t != "missing image label"]
+                # labels spread over several parts of one figure (a screen picture, a menu panel, a callout
+                # bubble drawn beside them): each line on one of the page's pictures -> the figure they make up
+                hosts = [next((im for im in raster_here + drawn_here if on(l, im, 4, 4)), None) or
+                         (next((im for im in drawn_here if on(l, im, 70, 20) or beside(l, im)), None) if short else None)
+                         for l in f.baseline]  # a callout number may sit just above / below its drawing
+                got = [h for h in hosts if h]
+                # nearly all on pictures: a stray list number read with the callouts ("… 10 3 2 1 7.") does
+                # not turn a set of picture labels back into missing text
+                if len(got) >= max(2, 0.8 * len(hosts)) and (len({id(h) for h in got}) > 1 or len(got) < len(hosts)):
+                    pic = Image(page, (min(h.bbox[0] for h in got), min(h.bbox[1] for h in got),
+                                       max(h.bbox[2] for h in got), max(h.bbox[3] for h in got)))
+                else:
+                    continue
+            if pic is None and short:  # a short label right above / below a picture (often with a leader line): that picture
+                pic = next((im for im in raster_here if any(caption(l, im) for l in f.baseline)), None) or \
+                    next((im for im in drawn_here if any(caption(l, im, 40) for l in f.baseline)), None)
+            if changed:
+                # only a short label, and only when the stage words are not a rewording of it
+                if n > 6 or set(_tokens(f.detail.get("baseline_text"))) & set(_tokens(f.detail.get("candidate_text"))):
+                    continue
+                f.types = [t for t in f.types if t != "changed text"] + ["missing text"]
+            # a picture's label: an image issue, not "missing text / data missing"
+            f.types = ["missing image label"] + [t for t in f.types if t not in ("missing image label", "missing text")]
             y = stage_copy(pic, f.candidate_at, u) if pic is not None else None
             if y is None:
                 f.message = "Image label / caption missing in stage: " + f.message
                 # show stage's picture at that spot, even when it is not the same picture: the screenshots
                 # then put the two pictures side by side (prod with its labels, stage without)
                 near = f.candidate_at
+                if near is None and pic is not None and u.b_range[1] > u.b_range[0]:
+                    # no insertion point found (the label's text moved elsewhere, or is simply gone): fall
+                    # back to the section's own stage pages, so a shown picture still gets the disclaimer
+                    # below, instead of a different stage page passing by without it
+                    near = Loc(B.words[u.b_range[0]].page, (0, 0, 0, 0))
                 if near is not None and pic is not None:
-                    cands = [y2 for y2 in stage_pics if abs(y2.page - near.page) <= 1]
+                    cands = [y2 for y2 in stage_pics if abs(y2.page - near.page) <= 1] + \
+                        [y2 for p in (near.page - 1, near.page, near.page + 1) if 0 <= p < len(B.pages)
+                         for y2 in _vector_pictures(B, p)]
                     if cands:
                         y2 = min(cands, key=lambda y2: (y2.page != near.page, abs((y2.bbox[1] + y2.bbox[3]) / 2 - near.bbox[1])))
                         f.candidate, f.candidate_at = [Loc(y2.page, y2.bbox)], None
@@ -503,8 +655,27 @@ def _image_labels(results, A: Doc, B: Doc, cfg: dict) -> None:
                 continue
             labels = ", ".join(f"“{snippet_text(l)}”" for l in _label_lines(A, f.baseline))
             at = Loc(y.page, y.bbox)
+            # the stage picture is also meaningfully smaller: tiny labels may be there but too small to
+            # read back reliably - the real issue is the size, not that the labels vanished
+            rel_a = (pic.bbox[2] - pic.bbox[0]) / max(A.right(page) - A.left(page), 1e-6)
+            rel_b = (y.bbox[2] - y.bbox[0]) / max(B.right(y.page) - B.left(y.page), 1e-6)
+            size_tol = cfg["assets"].get("size_ratio_tolerance", 0.2)
+            smaller = rel_a > 0 and rel_b <= rel_a * (1 - size_tol)
             drawn = [_drawn(A, l.bbox, l.page, B, at, gthr, gedge, hays, lo=0.5) for l in f.baseline]
             f.detail = {**f.detail, "stage_picture": list(y.bbox), "stage_picture_page": y.page}
+            # tiny print on a screenshot (an IP address, a device name at 2-4 pt) cannot be read back reliably:
+            # when the picture's other labels are drawn into the stage picture, it is there too
+            tiny = cfg["assets"].get("tiny_label_pt", 5.0)
+            size_of = lambda l: max((ln.size for ln in A.lines if ln.page == l.page and ln.bbox[1] < l.bbox[3]
+                                     and ln.bbox[3] > l.bbox[1] and ln.bbox[0] < l.bbox[2] and ln.bbox[2] > l.bbox[0]), default=99)
+            # a one- or two-character callout ("7", "10") also matches strokes of the drawing: when most of the
+            # labels are not in the stage picture, such short "finds" are chance, not the label
+            short_txt = lambda l: len(re.sub(r"\W", "", " ".join(w.text for w in A.words if w.page == l.page
+                                                                   and _in(w, pymupdf.Rect(l.bbox))))) <= 2
+            if sum(map(bool, drawn)) < 0.5 * len(drawn):
+                drawn = [None if short_txt(l) else d for l, d in zip(f.baseline, drawn)]
+            if any(drawn) and not all(drawn):
+                drawn = [d or (at.bbox if size_of(l) < tiny else None) for l, d in zip(f.baseline, drawn)]
             if drawn and all(drawn):  # the labels are drawn into the stage picture: present, not live text
                 f.check, f.critical, f.types = "layout", False, ["text as graphic"]
                 f.message = (f"Picture labels drawn into the stage picture, not live text: {labels} "
@@ -518,9 +689,13 @@ def _image_labels(results, A: Doc, B: Doc, cfg: dict) -> None:
             missing, present = names(False), names(True)
             f.message = (f"Image labels missing in stage: {missing or labels} on the prod picture (p.{page + 1}) "
                          f"are not on the stage picture (p.{y.page + 1})"
-                         + (f"; drawn into the stage picture: {present}" if present else ""))
+                         + (f"; drawn into the stage picture: {present}" if present else "")
+                         + (f"; the stage picture is also smaller ({rel_b / max(rel_a, 1e-6):.0%} of the prod "
+                            f"picture's width) - likely why its small print cannot be read back" if smaller else ""))
             f.candidate, f.candidate_at = [at], None
             f.detail["labels_missing"], f.detail["labels_in_picture"] = missing, present
+            if smaller:
+                f.types = list(dict.fromkeys((f.types or []) + ["image smaller"]))
 
 
 def _label_wording(results, A: Doc, B: Doc, cfg: dict) -> None:
@@ -560,6 +735,10 @@ def _label_wording(results, A: Doc, B: Doc, cfg: dict) -> None:
                                                         if abs(y.page - pic_page) <= 1 and tuple(y.bbox) != tuple(pic_box)
                                                         and y.bbox[2] - y.bbox[0] >= 30 and y.bbox[3] - y.bbox[1] >= 20]
                 for t in labels:
+                    # a one-character label (a callout number “7”) cannot be confirmed by reading the picture:
+                    # the same digit is in any spec text or icon drawn there (“7.5W”) - it stays missing
+                    if len(re.sub(r"\W", "", t)) < 2:
+                        continue
                     for pg, box in (pics if ocr.available() else []):
                         hit = ocr.locate(t, B.path, pg, box)
                         if hit:
@@ -567,6 +746,19 @@ def _label_wording(results, A: Doc, B: Doc, cfg: dict) -> None:
                             boxes += [(pg, h) for h in hit]
                             break
                 missing = [t for t in labels if t not in found]
+                size = lambda t: max((ln.size for ln in A.lines if ln.page == pa - 1 and t in ln.text), default=99)
+                if found and missing:
+                    # tiny print on a screenshot (an IP address, a device name at 2-4 pt) is beyond OCR: when the
+                    # picture's other labels are drawn into the stage picture, it is there too
+                    tiny = cfg["assets"].get("tiny_label_pt", 5.0)
+                    small = [t for t in missing if size(t) < tiny]
+                    missing = [t for t in missing if t not in small]
+                    found += small
+                if missing and not found and not other_pic and \
+                        all(size(t) < cfg["assets"].get("small_label_pt", 7.0) for t in missing):
+                    # every label is small print (icon captions "0-40°C", "10-90%") and stage shows the same picture
+                    # as a bitmap too coarse to read back: the labels are part of that picture, not missing text
+                    found, missing = list(missing), []
                 if not missing:  # every label is on a stage picture after all
                     other_pic = False
                     f.types = ["label in picture"]
@@ -763,7 +955,7 @@ def _links(u: Unit, units: list[Unit], mode: str) -> list[Finding]:
             # same section (else reported above), but does it land on the same place? the heading each lands on
             da, db = _landing(A, la), _landing(B, lb)
             if da and db and _title_ratio(da, db) < 0.8 and not _names_target(text, db, da) \
-                    and not (ua is not None and ub is not None and ua is not ub):
+                    and not (ua is not None and ub is not None and ua is not ub) and not _lands_under(B, lb, da):
                 out.append(Finding(
                     "integrity", "error",
                     f"Link lands on a different place: “{text}” goes to “{da}” in prod (p.{la['page'] + 1}) "
@@ -781,6 +973,41 @@ def _links(u: Unit, units: list[Unit], mode: str) -> list[Finding]:
                     {"kind": "link-target-differs", "baseline_uri": ua_, "candidate_uri": ub_},
                     types=["link target differs"]))
     out += _page_numbers(u, B)
+    out += _page_zero(u, al)
+    return out
+
+
+def _page_zero(u: Unit, al: Aligner) -> list[Finding]:
+    """“… on page 0”: a cross-reference whose page number could not be resolved when stage was published
+    (the target is missing from the output). The extra “on page N” itself is the template's format and is
+    not an issue; page 0 is - it points nowhere. One finding per place, prod's same sentence beside it."""
+    A, B = u.a, u.b
+    out = []
+    for j in range(u.b_range[0] + 1, u.b_range[1]):
+        if B.words[j].text.rstrip(".,;:)") != "0" or B.words[j - 1].text.lower() != "page":
+            continue
+        k0 = j - 2 if j - 2 >= u.b_range[0] and B.words[j - 2].text.lower() == "on" else j - 1
+        # the cross-reference itself: the linked words right before “on page 0” (its title)
+        # (stage's broken xref is often plain text: a word belongs to it when it is linked in stage, or its
+        # paired prod word is linked in prod)
+        linked = lambda k: _link_at(B, B.words[k]) is not None or (k in al.b2a and _link_at(A, A.words[al.b2a[k]]) is not None)
+        start = k0
+        while start - 1 >= max(u.b_range[0], k0 - 20) and linked(start - 1):
+            start -= 1
+        idx_b = list(range(start, j + 1))
+        # prod: the same title (its paired words), else the paired word before it
+        ia_s = [al.b2a[k] for k in range(start, k0) if k in al.b2a]
+        if not ia_s:
+            prv = next((k for k in range(start - 1, max(u.b_range[0], start - 15) - 1, -1) if k in al.b2a), None)
+            ia_s = [al.b2a[prv]] if prv is not None else []
+        prod = locs(A, ia_s) if ia_s else []
+        text = " ".join(B.words[k].text for k in idx_b)
+        out.append(Finding(
+            "integrity", "error",
+            f"Page reference “on page 0” in stage: “{text}” - the cross-reference's page number was not "
+            f"resolved (its target is missing from the published output) (stage p.{B.words[j].page + 1})",
+            prod, locs(B, idx_b), {"kind": "page-zero", "candidate_text": text},
+            types=["page zero"]))
     return out
 
 
@@ -811,6 +1038,17 @@ def _landing(doc: Doc, ln: dict) -> str:
         return _destination(doc, ln)
     except Exception:
         return ""
+
+
+def _lands_under(doc: Doc, ln: dict, heading: str, reach: float = 150) -> bool:
+    """The link lands a little below `heading` on its page (AEM points at the topic's first paragraph,
+    InDesign at its heading): same place for the reader, the heading is at the top of what they see."""
+    page, to = ln.get("page", -1), ln.get("to")
+    if not heading or to is None or not 0 <= page < len(doc.pages):
+        return False
+    pg = pymupdf.open(doc.path)[page]
+    needle = " ".join(heading.split()[:6])
+    return any(r.y0 <= to.y + 4 and to.y - r.y0 <= reach for r in pg.search_for(needle))
 
 
 def _title_ratio(a: str, b: str) -> float:
@@ -895,7 +1133,8 @@ _WHY = {
     "duplicate content": ("Content duplicated", "Stage repeats prod text in a place where prod does not have it."),
     "duplicate image": ("Image duplicated", "A prod picture appears a second time in stage, in a section that should not have it."),
     "image blacked out": ("Image blacked out", "Part of the picture is black in stage where prod shows content."),
-    "image changed": ("Different image", "Stage shows another picture than prod at this spot."),
+    "image changed": ("Image differs", "The picture at this spot differs from prod's: another version of it (re-captured, "
+                                       "re-cropped, without prod's highlight marks) or another picture."),
     "missing image label": ("Image label / caption missing", "The text that labels or captions a picture in prod is not in stage."),
     "missing text": ("Data missing", "Text from prod is not in stage."),
     "extra text": ("Extra content", "Stage has text that is not in prod."),
@@ -926,6 +1165,7 @@ _WHY = {
     "heading differs": ("TOC heading differs", "The heading of the table of contents differs."),
     "extra image": ("Extra image", "Stage shows a picture that prod does not have here."),
     "image distorted": ("Image distorted", "The picture is stretched or squashed in stage."),
+    "image smaller": ("Image smaller in stage", "The stage picture is noticeably smaller than prod's, so fine print on it may not be legible."),
     "extra table": ("Extra table", "Stage has a table that prod does not have."),
     "table border": ("Table border differs", "A border of the prod table (outline, row or column lines) is missing in stage, or drawn in another colour."),
     "text outside table border": ("Text outside table border", "Text in a stage table runs across its cell border (into the next cell, past the table edge or over a row line); in prod it fits inside the cell."),
@@ -956,6 +1196,7 @@ _WHY = {
     "image combined": ("Pictures combined", "A prod picture is shown as part of one larger picture in stage."),
     "text in image": ("Text inside a picture", "The prod text is drawn inside a stage picture (read by OCR), not as live text."),
     "table border added": ("Table border added", "A stage table has a border or rule that the prod table does not."),
+    "label joined": ("Bold label joined with its text", "A bold label on its own line in prod runs into its plain text on one line in stage."),
     "image blurred": ("Image blurred", "The picture is noticeably softer / less sharp in stage than in prod."),
     "image order": ("Image sequence differs", "The pictures appear in a different order in stage than in prod."),
     "footer": ("Footer differs", "The page footer (page number, its place and style, or the text beside it such as a chapter "
@@ -965,6 +1206,7 @@ _WHY = {
                         "The number or icon between round brackets - a step number such as (❶) - is not centred, sits with "
                         "a different space to the brackets, or is missing in stage."),
     "image alignment": ("Image alignment differs", "The picture sits differently in the text column (left / centred / right / full width) in stage than in prod."),
+    "page zero": ("Page reference “on page 0”", "A cross-reference in stage says “on page 0”: its target page was not resolved."),
     "link quotes": ("Link quotation marks", "The link title's quotation marks (“…”) are missing or added in stage."),
     "link lands elsewhere": ("Link lands on a different place", "The link jumps to another heading in stage than in prod."),
     "link page number": ("Page number in link text is wrong", "The link says “on page N” but jumps to a page with another number."),
@@ -986,6 +1228,8 @@ _WHY = {
     "spec page number": ("Page number off the design spec", "A page number is missing, out of sequence or not centred."),
     "spec heading level": ("Heading level skipped", "A heading skips a level (H1 → H3): the design spec keeps H1 → H2 → H3."),
     "spec callout title": ("Callout title off the design spec", "A callout's title is not the fixed title of its type (IMPORTANT, NOTE, TIP, WARNING)."),
+    "callout style": ("Note style differs", "The same kind of note is drawn differently in stage than in prod "
+                                            "(e.g. a bar on the left in prod, a filled box in stage)."),
     "spec callout background": ("Callout colour off the design spec", "A callout is not in its type's background colour, or is plain text instead of a callout."),
     "spec callout icon": ("Callout icon off the design spec", "A callout has no icon, another type's icon, or an icon of another size."),
     "spec callout content": ("Callout content not allowed", "A callout holds a picture or a second callout: it takes paragraphs only."),
@@ -995,6 +1239,7 @@ _WHY = {
     "spec bullet": ("Bullet off the design spec", "An unordered list does not use the black circle bullet."),
     "spec pagination": ("Page break off the design spec", "A heading at a page bottom, a callout split over pages, or a table header alone / not repeated."),
     "spec page structure": ("Print page structure off the design spec", "The Print version has a cover, Q&A index or TOC, or the first page header is missing or repeated."),
+    "table header alignment": ("Table header not centred", "A table header cell's text is not centred in its column (design spec: header text centred)."),
     "row background": ("Table row background differs", "Rows that one side shades (group rows between the data rows) are plain on the other."),
     "spec text-align": ("Text not left-aligned", "Body text is centred or right-aligned; the design spec left-aligns all content."),
     "size / aspect": ("Image size differs", "The picture is shown at another width or aspect ratio in stage."),
@@ -1020,6 +1265,9 @@ def tag(f: dict, genuine_types: set[str], data_min_words: int = 3, exclude_check
     if not everything and gt == ["missing text"] and f["check"] == "content" and not f.get("critical") \
             and f["detail"].get("absent_words", 0) < data_min_words:
         gt = []
+    # bullet indent / gap / list level is layout (CSS), not a missing or changed marker
+    if not everything and "indent" in types:
+        gt = [t for t in gt if t != "bullet"]
     f["genuine"] = bool(gt)
     if c := color_of(f):
         f["color"] = c
@@ -1033,7 +1281,7 @@ def tag(f: dict, genuine_types: set[str], data_min_words: int = 3, exclude_check
             names = list(dict.fromkeys(_WHY.get(t, (t.capitalize(), ""))[0] for t in merged))
             name, why = " + ".join(names), " ".join(dict.fromkeys(_WHY.get(t, ("", ""))[1] for t in merged)).strip()
         f["issue"], f["why"] = name, why
-        f["description"] = f["message"]
+        f["description"] = concise(f["message"])
 
 
 # issue colour (UI, PDF reports, screenshot boxes): red = what the reader sees is wrong or missing,
@@ -1042,7 +1290,7 @@ RED, BLUE = "#dc2626", "#2563eb"
 _RED_TYPES = {"missing image", "broken image", "image changed", "image blacked out", "missing image label",
               "size / aspect", "image distorted", "placement", "image outside box",   # image size / alignment
               "image pixelated", "row order", "extra link", "missing link", "link to wrong section",
-              "image blurred", "image alignment", "link lands elsewhere", "link page number", "link quotes",
+              "image blurred", "image alignment", "label joined", "link lands elsewhere", "link page number", "link quotes", "page zero",
               "spec font-size", "font-size",                                            # text size
               "bullet marker", "numbering style", "numbering format", "numbering sequence",  # bullet, (-)
               "marker glued", "bracket spacing"}
@@ -1230,3 +1478,54 @@ def where(f: dict) -> tuple[str, str]:
         ps = sorted({l["page"] + 1 for l in locs_}) or ([at["page"] + 1] if at else [])
         return ", ".join(f"p.{p}" for p in ps)
     return pages(f.get("baseline") or [], f.get("baseline_at")), pages(f.get("candidate") or [], f.get("candidate_at"))
+
+
+_KEEP_PAREN = re.compile(r"\d|[“”\"‘’]|\bp\.|↔|→|%|pt\b|mm\b|px\b|places?\b|level\b|items?\b|cells?\b|rows?\b|words?\b")
+
+
+def concise(msg: str) -> str:
+    """The issue as the report states it: what is wrong and where, without the explanations around it.
+      - the picture sizes (" — prod: … · stage: …") become their own Prod: / Stage: lines (of the first place)
+      - explanatory brackets (“(space between marker and text)”, “(re-captured or edited)”) are dropped;
+        brackets with pages, numbers or counts stay, and quoted document text is never touched
+      - an explanatory tail (“ - the cross-reference's page number was not resolved …”,
+        “ — header text must be centred in its column”) and the style role tag (“[text-10pt] ”) are dropped
+      - a phrase repeated before every place (“prod has a space stage does not — ”) is said once
+      - a long list of examples keeps its first three"""
+    parts = []
+    for part in msg.split("  ·  "):
+        lines = part.split("\n")
+        head, rest = lines[0], lines[1:]
+        # picture sizes of every place: the first one as Prod / Stage lines, the rest dropped
+        tails = list(re.finditer(r"\s+—\s+(?:prod: ([^;]*?)(?:\s+·\s+stage: ([^;]*?))?|stage: ([^;]*?))(?=;|$)", head))
+        extra = []
+        if tails:
+            t = tails[0]
+            extra = ([f"Prod: {t.group(1)}"] if t.group(1) else []) + \
+                    ([f"Stage: {t.group(2) or t.group(3)}"] if (t.group(2) or t.group(3)) else [])
+            for t in reversed(tails):
+                head = head[:t.start()] + head[t.end():]
+        head = re.sub(r"^\[[\w .-]+\]\s+", "", head)  # style role tag
+        # quoted document text is kept exactly: work on the text between the quotes only
+        chunks = re.split(r"(“[^”]*”)", head)
+        for n in range(0, len(chunks), 2):
+            c, prev = chunks[n], None
+            while prev != c:  # nested brackets: innermost first
+                prev = c
+                c = re.sub(r"\s*\(([^()“”]*)\)", lambda b: b.group(0) if _KEEP_PAREN.search(b.group(1))
+                           or len(b.group(1).split()) < 2 else "", c)
+            chunks[n] = c
+        head = "".join(chunks)
+        # an explanation after a dash at the end (no quotes, no numbers): " - the reason why …"
+        head = re.sub(r"\s+[-—]\s+(?=[a-z])[^“”\"\d]*$", "", head)
+        # the same phrase before every place: said once, after the count
+        items = head.split("; ")
+        pre = re.match(r"^(.*?:\s+)(.+? — )", items[0]) if len(items) > 1 else None
+        if pre and all(x.startswith(pre.group(2)) for x in items[1:]):
+            p2 = pre.group(2)
+            head = pre.group(1).rstrip(": ") + " — " + p2[:-3] + ": " + "; ".join(
+                [items[0][len(pre.group(0)):]] + [x[len(p2):] for x in items[1:]])
+        # “(13 items, e.g. “a”; “b”; “c”; “d” …)” -> the first three examples
+        head = re.sub(r"(e\.g\. (?:“[^”]*”; ){2}“[^”]*”)(?:; “[^”]*”)+", r"\1 …", head)
+        parts.append("\n".join([head.strip()] + rest + extra))
+    return "  ·  ".join(parts)

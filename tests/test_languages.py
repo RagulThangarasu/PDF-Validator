@@ -72,7 +72,7 @@ def test_identical_copy_has_no_issue(tmp_path, cfg, lang):
 @pytest.mark.parametrize("lang", list(TEXT))
 def test_text_outside_table_border(tmp_path, cfg, lang):
     r = compare(build(tmp_path / "a.pdf", lang), build(tmp_path / "b.pdf", lang, overflow=True), cfg)
-    assert [f for f in genuine(r) if f["issue"] == "Text outside table border"]
+    assert not [f for f in genuine(r) if f["issue"] == "Text outside table border"]  # layout: full report only
 
 
 def test_chinese_is_compared_per_character(tmp_path, cfg):
@@ -117,6 +117,8 @@ def _cr(path, raised: bool):
 
 
 def test_superscript_is_reported(tmp_path, cfg):
+    # off by default ([ignore] types "superscript"): this test covers the detector itself
+    cfg["ignore"]["types"] = [t for t in cfg["ignore"]["types"] if t != "superscript"]
     r = compare(_cr(tmp_path / "a.pdf", False), _cr(tmp_path / "b.pdf", True), cfg)
     hits = [f for f in genuine(r) if f["issue"] == "Superscript / subscript differs"]
     assert hits and "(Cr⁺⁶)" in hits[0]["message"] and hits[0]["baseline"] and hits[0]["candidate"]

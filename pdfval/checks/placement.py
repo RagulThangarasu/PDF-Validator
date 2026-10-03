@@ -28,7 +28,7 @@ import pymupdf
 
 from ..model import Doc, Finding, Image, Loc
 from . import Aligner, Unit, locs, snippet
-from .assets import icon_max
+from .assets import alignment, icon_max
 
 
 def relation(doc: Doc, rng: tuple[int, int], im: Image) -> tuple[str, int | None, int | None]:
@@ -111,7 +111,11 @@ def check(u: Unit) -> list[Finding]:
         same_neighbours = ((prev_a is not None and txt(u.a, prev_a) == txt(u.b, prev_b))
                            or (next_a is not None and txt(u.a, next_a) == txt(u.b, next_b)))
         msg = None
-        if kind_a != kind_b:
+        # a centred graphic only dropping to / off its own line (no change of neighbouring text) is a
+        # layout reflow, not a real placement issue - unless it landed next to different text (handled below)
+        centred = pcfg.get("ignore_center_placement", True) and same_neighbours and \
+            (alignment(u.a, x.page, x.bbox) == "centred" or alignment(u.b, y.page, y.bbox) == "centred")
+        if kind_a != kind_b and not centred:
             if kind_a == "inline":
                 pos = (f"after {_word(u.a, prev_a)}" if prev_a is not None else "at the start of its line") + \
                       (f" and before {_word(u.a, next_a)}" if next_a is not None else "")

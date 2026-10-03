@@ -120,6 +120,13 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 if w.line != li:
                     break
                 w.norm = ""
+        # every line of a printed TOC's pages, from its first entry on: a wrapped entry ("Safety notice for
+        # remote control (applicable if a | remote control is provided) ..... 9") leaves lines no entry pattern sees
+        if t.source == "printed" and t.lines:
+            start = min(t.lines)
+            for w in d.words:
+                if w.page in t.pages and w.line >= start - 1:
+                    w.norm = ""
     anA, anB = sections.build_anchors(A, cfg), sections.build_anchors(B, cfg)
     # the printed TOC is compared on its own (TOC check): its title and entry lines are not sections,
     # whatever found them (bookmarks, or font sizes when the PDF has no bookmarks)
@@ -350,6 +357,8 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                                          f"section starts at top of page"))
 
     doc_findings = _document_findings(A, B, cfg)
+    from .checks import notes as checks_notes
+    doc_findings += checks_notes.compare(A, B, cfg)  # the same kind of note drawn another way (bar vs filled box)
     doc_findings += checks_typography.document(B, cfg)  # stage vs the design spec (config/typography.toml)
     genuine_types = set(cfg.get("genuine", {}).get("types", []))
 
@@ -419,18 +428,26 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     genuine.cross_section([(u, fs) for u, fs, _ in ran], A, B, cfg, (candidate_meta or {}).get("mode", "pdf"),
                           progress=lambda m: report(0.97, f"Relating sections - {m}"))
     _apply_ignore(ran, A, B, cfg)
+    # bold / italic on the same words is a content difference (reported with the text, not as CSS)
+    for _, fs, _ in ran:
+        for f in fs:
+            if f.check == "style" and "emphasis" in (f.types or []):
+                f.check = "content"
     _spec_prod_spots(ran, cfg)
     data_min = cfg.get("genuine", {}).get("data_missing_words", 3)
     genuine_skip = set(cfg.get("genuine", {}).get("exclude_checks", []))
     if cfg["report"].get("merge_nearby", True):  # one issue per place: the same kind a few lines apart
         for _, findings, _ in ran:
             findings[:] = _merge_nearby(findings, cfg["report"].get("merge_distance", 45))
+    if cfg["report"].get("split_by_page", True):  # every place visible: one issue per stage page
+        for _, findings, _ in ran:
+            findings[:] = [g for f in findings for g in _split_by_page(f)]
     for u, findings, truncated in ran:
         per_check = {c: _check_summary([f for f in findings if f.check == c]) for c in CHECKS}
         for c, n in truncated.items():
             per_check[c]["truncated"] = n
         for f in findings:
-            if f.check == "style" and f.detail.get("kind") != "spec":  # prod -> stage styles only
+            if f.check == "style" and f.detail.get("kind") != "spec" and "role" in f.detail:  # prod -> stage styles only
                 key = (f.detail["role"], f.detail["baseline_style"], f.detail["candidate_style"])
                 style_map[key]["words"] += f.detail["words"]
                 style_map[key]["sections"] += 1
@@ -1074,3 +1091,31 @@ def _spec_prod_spots(ran, cfg: dict) -> None:
                 if any(t.startswith("spec callout") for t in f.types or []):
                     spots = [whole_callout(x) for x in spots]
                 f.baseline = spots
+
+
+def _split_by_page(f: Finding) -> list[Finding]:
+    """A finding whose places are on several stage pages (a bullet indent on p.39 and p.40, a link not clickable
+    in 3 places) becomes one finding per stage page, so each screenshot shows - and highlights - every place
+    of its page. The prod side of each part: the prod boxes paired with its stage boxes (links), else the
+    prod boxes on the matching prod page. Spec / TOC / document-wide findings stay whole."""
+    pages = sorted({l.page for l in f.candidate})
+    if len(pages) < 2 or f.check in ("style", "toc", "structure") or f.detail.get("kind") == "spec":
+        return [f]
+    import copy
+    pb_pages = [l.page for l in f.baseline]
+    out = []
+    for n, p in enumerate(pages):
+        cand = [l for l in f.candidate if l.page == p]
+        links = [(a, b) for a, b in f.links if b.page == p]
+        base = [a for a, _ in links]
+        if not base and f.baseline:
+            # no pairs: the prod page in the same position among the prod pages
+            pa = sorted(set(pb_pages))
+            q = pa[min(n * len(pa) // len(pages), len(pa) - 1)]
+            base = [l for l in f.baseline if l.page == q]
+        g = copy.copy(f)
+        g.candidate, g.baseline, g.links = cand, base, links
+        g.detail = {**f.detail, "part": f"{n + 1} of {len(pages)}", "stage_page": p + 1}
+        g.message = f"{f.message} [stage p.{p + 1}: part {n + 1} of {len(pages)}]"
+        out.append(g)
+    return out

@@ -3,6 +3,7 @@ it is reported as a genuine issue (and that presentation changes are not)."""
 import pymupdf
 import pytest
 
+from conftest import all_checks
 from pdfval import compare, load_config
 
 P1 = "The display turns on when you press the power button on the remote control unit."
@@ -86,7 +87,7 @@ def cfg():
     c = load_config()
     c["typography"]["enabled"] = False  # prod vs stage only: these pages don't follow the design spec
     c["sections"]["front_matter"] = False
-    return c
+    return all_checks(c)  # these tests cover the CSS / layout detectors the default reports leave out
 
 
 def genuine(result):

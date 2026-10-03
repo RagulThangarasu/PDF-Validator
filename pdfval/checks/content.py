@@ -80,6 +80,19 @@ def _parts(tokens) -> Counter:
     return Counter(p for t in tokens for p in re.split(r"(?<=[-/–—])", t) if p)
 
 
+def _mostly_relocated(c: Counter, pool: Counter, overlap: float) -> bool:
+    """`c`'s words are found elsewhere in the document (lost on one side, extra on the other) for at
+    least `overlap` share of them - not strictly every one: a big block read in another table/column
+    order (so most of it is a straight relocation) should not stay "missing" just because a handful
+    of its words (a reworded aside, an OCR slip) did not resolve to the exact same token."""
+    if overlap >= 1.0:
+        return not c - pool
+    total = sum(c.values())
+    if not total:
+        return True
+    return sum((c - pool).values()) <= (1 - overlap) * total
+
+
 def _drop_moved_phrases(d, idx: list[int], relocated: Counter, min_words: int = 3) -> tuple[list[int], Counter]:
     """Remove runs of >= min_words words that all sit unmatched on the other side (the phrase only
     moved) from a diff block that also holds other text. Returns (what is left, relocated minus the
@@ -258,15 +271,18 @@ def _peel_labels(ops, at, bt):
             out.append((tag, i1, i2, j1, j2))
             continue
         pre, post = [], []
-        while j2 - j1 > 1 and lab(bt[j2 - 1]) and not any(lab(t) for t in at[i1:i2]):
+        # also when the label is all the block has on its side: “Ambient light sensor” -> “NOTE:” is prod
+        # text on its own plus a stage-only label (template), never one changed text
+        while j2 - j1 >= 1 and lab(bt[j2 - 1]) and not any(lab(t) for t in at[i1:i2]):
             post.insert(0, ("insert", i2, i2, j2 - 1, j2)); j2 -= 1
-        while j2 - j1 > 1 and lab(bt[j1]) and not any(lab(t) for t in at[i1:i2]):
+        while j2 - j1 >= 1 and lab(bt[j1]) and not any(lab(t) for t in at[i1:i2]):
             pre.append(("insert", i1, i1, j1, j1 + 1)); j1 += 1
-        while i2 - i1 > 1 and lab(at[i2 - 1]) and not any(lab(t) for t in bt[j1:j2]):
+        while i2 - i1 >= 1 and lab(at[i2 - 1]) and not any(lab(t) for t in bt[j1:j2]):
             post.insert(0, ("delete", i2 - 1, i2, j2, j2)); i2 -= 1
-        while i2 - i1 > 1 and lab(at[i1]) and not any(lab(t) for t in bt[j1:j2]):
+        while i2 - i1 >= 1 and lab(at[i1]) and not any(lab(t) for t in bt[j1:j2]):
             pre.append(("delete", i1, i1 + 1, j1, j1)); i1 += 1
-        out += pre + [("replace", i1, i2, j1, j2)] + post
+        rest = ("replace" if i1 < i2 and j1 < j2 else "delete" if i1 < i2 else "insert" if j1 < j2 else None, i1, i2, j1, j2)
+        out += pre + ([rest] if rest[0] else []) + post
     return out
 
 
@@ -354,6 +370,12 @@ def check(u: Unit) -> list[Finding]:
     # words unmatched on both sides: the same text that only sits on another line or in another
     # cell order ("SL6504/ SL7504/" wrapped inside a table cell) - not a content difference
     relocated_a = relocated_b = _parts(lost.elements()) & _parts(pool.elements())
+    # same, ignoring punctuation: a block of bare numbers (a picture's own callout digits, "10 11 12")
+    # read out of a table whose own column numbers them "10." "11." "12." is the same digits, only
+    # the trailing dot differs - used as a fallback when the block is only such markers (not prose,
+    # where "Note" / "NOTE:" must stay distinct)
+    loose_relocated = _loose_bag(lost.elements()) & _loose_bag(pool.elements())
+    marker_like = lambda idx, d: bool(idx) and all(re.fullmatch(r"\(?\d{1,4}[.)]?", d.words[i].norm or "") for i in idx)
     unmatched_a: Counter = Counter()
     findings = []
     moves: list[tuple[Finding, list[int], list[int]]] = []
@@ -443,7 +465,10 @@ def check(u: Unit) -> list[Finding]:
         critical = tag in ("delete", "replace") and absent >= crit_words and absent >= 0.5 * len(a_idx)
         ctype = ("missing text" if tag == "delete" or critical else "extra text" if tag == "insert"
                  else classify(at[i1:i2], bt[j1:j2]))
-        if ctype == "hyphenation" or (ctype == "spacing" and _wrap_only(u, a_idx, b_idx)):
+        sup_gap = ctype == "spacing" and u.cfg["content"].get("ignore_superscript_spacing", True) and \
+            any(_superscript(u.a.words[k]) for k in a_idx) or ctype == "spacing" and \
+            u.cfg["content"].get("ignore_superscript_spacing", True) and any(_superscript(u.b.words[k]) for k in b_idx)
+        if ctype == "hyphenation" or (ctype == "spacing" and (_wrap_only(u, a_idx, b_idx) or sup_gap)):
             # a word split / wrapped across lines on one side only: same text, a layout difference
             u.pairs.extend(zip(a_idx, b_idx))
             u.wraps.append((a_idx, b_idx))
@@ -499,8 +524,21 @@ def check(u: Unit) -> list[Finding]:
         if ccfg.get("ignore_relocated", True):
             # each side on its own: words that sit unmatched on the other side only moved
             # (another line, another cell order) - "Sound mode" read before or after its cell text
+            # the tolerance below only applies to a block of some size: a tiny one or two words is
+            # already close to 100% "covered" by definition, so relaxing it there would swallow a
+            # genuine one-word difference (a changed punctuation mark) along with the move
+            overlap = ccfg.get("relocated_overlap", 0.85)
+            min_words = ccfg.get("relocated_overlap_min_words", 15)
             ca, cb = _parts(u.a.words[i].norm for i in a_idx), _parts(u.b.words[j].norm for j in b_idx)
-            a_rel, b_rel = not ca - relocated_a, not cb - relocated_b
+            a_rel = _mostly_relocated(ca, relocated_a, overlap if len(a_idx) >= min_words else 1.0)
+            b_rel = _mostly_relocated(cb, relocated_b, overlap if len(b_idx) >= min_words else 1.0)
+            # a side that is only several bare numbers (not prose, not a lone list marker): also try
+            # ignoring the trailing dot/paren, so a picture's own callout digits ("10 11 12 ...") match
+            # its table's own numbering ("10." "11." ...) read elsewhere
+            if not a_rel and len(a_idx) >= 6 and marker_like(a_idx, u.a):
+                a_rel = _mostly_relocated(_loose_bag(u.a.words[i].norm for i in a_idx), loose_relocated, overlap)
+            if not b_rel and len(b_idx) >= 6 and marker_like(b_idx, u.b):
+                b_rel = _mostly_relocated(_loose_bag(u.b.words[j].norm for j in b_idx), loose_relocated, overlap)
             if a_rel and b_rel:
                 relocated_a, relocated_b = relocated_a - ca, relocated_b - cb  # counted as reordered in the match %
                 u.style_pairs.extend(same_words(u, a_idx, b_idx) if a_idx and b_idx else [])  # style still compared
@@ -547,18 +585,23 @@ def check(u: Unit) -> list[Finding]:
             same =same_words(u, a_idx, b_idx) if a_idx and b_idx else []
             u.style_pairs.extend(same)
             label = "Missing content block" if critical else _TYPE_LABEL.get(ctype, _KIND[tag])
+            # what the reader sees: with the cross-reference "on page 36" that was left out of the comparison
+            # (its full stop moved onto "interface"), so the text and the highlight are the real spot
+            a_show, b_show = _shown(u.a, a_idx), _shown(u.b, b_idx)
             # a short difference (one character in Chinese/Japanese, a word or two) is shown in its line,
             # so the reader can find it: “废” → “州” in “有关 China WEEE 州弃电器电子产品回收处理”
             ctx = _context(u.b, b_idx) if b_idx else _context(u.a, a_idx) if a_idx else ""
-            shown = snippet(u.b, b_idx) if b_idx else snippet(u.a, a_idx) if a_idx else ""
+            shown = snippet(u.b, b_show) if b_idx else snippet(u.a, a_show) if a_idx else ""
             ctx = f" in “{ctx}”" if ctx and ctx != shown and max(len(a_idx), len(b_idx)) <= 3 else ""
+            ta_s, tb_s = snippet(u.a, a_show), snippet(u.b, b_show)
+            note = _gap_note(ta_s, tb_s) if ctype == "spacing" else ""
             findings.append(Finding(
                 "content", "error" if critical else sev,
-                f"{label}: "
-                + (f"“{snippet(u.a, a_idx)}”" if a_idx else "")
-                + (" → " if a_idx and b_idx else "") + (f"“{snippet(u.b, b_idx)}”" if b_idx else "") + ctx,
-                locs(u.a, a_idx, rcfg["max_locs"]), locs(u.b, b_idx, rcfg["max_locs"]),
-                {"op": tag, "baseline_text": snippet(u.a, a_idx, 200), "candidate_text": snippet(u.b, b_idx, 200),
+                f"{label}: " + (note + " — " if note else "")
+                + (f"“{ta_s}”" if a_idx else "")
+                + (" → " if a_idx and b_idx else "") + (f"“{tb_s}”" if b_idx else "") + ("" if note else ctx),
+                locs(u.a, a_show, rcfg["max_locs"]), locs(u.b, b_show, rcfg["max_locs"]),
+                {"op": tag, "baseline_text": ta_s, "candidate_text": tb_s,
                  "words": max(len(a_idx), len(b_idx)), "absent_words": absent},
                 baseline_at=a_at, candidate_at=b_at, critical=critical, types=[ctype],
             ))
@@ -571,6 +614,7 @@ def check(u: Unit) -> list[Finding]:
             findings[-1].detail["candidate_sentence"] = _sentence(u.b, sb) if sb is not None else ""
 
     spacing = _spacing(u, findings) if ccfg.get("check_spacing", True) else 0
+    spacing += _space_before_stop(u, findings) if ccfg.get("check_spacing", True) else 0
     spacing += _paragraphs(u, findings) if ccfg.get("check_paragraphs", False) else 0
     unmatched_a, pool = +unmatched_a, +pool  # drop zero counts left by hyphenation matches
     matched += hyphen_matched
@@ -1054,6 +1098,15 @@ def _scripts(u: Unit, sev: str) -> list[Finding]:
     return out
 
 
+_SUPER_CHARS = set("®™©℠¹²³⁰⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ*†‡")
+
+
+def _superscript(w) -> bool:
+    """A raised word (footnote mark, ® ™, an exponent): the space before / after it is the typesetter's."""
+    t = (w.text or "").strip()
+    return "^" in (w.script or "") or bool(t) and all(c in _SUPER_CHARS for c in t)
+
+
 def _spacing(u: Unit, findings: list[Finding]) -> int:
     """Whitespace between two consecutive words that are identical on both sides
     and sit on the same line on both sides (line wrapping is layout, not content)."""
@@ -1069,6 +1122,9 @@ def _spacing(u: Unit, findings: list[Finding]) -> int:
             continue
         if u.cfg["content"].get("spacing_mode", "exact") == "presence" and bool(sa) == bool(sb):
             continue  # one space vs two is invisible in a browser
+        if u.cfg["content"].get("ignore_superscript_spacing", True) and \
+                any(_superscript(w) for w in (A[i], A[i2], B[j], B[j2])):
+            continue  # the gap beside a superscript ("Wi-Fi ®", "page 3 ¹") is not a word gap
         from .. import normalize
         if normalize.nospace_char(A[i].text[-1:]) or normalize.nospace_char(A[i2].text[:1]):
             # beside a Chinese / Japanese character the gap is the typesetter's CJK-Roman spacing
@@ -1083,6 +1139,72 @@ def _spacing(u: Unit, findings: list[Finding]) -> int:
             {"op": "spacing", "baseline_spaces": sa, "candidate_spaces": sb, "words": 1}, types=["spacing"],
             links=paired_locs(u.a, u.b, [(i, j), (i2, j2)])))
     return count
+
+
+def _space_before_stop(u: Unit, findings: list[Finding]) -> int:
+    """A space before a full stop / comma / colon in stage (“see connection methods .”, “the base .”):
+    typically where a cross-reference's “on page 12” was dropped and its full stop left behind. Reported
+    when prod has no space there (prod's sentence ends “…methods on page 12.” or “…methods.”). One
+    finding per place, the stage words and the prod words of the same spot highlighted."""
+    A, B = u.a, u.b
+    al = {j: i for i, j in u.pairs}
+    sev = u.cfg["content"].get("spacing_severity", "warning")
+    count = 0
+    for j in range(max(u.b_range[0] + 1, 1), u.b_range[1]):
+        w, prev = B.words[j], B.words[j - 1]
+        if w.text not in (".", ",", ";", ":") or prev.page != w.page or prev.line != w.line:
+            continue
+        if not prev.space_after or prev.space_after < 1 or not re.search(r"\w$", prev.text):
+            continue  # “/ .” (a key icon left out of the text) or no space
+        i = al.get(j - 1)
+        if i is None:
+            continue
+        # prod: the same word followed by the same mark after a space too -> both PDFs print it so
+        if i + 1 < len(A.words) and A.words[i + 1].text == w.text and (A.words[i].space_after or 0) >= 1:
+            continue
+        nxt = next((k for k in range(i + 1, min(len(A.words), i + 8)) if A.words[k].text.rstrip().endswith(w.text)), None)
+        a_idx = list(range(i, (nxt if nxt is not None else i) + 1))
+        prod_txt = " ".join(A.words[k].text for k in a_idx)
+        count += 1
+        findings.append(Finding(
+            "content", sev,
+            f"Space before “{w.text}” in stage: “{prev.text} {w.text}” → prod “{prod_txt}”",
+            locs(A, a_idx), locs(B, [j - 1, j]),
+            {"op": "spacing", "kind": "space before punctuation", "words": 1}, types=["spacing"],
+            links=paired_locs(A, B, [(i, j - 1)])))
+    return count
+
+
+def _shown(d, idx: list[int]) -> list[int]:
+    """idx as the reader sees it: the words left out of the comparison (a cross-reference's "on page 36",
+    normalize.fold_xref_pages) inside or right after the run are shown and highlighted with it."""
+    if not idx:
+        return idx
+    out = list(idx)
+    for k in range(min(idx), max(idx)):  # folded words between two words of the run
+        if k not in idx and not d.words[k].norm:
+            out.append(k)
+    k = max(idx) + 1
+    line = d.words[max(idx)].line  # ("on page 36" right after it, on its line - never a whole TOC page left out)
+    while k < len(d.words) and not d.words[k].norm and d.words[k].text.strip() and d.words[k].line == line \
+            and k - max(idx) <= 8:  # folded words after it
+        out.append(k)
+        k += 1
+    return sorted(set(out))
+
+
+def _gap_note(a: str, b: str) -> str:
+    """A spacing difference in words: “stage has a space before “.”” / “prod has …” / “a space is missing …”."""
+    for side, x, y in (("stage", b, a), ("prod", a, b)):
+        m = re.search(r"\s+([.,;:!?)\]}%])", x)
+        if m and re.sub(r"\s+([.,;:!?)\]}%])", r"\1", x) == y:
+            return f"{side} has a space before “{m.group(1)}”"
+        m = re.search(r"([(\[{])\s+", x)
+        if m and re.sub(r"([(\[{])\s+", r"\1", x) == y:
+            return f"{side} has a space after “{m.group(1)}”"
+    if a.replace(" ", "") == b.replace(" ", ""):
+        return "prod has a space stage does not" if a.count(" ") > b.count(" ") else "stage has a space prod does not"
+    return ""
 
 
 def _pieces(d, idx: list[int]) -> list[list[int]]:

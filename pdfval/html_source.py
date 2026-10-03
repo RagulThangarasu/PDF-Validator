@@ -180,8 +180,9 @@ def _settle(page, extra_ms: int = 0) -> None:
 
 
 def _goto(page, url: str, timeout: int):
-    """Open a page: wait for it to load (not for network idle, see _settle)."""
-    resp = page.goto(url, wait_until="load", timeout=timeout)
+    """Open a page: wait for its HTML, then a bounded time for the rest (_settle). Waiting for the "load"
+    event can last forever on an AEM author page (a request that never finishes)."""
+    resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout)
     _settle(page)
     return resp
 

@@ -316,8 +316,9 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
         limit = max(3, ecfg.get("repeat_threshold", 0.3) * len(pages))
         hot = {k for k, v in counts.items() if len(v) >= limit}
         for i, (pno, bbox, text, _, _) in enumerate(raw_lines):
-            k = (re.sub(r"\d+", "#", normalize.clean(text).lower()), round(bbox[1] / pages[pno].height * 100))
-            if k in hot:
+            t, h = re.sub(r"\d+", "#", normalize.clean(text).lower()), round(bbox[1] / pages[pno].height * 100)
+            # a step either side counts too: the front matter may print its page number a few points higher
+            if any((t, h + d) in hot for d in (0, -1, 1)):
                 removed.add(i)
         # the rest of a running header / footer: text on the same line as a removed page number, in the
         # page's top or bottom band - "5  Important safety instructions" names the chapter, so it
@@ -370,7 +371,7 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
     for f in furniture:
         if _PAGE_NO.match(f["text"]):
             spots[(f["band"], height(f))] += 1
-    furniture = [f for f in furniture if f["stripped"] or spots[(f["band"], height(f))] >= 4]
+    furniture = [f for f in furniture if f["stripped"] or sum(spots[(f["band"], height(f) + d)] for d in (-1, 0, 1)) >= 4]
     for i, (_, _, text, _, _) in enumerate(raw_lines):
         if any(r.search(text) for r in ignore_re):
             removed.add(i)
