@@ -286,9 +286,11 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 2
         full_page = True
     want = SEVERITIES.get(mode, SEVERITIES["all"])
     # genuine issues always get screenshots (unless none at all): they go into the genuine-issues report
-    from .pdf_report import is_image_issue
+    from .pdf_report import PDF_IMAGE_TYPES, is_image_issue
+    # ... and so do the picture issues that report shows whether genuine or not (size, pixelated)
     todo = [(s, f) for s in result["sections"] for f in s["findings"]
             if f["severity"] in want or (mode != "none" and f.get("genuine"))
+            or (mode != "none" and PDF_IMAGE_TYPES & set(f.get("types") or []))
             or (mode == "reports" and is_image_issue(f))]
     # the image report's own issues (a picture's label missing): always pictured, unless no screenshots at all
     todo += [(s, f) for s in result["sections"] for f in s.get("image_findings", []) if mode != "none"]

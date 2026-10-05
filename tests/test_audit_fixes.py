@@ -53,6 +53,35 @@ def test_same_sentence_linked_on_both_sides_is_not_an_extra_link(tmp_path, cfg):
     assert not bad, bad
 
 
+def _duplicate_link_pdf(path, linked: bool):
+    """The same cross-reference text, "Shipping contents", printed twice on one page, both jumping
+    to page 2: linked=True for prod (two annotations, same target), plain text both times for stage."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 60), "Connection", fontsize=18, fontname="hebo")
+    w = pymupdf.get_text_length("Shipping contents", fontsize=10)
+    p.insert_text((72, 100), "See Shipping contents for what is in the box.", fontsize=10)
+    p.insert_text((72, 120), "Shipping contents lists every included part.", fontsize=10)
+    q = doc.new_page()
+    q.insert_text((72, 60), "Shipping contents", fontsize=18, fontname="hebo")
+    q.insert_text((72, 90), "The package holds the projector and its cables.", fontsize=10)
+    if linked:
+        x = 72 + pymupdf.get_text_length("See ", fontsize=10)
+        doc[0].insert_link({"kind": pymupdf.LINK_GOTO, "page": 1, "from": pymupdf.Rect(x, 90, x + w, 103),
+                            "to": pymupdf.Point(72, 50)})
+        doc[0].insert_link({"kind": pymupdf.LINK_GOTO, "page": 1, "from": pymupdf.Rect(72, 110, 72 + w, 123),
+                            "to": pymupdf.Point(72, 50)})
+    doc.save(path)
+    return str(path)
+
+
+def test_same_link_twice_on_a_page_highlights_both_places(tmp_path, cfg):
+    r = compare(_duplicate_link_pdf(tmp_path / "a.pdf", True), _duplicate_link_pdf(tmp_path / "b.pdf", False), cfg)
+    f = [f for f in found(r, "integrity") if f["detail"].get("kind") == "missing-link"]
+    assert len(f) == 1, [x["message"] for x in f]
+    assert len({(l["page"], tuple(l["bbox"])) for l in f[0]["baseline"]}) == 2
+
+
 def _styled_xref_pdf(path, clickable: bool):
     """“See Timing chart.” - the xref purple and underlined; a real link in prod, none in stage."""
     doc = pymupdf.open()
@@ -681,3 +710,36 @@ def test_model_list_wrapping_elsewhere_is_not_missing_data(tmp_path, cfg):
     fs = found(r, "content")
     assert len(fs) == 1 and not fs[0].get("critical"), [f["message"] for f in fs]
     assert "RP705" in fs[0]["detail"]["baseline_text"] and "RP551" not in fs[0]["detail"]["baseline_text"], fs[0]["message"]
+
+
+def _label_cell_pdf(path, inner: bool):
+    """One tall label cell beside three bordered parts (a menu table running on over a page)."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 50), "Advanced menu", fontsize=16, fontname="hebo")
+    p.draw_rect(pymupdf.Rect(60, 70, 520, 220), width=0.6)
+    p.draw_line((150, 70), (150, 220), width=0.6)
+    p.insert_text((66, 145), "Color Setting", fontsize=9, fontname="hebo")
+    parts = [("Temperature Tuning", "Used for fine-tuning the white balance of the picture."),
+             ("Color Management", "Provides eight sets of colors to be adjusted one by one."),
+             ("Wide Color Gamut", "Complements the color gamut for playing HDR movies.")]
+    for n, (head, text) in enumerate(parts):
+        y = 90 + 48 * n
+        p.insert_text((156, y), head, fontsize=9, fontname="hebo")
+        p.insert_text((156, y + 16), text, fontsize=9)
+        if inner and n:
+            p.draw_line((150, y - 14), (520, y - 14), width=0.6)
+    doc.save(path)
+
+
+def test_line_between_two_cells_missing_in_stage_is_reported(tmp_path, cfg):
+    """Prod parts a tall cell into three with lines; stage draws none of them: one finding naming the texts the
+    missing lines belong between. With the lines drawn in stage: nothing."""
+    _label_cell_pdf(tmp_path / "a.pdf", True)
+    _label_cell_pdf(tmp_path / "b.pdf", False)
+    _label_cell_pdf(tmp_path / "c.pdf", True)
+    fs = [f for f in found(compare(str(tmp_path / "a.pdf"), str(tmp_path / "b.pdf"), cfg), "tables") if f["types"] == ["cell border"]]
+    assert len(fs) == 1 and len(fs[0]["baseline"]) == 2 and len(fs[0]["candidate"]) == 2, fs
+    assert "Color Management" in fs[0]["message"] and "Wide Color Gamut" in fs[0]["message"]
+    same = [f for f in found(compare(str(tmp_path / "a.pdf"), str(tmp_path / "c.pdf"), cfg), "tables") if f["types"] == ["cell border"]]
+    assert not same, same

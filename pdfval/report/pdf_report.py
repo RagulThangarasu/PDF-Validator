@@ -59,38 +59,43 @@ def _pct_status(c: dict) -> str:
     return "pass" if c["match_pct"] >= c["pass_pct"] else "warn" if c["match_pct"] >= c["warn_pct"] else "fail"
 
 
-INCLUDE_ALL = {"summary": True, "genuine": True, "critical": True, "sections": True, "toc": True, "stylemap": True,
-               "issues": True, "screenshots": True}
+INCLUDE_ALL = {"summary": True, "genuine": True, "critical": True, "coverage": True, "truncated": True,
+               "sections": True, "toc": True, "stylemap": True, "issues": True, "screenshots": True}
+
+# picture issues the PDF report itself shows (with prod / stage screenshots): size and resolution
+PDF_IMAGE_TYPES = {"image smaller", "image bigger", "size / aspect", "image pixelated", "image vertical alignment"}
 
 # the genuine-issues report: the metrics at the top, then every genuine issue with its screenshots -
 # no overview tables (the issue pages say what each issue is)
 GENUINE = {"include": {"summary": True, "categories": False, "genuine": "counts", "css": False, "toc_compare": True,
-                       "critical": False, "sections": False,
+                       "critical": False, "coverage": True, "truncated": True, "sections": False,
                        "toc": False, "stylemap": False, "issues": True, "screenshots": True},
-           "filter": {"genuine_only": True, "no_images": True}}  # image issues are in image-issues.pdf only
+           # image issues are in image-issues.pdf only - except a picture's size (smaller / bigger in stage) and a
+           # pixelated picture: the image report shows picture text and overlays, so these are reported here
+           "filter": {"genuine_only": True, "no_images": True, "keep_types": sorted(PDF_IMAGE_TYPES)}}
 
 # the CSS report: every CSS / typography / layout issue that is not in the PDF report (fonts, sizes, colours,
 # line heights, spec styles), with its screenshots
-CSS_REPORT = {"include": {**GENUINE["include"], "genuine": False, "css": True},
+CSS_REPORT = {"include": {**GENUINE["include"], "genuine": False, "css": True, "coverage": False, "truncated": False},
               "filter": {"categories": ["css"], "non_genuine": True}}
 
 # the image report: every picture issue (missing / changed / size / pixelated / blurred / alignment / order,
 # and picture labels missing in stage or drawn into the stage picture), whether in the PDF report or not
 IMAGE_TYPES = {"missing image label", "label in picture", "text in image"}
-IMAGE_REPORT = {"include": {**GENUINE["include"], "genuine": False},
+IMAGE_REPORT = {"include": {**GENUINE["include"], "genuine": False, "coverage": False, "truncated": False},
                 "filter": {"image_issues": True}}
 
 # what image-issues.pdf shows, per publication: every picture issue the reports keep ([assets] report_types) and
 # a label of the picture missing in stage - with or without the label settings of the other reports
 IMAGE_ISSUE_TYPES = {"missing image", "broken image", "image changed", "image blacked out", "image pixelated",
                      "image distorted", "duplicate image", "image alignment", "image in wrong section", "image combined",
-                     "missing image label", "image smaller"}
+                     "missing image label", "image smaller", "image bigger", "image mirrored"}
 
 
 # what the image report shows: picture size (incl. much smaller in stage), alignment, a picture over its box
 # (overlay), missing / different artwork (icons included) and a picture under another section - not text
 # (missing text, blurred text inside a picture), picture labels / captions or pictures combined into one
-IMAGE_REPORT_TYPES = {"size / aspect", "image smaller", "image alignment", "placement", "image outside box",
+IMAGE_REPORT_TYPES = {"size / aspect", "image smaller", "image bigger", "image mirrored", "image alignment", "placement", "image outside box",
                       "missing image", "image changed", "broken image", "image blacked out", "image distorted",
                       "image in wrong section"}
 
@@ -203,7 +208,7 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
                                              or "— no missing sections, rows, images, files, links or glyphs") + "</td></tr>",
         (f"<tr><th>CSS / layout</th><td>{sm['css']['issues']} issues (style {sm['css']['style']}, layout {sm['css']['layout']}) "
          "— reported separately, not part of the content %</td></tr>" if inc.get("css", True) else ""),
-        "<tr><th>All findings</th><td>" + " · ".join(f"<b style='color:{CHECK_COLOR[k]}'>{k}</b> {v}"
+        "<tr><th>All findings</th><td>" + " · ".join(f"<b style='color:{CHECK_COLOR.get(k, '#475569')}'>{k}</b> {v}"
                                                     for k, v in sm["by_check"].items()
                                                     if inc.get("css", True) or k not in ("style", "layout")) + "</td></tr>"
         + (f"<tr><th>This report</th><td>{escape(note)}</td></tr>" if note else "") + "</table>",
@@ -214,9 +219,12 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
                            (f"<tr><th>This report</th><td>{escape(note)}</td></tr>" if note else "") + "</table>"]
     elif inc.get("categories", True):
         html.append("<h2>Issues by category and type</h2><table class='grid'><tr><th>Category</th><th>Total</th><th>Types</th></tr>")
-        for c, label in CATS:
+        # CATS first (known order/colour), then any category the run produced that CATS doesn't know about yet,
+        # so a new check's category is still shown instead of being silently left out of this table
+        extra = [(c, c.title()) for c in sm["by_category"] if c not in CAT_LABEL]
+        for c, label in [*CATS, *extra]:
             bc = sm["by_category"][c]
-            html.append(f"<tr><td><b style='color:{CAT_COLOR[c]}'>{label}</b></td><td class='n'>{bc['total']}</td><td>"
+            html.append(f"<tr><td><b style='color:{CAT_COLOR.get(c, '#475569')}'>{label}</b></td><td class='n'>{bc['total']}</td><td>"
                         + (" · ".join(f"{escape(t)} {n}" for t, n in bc["types"].items()) or "—") + "</td></tr>")
         html.append("</table>")
     typo = meta.get("typography")
@@ -246,16 +254,23 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
         html.append("<h2 style='color:#b42318'>Critical issues</h2><table class='grid'><tr><th>#</th><th>Section</th>"
                     "<th>Check</th><th>Issue</th><th>Prod p.</th><th>Stage p.</th></tr>")
         for s, f in crit:
-            html.append(f"<tr><td>{f['id']}</td><td>{escape(s['title'])}</td><td>{CAT_LABEL[f['category']]}</td><td>{escape(f['message']).replace(chr(10), '<br/>')}</td>"
+            html.append(f"<tr><td>{f['id']}</td><td>{escape(s['title'])}</td><td>{CAT_LABEL.get(f['category'], f['category'].title())}</td><td>{escape(f['message']).replace(chr(10), '<br/>')}</td>"
                         f"<td>{f['baseline'][0]['page'] + 1 if f['baseline'] else '—'}</td>"
                         f"<td>{f['candidate'][0]['page'] + 1 if f['candidate'] else '—'}</td></tr>")
         html.append("</table>")
+    if inc.get("coverage", True):
+        html.append(coverage_html(result))
+    if inc.get("truncated", True):
+        html.append(truncated_html(result))
     if inc["sections"]:
         html.append("\f")  # block break
+    # known category columns first, then any category these sections actually use that CATS doesn't name yet
+    sec_cats = [*CATS, *[(c, c.title()) for c in
+                         dict.fromkeys(c for s in result["sections"] for c in s.get("categories", {})) if c not in CAT_LABEL]]
     html += [] if not inc["sections"] else [
         "<h2>Sections</h2><table class='grid'><tr><th>#</th><th>Section</th><th>Prod p.</th><th>Stage p.</th>"
         "<th>Status</th><th>Content %</th><th>Missing / extra</th><th>Critical</th>"
-        + "".join(f"<th>{label}</th>" for _, label in CATS) + "</tr>",
+        + "".join(f"<th>{label}</th>" for _, label in sec_cats) + "</tr>",
     ]
     for n, s in enumerate(result["sections"] if inc["sections"] else [], 1):
         status_cell = "" if s["status"] == "pass" else f"<b style='color:{STATUS_COLOR[s['status']]}'>{s['status']}</b>"
@@ -266,7 +281,7 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
             f"<td class='n'><b style='color:{PCT_COLOR[s['content']['status']]}'>{s['content']['match_pct']:.2f}%</b></td>"
             f"<td class='n'>{s['content']['missing_words']} / {s['content']['extra_words']}</td>"
             f"<td class='n'>{'<b style=\'color:#b42318\'>' + str(s['critical']) + '</b>' if s['critical'] else ''}</td>"
-            + "".join(f"<td class='n'>{s.get('categories', {}).get(c, 0) or ''}</td>" for c, _ in CATS) + "</tr>")
+            + "".join(f"<td class='n'>{s.get('categories', {}).get(c, 0) or ''}</td>" for c, _ in sec_cats) + "</tr>")
     if inc["sections"]:
         html.append("</table>")
     t = result.get("toc")
@@ -567,6 +582,47 @@ def _toc_table_html(rows: list[tuple], result: dict | None = None) -> str:
             "<th>Issue</th><th>Prod</th><th>Stage</th></tr>" + body + "</table>")
 
 
+def truncated_html(result: dict) -> str:
+    """Findings a per-check cap (report.max_findings_per_check) left out of the report entirely: every
+    section and check that dropped some, so a capped run never hides this silently. Critical and genuine
+    issues are never capped (engine.py); image/asset omissions are not listed here - pictures have their
+    own separate filtering (assets.report_types) and are reported in image-issues.pdf, not this note."""
+    from ..engine import CATEGORY
+    rows = [(s, c, n) for s in result["sections"] for c, info in (s.get("checks") or {}).items()
+            for n in [info.get("truncated", 0)] if n and CATEGORY.get(c, c) != "images"]
+    if not rows:
+        return ""
+    html = [f"<h2 style='color:#b45309'>Issues omitted by the per-check cap ({sum(n for _, _, n in rows)})</h2>",
+            "<p class='muted'>report.max_findings_per_check thinned these checks below their real count in this "
+            "section; raise or remove the cap (0 = no cap) in config to see every one of them.</p>",
+            "<table class='grid'><tr><th>Section</th><th>Check</th><th>Omitted</th></tr>"]
+    for s, c, n in rows:
+        html.append(f"<tr><td>{escape(s['title'])}</td><td><b style='color:{CHECK_COLOR.get(c, '#475569')}'>{escape(c)}</b></td>"
+                    f"<td class='n'>{n}</td></tr>")
+    return "".join(html) + "</table>"
+
+
+def coverage_html(result: dict) -> str:
+    """Every finding with prod-side content and nothing at all on the stage side: a definitive list of
+    "this exists in prod but stage has no counterpart" that is not limited by type, category or the
+    genuine/noise classification - a prod element either has a stage match somewhere, or it is here."""
+    gaps = [(s, f) for s in result["sections"] for f in s["findings"] if f.get("baseline") and not f.get("candidate")]
+    if not gaps:
+        return "<h2 style='color:#16a34a'>Content coverage: nothing missing</h2><p>Every prod element has a match in stage.</p>"
+    html = [f"<h2 style='color:#b42318'>Content coverage: prod material not found in stage ({len(gaps)})</h2>",
+            "<p class='muted'>Every issue whose prod location has no stage counterpart at all, regardless of its "
+            "type or severity - nothing in this list is filtered out.</p>",
+            "<table class='grid'><tr><th>#</th><th>Section</th><th>Category</th><th>Issue</th><th>Prod p.</th></tr>"]
+    for s, f in gaps:
+        html.append(f"<tr><td>{f['id']}</td><td>{escape(s['title'])}</td>"
+                    f"<td>{CAT_LABEL.get(f['category'], f['category'].title())}</td>"
+                    f"<td><b style='color:{f.get('color') or SEV_COLOR.get(f['severity'], '#1d2330')}'>"
+                    f"{escape(f.get('issue') or ', '.join(f.get('types') or []))}</b><br/>"
+                    f"<span class='muted'>{escape(f['message']).replace(chr(10), ' ')[:200]}</span></td>"
+                    f"<td>{f['baseline'][0]['page'] + 1}</td></tr>")
+    return "".join(html) + "</table>"
+
+
 def genuine_html(gen: list[tuple]) -> str:
     """Overview of the genuine issues: count per issue, then one row per issue with its description."""
     from ..genuine import where
@@ -619,6 +675,7 @@ def select_issues(result: dict, flt: dict | None = None, severities: set[str] | 
     secs = set(flt.get("sections") or [])
     q = (flt.get("q") or "").lower()
     ids = set(flt["ids"]) if flt.get("ids") is not None else None  # exactly the issues picked in the UI
+    keep = set(flt.get("keep_types") or [])  # types shown whatever genuine_only / no_images say
     out = []
     for s in result["sections"]:
         if secs and s["id"] not in secs:
@@ -631,13 +688,13 @@ def select_issues(result: dict, flt: dict | None = None, severities: set[str] | 
             if f["severity"] not in sev or (cats and f.get("category") not in cats) \
                     or (types and not set(f.get("types") or []) & types) or (flt.get("critical_only") and not f.get("critical")) \
                     or (q and q not in f["message"].lower() and q not in s["title"].lower()) \
-                    or (flt.get("genuine_only") and not f.get("genuine")
+                    or (flt.get("genuine_only") and not f.get("genuine") and not (keep & set(f.get("types") or []))
                         and not (flt.get("plus_images") and is_image_issue(f))) \
                     or (flt.get("non_genuine") and f.get("genuine")) \
                     or (flt.get("images") and not is_image_issue(f)) \
                     or (flt.get("image_issues") and not (set(f.get("types") or []) & IMAGE_ISSUE_TYPES
                                                          or (f.get("genuine") and text_on_picture(result, f)))) \
-                    or (flt.get("no_images") and image_related(result, f)):
+                    or (flt.get("no_images") and image_related(result, f) and not (keep & set(f.get("types") or []))):
                 continue
             out.append((s, f))
     # content first, then links, formatting and CSS last; in each group the document's section

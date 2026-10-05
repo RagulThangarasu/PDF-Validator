@@ -416,15 +416,26 @@ def _picture(doc: pymupdf.Document, page: int, locs: list) -> pymupdf.Pixmap:
 
 def build(result: dict, out_dir: str | Path, filename: str = "image-issues.pdf") -> Path:
     out = Path(out_dir) / filename
-    meta = result["meta"]
+    meta, sm = result["meta"], result["summary"]
     A, B = pymupdf.open(meta["baseline"]["path"]), pymupdf.open(meta["candidate"]["path"])
     doc = pymupdf.open()
     W, H, M = 842, 595, 28  # A4 landscape
     font = pymupdf.Font("helv")
     rows = issues(result)
-    if not rows:
-        p = doc.new_page(width=W, height=H)
-        p.insert_text((M, M + 20), "No image issues.", fontsize=14, fontname="helv")
+    # cover: the same consolidated content match % every other report leads with, so a reader never has
+    # to open report.pdf just to see the overall score behind these picture issues
+    c = sm["content"]
+    pct_color = (0.09, 0.64, 0.23) if c["match_pct"] >= c["pass_pct"] else \
+        (0.71, 0.33, 0.04) if c["match_pct"] >= c["warn_pct"] else (0.85, 0.18, 0.13)
+    cover = doc.new_page(width=W, height=H)
+    cover.insert_text((M, M + 16), "Image issues", fontsize=18, fontname="hebo")
+    cover.insert_text((M, M + 34), f"{Path(meta['baseline']['path']).name}  vs  {Path(meta['candidate']['path']).name}",
+                      fontsize=9, fontname="helv", color=(0.35, 0.38, 0.45))
+    cover.insert_text((M, M + 62), f"{c['match_pct']:.2f}%", fontsize=28, fontname="hebo", color=pct_color)
+    cover.insert_text((M, M + 80), "content match (every report; image issues are reported separately below)",
+                      fontsize=9, fontname="helv", color=(0.35, 0.38, 0.45))
+    cover.insert_text((M, M + 104), f"{len(rows)} image issue(s)" + (f"  ·  {sm['critical']['total']} critical" if sm["critical"]["total"] else ""),
+                      fontsize=12, fontname="hebo", color=(0.2, 0.25, 0.35) if rows else pct_color)
     spots = stage_spots(A, B, rows)
     for (s, f, name), (spage, slocs) in zip(rows, spots):
         p = doc.new_page(width=W, height=H)

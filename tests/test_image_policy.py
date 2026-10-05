@@ -47,7 +47,12 @@ def test_missing_artwork_is_reported(tmp_path, cfg):
     assert [f["types"] for f in fs] == [["missing image"]]
 
 
-def test_under_half_the_size_is_reported_a_little_smaller_is_not(tmp_path, cfg):
+def test_size_difference_is_reported_either_direction(tmp_path, cfg):
+    """Any size change past [assets] size_ratio_tolerance (20 %) is reported, smaller or bigger - not
+    only a shrink past 50 %; a change within tolerance stays quiet."""
     a = g.make(tmp_path / "a.pdf", g.base())
     assert [f["types"] for f in _pictures(compare(a, _resized(tmp_path, 0.4), cfg))] == [["image smaller"]]
-    assert _pictures(compare(a, _resized(tmp_path, 0.6), cfg)) == []
+    assert [f["types"] for f in _pictures(compare(a, _resized(tmp_path, 0.6), cfg))] == [["image smaller"]]
+    assert [f["types"] for f in _pictures(compare(a, _resized(tmp_path, 1.4), cfg))] == [["image bigger"]]
+    assert _pictures(compare(a, _resized(tmp_path, 0.95), cfg)) == []
+

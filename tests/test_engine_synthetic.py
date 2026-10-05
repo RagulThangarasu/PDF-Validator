@@ -94,6 +94,7 @@ def section_by(result, title):
 
 
 def test_punctuation_and_spacing_are_content(tmp_path, cfg):
+    cfg["ignore"]["types"] = [t for t in cfg["ignore"]["types"] if t not in ("case", "punctuation", "case + punctuation")]
     a = make_pdf(tmp_path / "a.pdf")
     b = make_pdf(tmp_path / "b.pdf", body_text=BODY.replace("bank.", "bank").replace("over the", "over  the"))
     r = compare(a, b, cfg)
@@ -213,6 +214,7 @@ def test_missing_table_is_critical(tmp_path, cfg):
 
 
 def test_content_types_case_punctuation_spacing(tmp_path, cfg):
+    cfg["ignore"]["types"] = [t for t in cfg["ignore"]["types"] if t not in ("case", "punctuation", "case + punctuation")]
     a = make_pdf(tmp_path / "a.pdf", body_text="See the quick brown fox jumps over the lazy dog, near the bank.")
     b = make_pdf(tmp_path / "b.pdf", body_text="SEE the quick brown fox jumps over the lazy dog; near the bank .")
     r = compare(a, b, cfg)
@@ -335,6 +337,7 @@ def test_pdf_vs_web_page_toc_driven(tmp_path, cfg):
             "</main><footer>Footer text</footer></body></html>")
     (tmp_path / "page.html").write_text(html)
     cfg2 = dict(cfg)
+    cfg2["ignore"] = {**cfg["ignore"], "types": [t for t in cfg["ignore"]["types"] if t not in ("case", "punctuation", "case + punctuation")]}
     r = compare_url(pdf, (tmp_path / "page.html").as_uri(), str(tmp_path / "run"), cfg2)
     status = {(row["baseline"] or row["candidate"])["title"]: row["status"] for row in r["toc"]["rows"]}
     assert status["Setup"] == "level differs" and status["Mounting"] == "order differs"
@@ -656,6 +659,7 @@ def _safety_pdf(path, edited: bool, order=(0, 1, 2)):
 
 
 def test_punctuation_change_in_reordered_text_is_one_paired_finding(tmp_path, cfg):
+    cfg["ignore"]["types"] = [t for t in cfg["ignore"]["types"] if t not in ("case", "punctuation", "case + punctuation")]
     a = _safety_pdf(tmp_path / "a.pdf", False)
     r = compare(a, _safety_pdf(tmp_path / "b.pdf", True, order=(2, 1, 0)), cfg)
     fs = [f for f in checks(r, "content") if "supply" in f["message"] or "40°C" in f["message"]]

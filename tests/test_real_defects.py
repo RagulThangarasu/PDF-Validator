@@ -166,7 +166,9 @@ def test_planted_defect_is_a_genuine_issue(tmp_path, name):
     fn(doc)
     out = tmp_path / "stage.pdf"
     doc.save(out, garbage=3)
-    r = compare(PROD, str(out), load_config())
+    cfg = load_config()
+    cfg["ignore"]["types"] = [t for t in cfg["ignore"]["types"] if t not in ("case", "punctuation", "case + punctuation")]
+    r = compare(PROD, str(out), cfg)
     got = {f["issue"] for s in r["sections"] for f in s["findings"] if f.get("genuine")}
     assert got & expect, f"{name}: expected one of {sorted(expect)}, got {sorted(got)}"
 

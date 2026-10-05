@@ -478,7 +478,8 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
         em_a, em_b = max(wa.style.size, 1), max(wb.style.size, 1)
         ma, mb = A.words[xa["marker"]], B.words[xb["marker"]]
         symbol = lambda t: not any(c.isalnum() for c in t)  # a bullet glyph; numbers / letters are content
-        both_bullets = ma.text.strip() in _BULLET_GLYPHS and mb.text.strip() in _BULLET_GLYPHS
+        both_bullets = lcfg.get("ignore_bullet_glyph", True) and \
+            ma.text.strip() in _BULLET_GLYPHS and mb.text.strip() in _BULLET_GLYPHS
         if ma.text != mb.text and symbol(ma.text) and symbol(mb.text) and not both_bullets:
             groups[(wa.role, "bullet marker", f"“{ma.text}”", f"“{mb.text}”")].append((xa, xb, i, j))
         if xa.get("enum") and xb.get("enum"):

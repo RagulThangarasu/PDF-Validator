@@ -183,14 +183,16 @@ PASS = no image issue (no image report for that publication). FAIL = image issue
 <tr><td>{len(rs)}</td><td style="color:{GREEN}"><b>{n_pass}</b></td><td style="color:{RED if n_fail else '#1d2330'}"><b>{n_fail}</b></td>
 <td>{len(rs) - n_pass - n_fail}</td><td>{sum(r['image_issues'] or 0 for r in rs)}</td></tr></table>
 <h2>Publications</h2>
-<table><tr><th class="n">#</th><th>Publication</th><th>Image issues</th><th class="n">Number of image issues</th>
+<table><tr><th class="n">#</th><th>Publication</th><th>Content match %</th><th>Image issues</th><th class="n">Number of image issues</th>
 <th>Image report</th><th>Run</th></tr>"""]
     for k, r in enumerate(rs, 1):
         res = r["image_result"]
         verdict = (f'<b style="color:{GREEN}">PASS</b>' if res == "pass" else f'<b style="color:{RED}">FAIL</b>' if res == "fail"
                    else f'<span style="color:{GREY}">{escape(r["status"])}</span>')
         report = "" if res != "fail" else "image report"
-        html.append(f'<tr><td class="n">{k}</td><td>{escape(r["product"])}</td><td>{verdict}</td>'
+        pct = "" if r["match_pct"] is None else f'{r["match_pct"]:.2f}%'
+        html.append(f'<tr><td class="n">{k}</td><td>{escape(r["product"])}</td>'
+                    f'<td class="n">{pct}</td><td>{verdict}</td>'
                     f'<td class="n">{"" if r["image_issues"] is None else r["image_issues"]}</td>'
                     f'<td class="muted">{report if res == "fail" else ("not needed" if res == "pass" else "")}</td>'
                     f'<td class="muted">{escape(r["run"])}</td></tr>')
@@ -202,10 +204,10 @@ def write_image_csv(rs: list[dict], out: str | Path) -> Path:
     out = Path(out)
     with open(out, "w", newline="", encoding="utf-8-sig") as fh:  # opens in Excel
         w = csv.writer(fh)
-        w.writerow(["Publication", "Image issues (PASS/FAIL)", "Number of image issues", "Image report", "Status", "Run"])
+        w.writerow(["Publication", "Content match %", "Image issues (PASS/FAIL)", "Number of image issues", "Image report", "Status", "Run"])
         for r in image_rows(rs):
             res = r["image_result"]
-            w.writerow([r["product"], res.upper(), "" if r["image_issues"] is None else r["image_issues"],
+            w.writerow([r["product"], "" if r["match_pct"] is None else r["match_pct"], res.upper(), "" if r["image_issues"] is None else r["image_issues"],
                         "yes" if res == "fail" else "not needed" if res == "pass" else "", r["status"], r["run"]])
     return out
 

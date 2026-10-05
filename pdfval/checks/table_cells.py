@@ -32,6 +32,27 @@ def _page_tables(doc: Doc, page: int) -> list[dict]:
     key = (doc.path, page)
     if key in _CELLS:
         return _CELLS[key]
+    if doc.raw_tables is not None:
+        # a web page: its real <table> rows and column grid (the page's PDF is a screenshot - nothing to
+        # detect); a cell is a row x a grid column, its text the page's words in it. A spanning cell has
+        # its text in its first column, the rest empty.
+        out = []
+        words = [w for w in doc.words if w.page == page and w.text.strip()]
+        for _, tbox, trows, grid in doc.raw_tables.get(page, []):
+            if len(grid) < 2 or len(trows) < 2:
+                continue
+            rows = []
+            for rbox, _first in trows:
+                row = []
+                for gx0, gx1 in grid:
+                    c = (gx0, rbox[1], gx1, rbox[3])
+                    ws = [w for w in words if c[0] <= (w.bbox[0] + w.bbox[2]) / 2 <= c[2]
+                          and c[1] <= (w.bbox[1] + w.bbox[3]) / 2 <= c[3]]
+                    row.append({"bbox": c, "text": " ".join(w.text for w in ws)})
+                rows.append(row)
+            out.append({"page": page, "bbox": tuple(tbox), "rows": rows, "web": True})
+        _CELLS[key] = out
+        return out
     out = []
     try:
         pdf = pymupdf.open(doc.path)
@@ -65,9 +86,17 @@ def _shape(t: dict) -> tuple:
     return tuple(tuple(c is None for c in r) for r in t["rows"])
 
 
+def _same_grid(ta: dict, tb: dict) -> bool:
+    """The same rows x columns; between two PDFs also the same spanning cells. A web table has no spans to
+    compare (a spanning cell is its first column + empty columns): the cell counts decide."""
+    if len(ta["rows"]) != len(tb["rows"]) or any(len(ra) != len(rb) for ra, rb in zip(ta["rows"], tb["rows"])):
+        return False
+    return ta.get("web") or tb.get("web") or _shape(ta) == _shape(tb)
+
+
 def _score(ta: dict, tb: dict) -> float:
     cells = [(a, b) for ra, rb in zip(ta["rows"], tb["rows"]) for a, b in zip(ra, rb) if a is not None]
-    return sum(_key(a) == _key(b) for a, b in cells) / len(cells) if cells else 0.0
+    return sum(_key(a) == (_key(b) or "") for a, b in cells) / len(cells) if cells else 0.0
 
 
 def _match(tables_a: list[dict], tables_b: list[dict], min_score: float) -> dict[int, dict]:
@@ -76,7 +105,7 @@ def _match(tables_a: list[dict], tables_b: list[dict], min_score: float) -> dict
     out, used, nxt = {}, set(), 0
     for k, ta in enumerate(tables_a):
         cands = [(m, _score(ta, tb)) for m, tb in enumerate(tables_b)
-                 if m not in used and len(tb["rows"]) == len(ta["rows"]) and _shape(tb) == _shape(ta)]
+                 if m not in used and _same_grid(ta, tb)]
         cands = [(m, s) for m, s in cands if s >= min_score]
         if not cands:
             continue
@@ -97,7 +126,7 @@ def validate_reordered(ran, A: Doc, B: Doc, cfg: dict) -> None:
     """Reordered text inside a table: dropped when every cell of the rows it touches holds the same
     data in the stage table, else turned into a “Table cell differs” finding on the cells that differ."""
     tcfg = cfg.get("tables", {})
-    if not tcfg.get("validate_reordered_cells", True) or A.raw_tables is not None or B.raw_tables is not None:
+    if not tcfg.get("validate_reordered_cells", True):
         return
     todo = [(u, f) for u, fs, _ in ran for f in fs if "reordered" in (f.types or []) and f.baseline]
     if not todo:
@@ -139,7 +168,7 @@ def validate_reordered(ran, A: Doc, B: Doc, cfg: dict) -> None:
             ta, tb = tables_a[k], pair[k]
             label = next((c["text"] for c in ta["rows"][ri] if c is not None and c["text"]), "")
             for ci, (a, b) in enumerate(zip(ta["rows"][ri], tb["rows"][ri])):
-                if a is not None and _key(a) != _key(b):
+                if a is not None and _key(a) != (_key(b) or ""):
                     head = _column(ta, ri, ci)
                     diffs.append((a, b, ta["page"], tb["page"], label, head))
         drop.add(id(f))

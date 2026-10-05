@@ -45,6 +45,7 @@ ignore_quote_style = true     # true = ’ ‘ “ ” are the same as ' " (have
 normalize_typography = true   # true = also treat – — as - ("steps 2-4" = "steps 2–4": dash style is not reported)
 check_spacing = true          # double / missing spaces between words on the same line
 ignore_superscript_spacing = true  # the space before / after a superscript (® ™ ¹, a raised footnote mark) is not reported
+ignore_footnote_marks = true  # "button" vs "button¹": a raised footnote number on one side only is not a changed word
 ignore_relocated = true       # a missing/extra block whose words all exist unmatched on the other side
                               # (wrapped to the next line, another cell order) is not reported
 relocated_overlap = 0.85      # ... or at least this share of them (a two-column table read in another row/column
@@ -180,6 +181,7 @@ list_marker = '^\(?(?:\d{1,3}|[A-Za-z]|[ivxIVX]{1,4})[.)]$'
 # ... or made only of characters of these Unicode categories: Po punctuation (• * ·), Pd dash (- –),
 # So other symbol (▪ ✓ ➢). Math symbols (Sm: × + |) are not bullets.
 list_symbol_categories = ["Po", "Pd", "So"]
+ignore_bullet_glyph = true    # a list item marked "•" in one PDF and "-" (or another symbol) in the other: not reported
 bullet_tolerance_em = 0.3     # marker position / marker-text gap / hanging indent may differ by this much (em)
 bullet_intro_max_gap_em = 2.0 # the line introducing a list must be this close above it (em); a list with none
                               # (e.g. first list in a table cell) is checked for its items lining up with each other
@@ -199,6 +201,10 @@ align_min_shift = 0.15        # image alignment: reported only when the picture'
 similar_image_severity = "warning"   # the same picture re-captured / re-cropped / without prod's highlight marks:
 similar_picture_distance = 0.5       # an image difference (warning), not an error; above this visual distance
                                      # the stage picture is another picture: changed_severity (error)
+mirrored_severity = "error"    # a matched picture flipped left-right or top-bottom in stage (a diagram's hash /
+                               # pixel correlation tolerates this, so it would otherwise pass as unchanged)
+mirrored_max_distance = 0.15   # only judged for a pair the hash already calls close (visual_distance below this)
+mirrored_min_gap = 0.15        # flipped must correlate at least this much better than the direct match
 tiny_label_pt = 5.0           # picture labels smaller than this (an IP address on a screenshot) count as drawn into the
                               # stage picture when its other labels are found there (too small to read back)
 small_label_pt = 7.0          # all of a picture's labels smaller than this, and stage shows the same picture (a bitmap too
@@ -214,16 +220,16 @@ distorted_tolerance = 0.25    # stage draws a picture >= 25 % out of its own pix
                               # = stretched / squashed (genuine)
 width_tolerance = 0.10        # 10 % of content width
 size_ratio_tolerance = 0.2    # or stage picture >= 20 % smaller / bigger than prod (image size differs)
-smaller_report_ratio = 0.5    # a size difference is REPORTED only when stage shows the picture at less than 50 % of
-                              # prod's size (prod 300 -> stage below 150); bigger, or only a little smaller, is fine
 # The picture issues reported (every report): missing (or not loading), a different picture (not the same picture
 # with / without a red overlay or re-captured: "image marks" / "image version" are not reported), blacked out,
 # pixelated, distorted, duplicated, alignment (a complete move left <-> right only), a picture in the wrong section,
 # a picture stage combined into a larger one (an info note), a picture's label missing (image report) and a stage
-# picture under half prod's size. Everything else (placement, vector vs bitmap, extra pictures, order, ...) is not.
+# picture measurably bigger or smaller than prod's (either direction). Everything else (placement, vector vs
+# bitmap, extra pictures, order, ...) is not.
 report_types = ["missing image", "broken image", "image changed", "image blacked out", "image pixelated",
                 "image distorted", "duplicate image", "image alignment", "image in wrong section", "image combined",
-                "missing image label", "image smaller",
+                "missing image label", "image smaller", "image bigger", "image mirrored",
+                "image vertical alignment",   # an icon centred on its paragraph in prod, at its first line in stage
                 "callout numbers missing", "image label missing", "leader lines missing"]   # picture text: image report only
 alignment_sides_only = true   # image alignment: only a complete move left <-> right (not centred / full width / indented)
 ignore_prod_red_marks = false # prod's red highlight marks / red text on a picture that stage's copy does not have:
@@ -298,21 +304,22 @@ types = [
   # lists: 1, 2, 3 instead of a, b, c, bullets missing / different
   "bullet", "bullet marker", "numbering style", "numbering format", "numbering sequence", "marker glued",
   # (not "indent" - bullet position / gap to the text / hanging indent: full report only)
-  # images: blur, alignment, artwork missing, much smaller (not "missing image label": a picture's label /
-  # caption missing is in the full report only)
-  "image blurred", "image alignment", "placement", "missing image", "image smaller",
-  "broken image", "duplicate image", "image changed", "image blacked out", "image distorted", "image in wrong section",
+  # images: blur, alignment, artwork missing, measurably bigger / smaller (not "missing image label": a picture's
+  # label / caption missing is in the full report only)
+  "image blurred", "image alignment", "placement", "missing image", "image smaller", "image bigger", "image vertical alignment",
+  "broken image", "duplicate image", "image changed", "image blacked out", "image distorted", "image in wrong section", "image mirrored",
   # content order, hyperlink title quotes
   "reordered", "order differs", "link quotes",
   # table of contents: entries missing / added, title or level differs, wrong page number
   "missing entry", "extra entry", "title differs", "level differs", "wrong page",
-  # notes (callouts) that differ
-  "callout style",
+  # notes (callouts) that differ (not "callout style" - a document-wide bar/box redesign is house
+  # style, not a defect: see [ignore] types)
   "icon missing", "icon extra", "icon order", "icon above text",   # icons in table rows (missing, swapped, placed above the text)   # a NOTE: label vs an icon only is house style (info, full report only)
   "callout type differs",   # stage labels a note as another type than prod's icon shows (WARNING icon, IMPORTANT label)
   # tables: header (missing / not centred as in prod), rows and cells merged or split
   "missing header", "table header alignment", "rows merged", "row split", "cells merged", "cells split",
   "missing row", "missing table", "tables merged", "cell differs",
+  "cell border",                            # a line between two cells of the prod table that stage does not draw
 ]
 data_missing_words = 1        # "missing text" is genuine when >= N of its words are absent from stage (1 = any)
 moved_min_words = 5           # content in the wrong section: blocks of >= N words ...
@@ -344,6 +351,8 @@ types = [
   "image blurred", "text as graphic",
   "size / aspect",                          # the same picture at another width / aspect ratio (1.43 -> 1.34): layout
   "superscript",                            # the same text raised / not raised (MacBook® vs MacBook^®): looks the same
+  "case", "punctuation", "case + punctuation",  # uppercase/lowercase and punctuation-only wording differences
+  "callout style",                          # a note drawn another way throughout (bar vs filled box): house style
 ]
 in_table_cells = ["paragraph break", "line-wrap",   # text wrapping inside table cells
                   "emphasis", "indent", "text-align", "spec text-align"]  # table layout: header weight, alignment

@@ -113,6 +113,20 @@ def _printed(doc: Doc, pages: list[int]) -> Toc:
     for x in sorted({round(r[4], 1) for r in raw}):
         if not edges or x - edges[-1] > 4:
             edges.append(x)
+    # a level is an indent many entries share. A few entries set a little off it (a title starting with another
+    # glyph, a wrapped title's first line: 9 pt left of the 31 entries at 85 pt) are not a level of their own -
+    # they would shift every level after them ("chapter = level 2, sub-entry = level 4"): a thinly used edge
+    # closer to a well used one than half the indent step belongs to it
+    if len(edges) > 2:
+        count = lambda e: sum(1 for r in raw if abs(round(r[4], 1) - e) <= 4)
+        major = [e for e in edges if count(e) >= max(2, 0.1 * len(raw))]
+        if len(major) >= 2:
+            step = min(b - a for a, b in zip(major, major[1:]))
+            merged = {e: min(major, key=lambda m: abs(m - e)) for e in edges}
+            snap = {e: (m if abs(m - e) < 0.5 * step else e) for e, m in merged.items()}
+            edge_of = lambda x: snap[max((e for e in edges if x >= e - 4), default=edges[0])]
+            raw = [(t, pg, tp, b, edge_of(x0)) for t, pg, tp, b, x0 in raw]
+            edges = sorted(set(snap.values()))
     level = lambda x: 1 + max(k for k, e in enumerate(edges) if x >= e - 4) if edges else 1
     toc.entries = [TocEntry(t, normalize.title(t), level(x0), pg, tp, tuple(b), x0) for t, pg, tp, b, x0 in raw]
     return toc

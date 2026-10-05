@@ -238,6 +238,24 @@ def _markers_first(lines: list) -> list:
     return out
 
 
+def _turned_order(lines: list, turned: dict) -> list:
+    """Text set on its side (a table header turned 90° so “3D side-by-side” fits a narrow column) reads along
+    the turn: its lines follow each other sideways, not downwards - right to left when the text runs down the
+    page, left to right when it runs up. Read top-down / left-right the cell came out backwards (“by-side
+    side- 3D”) and never matched the same header set upright. Only the lines of one block (one cell) are put
+    in order; everything else keeps its place."""
+    out, n = list(lines), 0
+    while n < len(out):
+        d = turned.get((out[n][0], out[n][1]))
+        m = n + 1
+        if d is not None:
+            while m < len(out) and out[m][4] == out[n][4] and turned.get((out[m][0], out[m][1]), 0) * d > 0:
+                m += 1
+            out[n:m] = sorted(out[n:m], key=lambda ln: ((-ln[1][0] if d > 0 else ln[1][0]), ln[1][1] if d > 0 else -ln[1][1]))
+        n = m
+    return out
+
+
 def _table_order(lines: list, found: list) -> list:
     """Read every table row by row, cell by cell (right to left in Arabic/Hebrew tables), and
     top to bottom inside a cell. Text extraction goes by height, so a label that wraps over two
@@ -322,6 +340,7 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
         pages.append(PageInfo(page.rect.width, page.rect.height))
         clip = page.trimbox if ecfg.get("use_trimbox", True) else page.rect
         seen = set()
+        turned: dict = {}  # lines set on their side (a table header turned 90° to fit a narrow column)
         first = len(raw_lines)
         data = page.get_text("rawdict", clip=clip, sort=True)
         if decode:
@@ -337,6 +356,8 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
                     continue
                 seen.add(key)
                 raw_lines.append((pno, tuple(line["bbox"]), text, words, bno))
+                if abs(line.get("dir", (1, 0))[1]) > 0.9:
+                    turned[(pno, tuple(line["bbox"]))] = line["dir"][1]
         found = None
         if ecfg.get("table_reading_order", True):
             from .checks import tables as tmod
@@ -369,6 +390,8 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
         if found is not None:
             raw_lines[first:] = _table_order(raw_lines[first:], found)
         raw_lines[first:] = _markers_first(raw_lines[first:])
+        if turned:
+            raw_lines[first:] = _turned_order(raw_lines[first:], turned)
         for info in page.get_image_info():
             box = pymupdf.Rect(info["bbox"])
             r = box & clip

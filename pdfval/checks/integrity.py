@@ -283,8 +283,10 @@ def check(u: Unit) -> list[Finding]:
                 (f"Link not clickable in stage: “{shown}” looks like a link in stage ({look}) but has no "
                  f"hyperlink; in prod it goes to {to}") if look else
                 (f"Link missing in stage: “{shown}” is a link in prod (to {to}) but plain text in stage"),
-                locs(A, missing), locs(B, b_idx), {"kind": "missing-link", "words": len(missing), "target": _target(la),
-                                                   "destination": dest, "styled_as_link": bool(look)}))
+                # every place prod shows this link, not only the words stage happened to align to it -
+                # the same link printed twice on the page is missing twice, and both should be boxed
+                locs(A, clickable), locs(B, b_idx), {"kind": "missing-link", "words": len(missing), "target": _target(la),
+                                                     "destination": dest, "styled_as_link": bool(look)}))
         # the reverse: text that is a link in stage but plain text in prod (an extra link), one finding
         # per stage link - unless prod links the same address on the same or a neighbouring page
         per_link = {}
@@ -315,9 +317,15 @@ def check(u: Unit) -> list[Finding]:
                 continue
             if _link_look(A, a_idx):
                 continue
+            # the link's whole clickable text in stage (all its areas): the same link printed twice on the
+            # page is extra twice, and both should be boxed, not only the words aligned to prod
+            dest_key = lambda l: (l.get("nameddest") or "", _target(l), tuple(round(v) for v in l["to"]) if l.get("to") is not None else ())
+            same = [l["from"] for l in links(B, pb) if dest_key(l) == dest_key(lb)]
+            clickable = [k for k in range(*u.b_range) if B.words[k].page == pb and B.words[k].norm
+                        and _in_any(B.words[k].bbox, same)] or extra
             findings.append(Finding(
                 "integrity", icfg.get("extra_link_severity", "warning"),
                 f"Extra link in stage: “{snippet(B, extra, 10)}” is a link in stage (to {_target(lb)}) but plain "
                 f"text in prod ({len(extra)} words)",
-                locs(A, a_idx), locs(B, extra), {"kind": "extra-link", "words": len(extra), "target": _target(lb)}))
+                locs(A, a_idx), locs(B, clickable), {"kind": "extra-link", "words": len(extra), "target": _target(lb)}))
     return findings

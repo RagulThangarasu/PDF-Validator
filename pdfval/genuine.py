@@ -1286,6 +1286,8 @@ def _label_wording(results, A: Doc, B: Doc, cfg: dict) -> None:
             types = set(f.types or [])
             if not types & {"text as graphic", "text in image", "missing image label"} or not f.baseline:
                 continue
+            if f.detail.get("kind") == "labels":
+                continue  # labels inside prod's picture itself (read by OCR): already worded, nothing live to place
             if types == {"text as graphic"} and "stage_picture" not in f.detail:
                 # text drawn as a graphic: a picture's label only when it sits on / beside a prod picture
                 # (a badge "(A)" drawn as an icon inside a sentence stays "text as graphic")
@@ -1855,6 +1857,9 @@ _WHY = {
     "extra image": ("Extra image", "Stage shows a picture that prod does not have here."),
     "image distorted": ("Image distorted", "The picture is stretched or squashed in stage."),
     "image smaller": ("Image smaller in stage", "The stage picture is noticeably smaller than prod's, so fine print on it may not be legible."),
+    "image bigger": ("Image bigger in stage", "The stage picture is noticeably bigger than prod's."),
+    "image mirrored": ("Image mirrored in stage", "The picture is flipped left-right or top-bottom in stage: the same shapes, but the wrong way round."),
+    "image vertical alignment": ("Image not aligned with its text", "The icon / picture beside a paragraph sits at another height against that text than in prod (centred on it vs at its first line)."),
     "extra table": ("Extra table", "Stage has a table that prod does not have."),
     "table border": ("Table border differs", "A border of the prod table (outline, row or column lines) is missing in stage, or drawn in another colour."),
     "text outside table border": ("Text outside table border", "Text in a stage table runs across its cell border (into the next cell, past the table edge or over a row line); in prod it fits inside the cell."),
@@ -1867,6 +1872,7 @@ _WHY = {
     "missing header": ("Table header missing", "The table in stage has no header row, so its columns are unlabelled."),
     "tables merged": ("Tables merged", "Separate prod tables are one table in stage."),
     "rows merged": ("Table rows merged", "Separate prod rows are one row in stage."),
+    "cell border": ("Table cell border missing", "A line between two cells of the prod table is not drawn in stage."),
     "table split": ("Table split", "One prod table is broken into several tables in stage."),
     "cells merged": ("Table cells merged", "Rows have fewer cells in stage than in prod."),
     "cell differs": ("Table cell differs", "A table cell holds other data in stage than in prod (a value or check mark missing, added or changed)."),
@@ -1983,7 +1989,7 @@ def tag(f: dict, genuine_types: set[str], data_min_words: int = 3, exclude_check
 # blue = how it is laid out. Everything else keeps its category colour.
 RED, BLUE = "#dc2626", "#2563eb"
 _RED_TYPES = {"missing image", "broken image", "image changed", "image blacked out", "missing image label",
-              "size / aspect", "image distorted", "placement", "image outside box",   # image size / alignment
+              "size / aspect", "image distorted", "placement", "image outside box", "image mirrored",   # image size / alignment
               "image pixelated", "row order", "extra link", "missing link", "link to wrong section",
               "image blurred", "image alignment", "label joined", "link lands elsewhere", "link page number", "link quotes", "page zero",
               "spec font-size", "font-size",                                            # text size

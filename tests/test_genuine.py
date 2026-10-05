@@ -117,6 +117,7 @@ def test_style_change_is_not_genuine(tmp_path, cfg):
 
 def test_every_text_difference_is_genuine(tmp_path, cfg):
     """Content: extra text, each punctuation mark, the space after a word and case all count."""
+    cfg["ignore"]["types"] = [t for t in cfg["ignore"]["types"] if t not in ("case", "punctuation", "case + punctuation")]
     a = make(tmp_path / "a.pdf", base())
     secs = base()
     secs[3]["paras"] = [P2.replace("outlet before", "outlet  now before").replace("panel.", "panel;"),
@@ -221,6 +222,39 @@ def test_different_image_at_same_spot(tmp_path, cfg):
     r = compare(a, make(tmp_path / "b.pdf", secs), cfg)
     assert "Different image" in issues(r)
     assert "Image missing" not in issues(r)
+
+
+def test_mirror_scores_favour_the_flipped_match():
+    """A simple diagram's hash/pixel correlation can tolerate a left-right flip (same ink mass), so
+    assets.py checks the flipped candidate too: it must score clearly better than the direct match
+    when a picture really is mirrored (the PD08U "Rear Ceiling" diagram case)."""
+    from pdfval.checks import assets as am
+    from pdfval.model import Image
+
+    def gradient(flip: bool) -> bytes:
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 90, 60), False)
+        pix.clear_with(255)
+        x0 = 60 if flip else 10
+        for i, x in enumerate(range(x0, x0 + 20)):
+            for y in range(15, 45):
+                v = 255 - ((19 - i if flip else i) * 10)
+                pix.set_pixel(x, y, (v, v, v))
+        return pix.tobytes("png")
+
+    a_doc, b_doc = make(_tmp("a.pdf"), [{"title": "Overview", "paras": [P1], "image": gradient(False)}]), \
+        make(_tmp("b.pdf"), [{"title": "Overview", "paras": [P1], "image": gradient(True)}])
+    from pdfval import extract, load_config
+    cfg = load_config()
+    A, B = extract.load(a_doc, "baseline", cfg), extract.load(b_doc, "candidate", cfg)
+    x, y = next(im for im in A.images if im.page == 0), next(im for im in B.images if im.page == 0)
+    direct, flip_h, flip_v = am._mirror_scores(A, x, B, y)
+    assert flip_h > direct and flip_h > 0.9
+
+
+def _tmp(name: str):
+    import tempfile
+    from pathlib import Path
+    return Path(tempfile.mkdtemp()) / name
 
 
 def test_image_duplicated_into_other_section(tmp_path, cfg):

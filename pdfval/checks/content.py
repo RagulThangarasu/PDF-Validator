@@ -51,6 +51,22 @@ def classify(a: list[str], b: list[str]) -> str:
     return "changed text"
 
 
+def _marker_glyph(d, i: int) -> bool:
+    """The word is a list item's marker glyph: one symbol (maybe repeated: "-", "•", "·", "–", "▪", "--") that starts
+    its line, with the item's text after it on that row. A dash inside a sentence ("10 - 20") is not."""
+    import unicodedata
+    w = d.words[i]
+    t = w.text.strip()
+    if not t or len(t) > 3 or len(set(t)) != 1 or t[0] in ".,:;!?/\\'\"()[]{}@#%&_|" \
+            or unicodedata.category(t[0]) not in ("Po", "Pd", "So"):
+        return False
+    if not w.line_start:
+        return False
+    nxt = d.words[i + 1] if i + 1 < len(d.words) else None
+    return nxt is not None and nxt.page == w.page and nxt.bbox[0] > w.bbox[0] and \
+        abs((nxt.bbox[1] + nxt.bbox[3]) / 2 - (w.bbox[1] + w.bbox[3]) / 2) <= max(4.0, 0.7 * (w.bbox[3] - w.bbox[1]))
+
+
 def _wrap_only(u: Unit, a_idx: list[int], b_idx: list[int]) -> bool:
     """Same characters on both sides, and every place where the split into words
     differs is a line break right after a hyphen/slash on the side that has the
@@ -746,6 +762,26 @@ def check(u: Unit) -> list[Finding]:
         sup_gap = ctype == "spacing" and u.cfg["content"].get("ignore_superscript_spacing", True) and \
             any(_superscript(u.a.words[k]) for k in a_idx) or ctype == "spacing" and \
             u.cfg["content"].get("ignore_superscript_spacing", True) and any(_superscript(u.b.words[k]) for k in b_idx)
+        if ccfg.get("ignore_footnote_marks", True) and (
+                (tag == "replace" and _footnote_mark_only(u, a_idx, b_idx))
+                or (tag != "replace" and _lone_footnote_mark(u.a if a_idx else u.b, a_idx or b_idx))):
+            # "button" vs "button¹": the same word with a raised footnote number on one side only (the note itself
+            # is compared as text) - how the reference is set, not a changed word
+            u.pairs.extend(zip(a_idx, b_idx))
+            unmatched_a.subtract(at[i1:i2])
+            pool.subtract(bt[j1:j2])
+            hyphen_matched += i2 - i1
+            continue
+        if u.cfg["layout"].get("ignore_bullet_glyph", True) and (a_idx or b_idx) \
+                and all(_marker_glyph(u.a, i) for i in a_idx) and all(_marker_glyph(u.b, j) for j in b_idx):
+            # the glyph that marks a list item: "•" in one PDF, "-" in the other (or read as text on one side only,
+            # the bullet being styling on the other) - the template's choice, not a text difference. Whether an
+            # item has a marker at all is the list check's (bullet marker).
+            u.pairs.extend(zip(a_idx, b_idx))
+            unmatched_a.subtract(at[i1:i2])
+            pool.subtract(bt[j1:j2])
+            hyphen_matched += i2 - i1
+            continue
         if ctype == "hyphenation" or (ctype == "spacing" and (_wrap_only(u, a_idx, b_idx) or sup_gap
                 or _code_wrap(u, a_idx, b_idx))) \
                 or (ctype == "punctuation" and (_break_hyphen_only(u, a_idx, b_idx) or _code_wrap(u, a_idx, b_idx))):
@@ -883,6 +919,17 @@ def check(u: Unit) -> list[Finding]:
                 critical = tag in ("delete", "replace") and absent >= crit_words and absent >= 0.5 * len(a_idx) \
                     and kind not in ("spacing", "hyphenation")
                 ctype = ("missing text" if tag == "delete" or critical else "extra text" if tag == "insert" else kind)
+            # before giving up on a block missing on stage: the exact same words, in the exact same order,
+            # may still sit somewhere else in this unit's own stage range (a table cell that goes on, on a
+            # later stage page the opcode diff did not pair up with this spot) - crawl the whole range once
+            # more for an exact run before reporting it gone. Only for a block of some size: one or two
+            # common words ("Overview", "Note") can coincide with unrelated, already-matched text elsewhere
+            # in the same section and would wrongly swallow a genuine short difference.
+            if tag == "delete" and len(a_idx) >= 3 and not b_idx:
+                run = find_run(u.a, a_idx, u.b, u.b_range, None)
+                if run:
+                    moved_note(a_idx, run, "Text on another stage page")
+                    continue
             same =same_words(u, a_idx, b_idx) if a_idx and b_idx else []
             u.style_pairs.extend(same)
             label = "Missing content block" if critical else _TYPE_LABEL.get(ctype, _KIND[tag])
@@ -1530,6 +1577,35 @@ def _scripts(u: Unit, sev: str) -> list[Finding]:
 
 
 _SUPER_CHARS = set("®™©℠¹²³⁰⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ*†‡")
+
+
+def _lone_footnote_mark(d, idx: list[int]) -> bool:
+    """One raised number / footnote sign on its own ("¹" set as a separate small word after "button")."""
+    if len(idx) != 1:
+        return False
+    w = d.words[idx[0]]
+    t = (w.text or "").strip()
+    return 0 < len(t) <= 2 and _superscript(w) and all(c.isdigit() or c in _SUPER_CHARS or c in "*†‡§" for c in t) \
+        and not all(c in "®™©℠" for c in t)
+
+
+def _footnote_mark_only(u: Unit, a_idx: list[int], b_idx: list[int]) -> bool:
+    """The two runs read the same once raised digits / footnote signs are left out, and at least one was left out:
+    "button" | "button¹" (the ¹ glued to the word), or "button" + a raised "1" as its own word."""
+    def plain(d, idx):
+        out, dropped = "", 0
+        for i in idx:
+            w = d.words[i]
+            t, sc = w.text or "", w.script or ""
+            for k, c in enumerate(t):
+                raised = (k < len(sc) and sc[k] == "^") or c in _SUPER_CHARS
+                if raised and (c.isdigit() or c in _SUPER_CHARS or c in "*†‡§"):
+                    dropped += 1
+                elif not c.isspace():
+                    out += c
+        return out, dropped
+    (ta, na), (tb, nb) = plain(u.a, a_idx), plain(u.b, b_idx)
+    return bool(ta) and ta == tb and (na or nb) > 0 and max(na, nb) <= 3
 
 
 def _superscript(w) -> bool:

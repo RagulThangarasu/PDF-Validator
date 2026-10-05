@@ -1,7 +1,7 @@
 """Note style, prod against stage: a bar on the left in prod, a filled box in stage is one finding per type."""
 import pymupdf
 
-from pdfval import load_config
+from pdfval import compare, load_config
 from pdfval.checks import notes
 
 
@@ -81,3 +81,87 @@ def test_icon_only_note_takes_the_type_its_stage_twin_is_titled(tmp_path):
     f = notes.compare(_Doc(tmp_path / "a.pdf"), _Doc(tmp_path / "b.pdf"), cfg)
     assert any(x.message.startswith("Important style differs") and "2 of 2 Important notes" in x.message for x in f), \
         [x.message for x in f]
+
+
+def _legend_pdf(path, warning_fill: bool) -> str:
+    """A typography legend table ("Symbol | Item | Meaning") naming "Warning" once in its own cell -
+    with its row carrying a bar (and, in stage, a fill too) of its own: a table style, not a callout."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=595.28, height=841.89)
+    pg.insert_text((40, 50), "Typographics", fontsize=18, fontname="hebo")
+    x0, x1, x2, x3, h, y = 40, 110, 250, 555, 26, 80
+    pg.draw_rect(pymupdf.Rect(x0, y, x3, y + h), color=None, fill=(0.17, 0.17, 0.2))
+    for x, t in ((x0, "Symbol"), (x1, "Item"), (x2, "Meaning")):
+        pg.insert_text((x + 6, y + 18), t, fontsize=12, fontname="hebo", color=(1, 1, 1))
+    y += h
+    for label, meaning in (("Warning", "Information to prevent damage."), ("Tip", "Useful information."),
+                          ("Note", "Supplementary information.")):
+        if label == "Warning":
+            bar_color = (0.867, 0.867, 0.867) if warning_fill else (0, 0, 0)
+            pg.draw_rect(pymupdf.Rect(x1 - 3, y, x1, y + h), color=None, fill=bar_color)
+            if warning_fill:  # stage: "filled box #DDDDDD" behind the Item cell, same row
+                pg.draw_rect(pymupdf.Rect(x1, y, x2, y + h), color=None, fill=(0.867, 0.867, 0.867))
+        pg.draw_rect(pymupdf.Rect(x0, y, x3, y + h), color=(0.8, 0.8, 0.8), width=0.6)
+        pg.draw_line((x1, y), (x1, y + h), color=(0.8, 0.8, 0.8), width=0.6)
+        pg.draw_line((x2, y), (x2, y + h), color=(0.8, 0.8, 0.8), width=0.6)
+        pg.insert_text((x1 + 6, y + 18), label, fontsize=11, fontname="helv")
+        pg.insert_text((x2 + 6, y + 18), meaning, fontsize=10, fontname="helv")
+        y += h
+    doc.set_toc([[1, "Typographics", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_legend_table_warning_entry_is_not_a_callout(tmp_path):
+    """A typography legend names "Warning" once on each side: not a real styled callout, even when its
+    row happens to carry its own bar / fill (that is the table's own style, not a note)."""
+    cfg = load_config()
+    cfg["typography"]["enabled"] = False
+    r = compare(_legend_pdf(tmp_path / "a.pdf", warning_fill=False), _legend_pdf(tmp_path / "b.pdf", warning_fill=True), cfg)
+    bad = [f["message"] for s in r["sections"] for f in s["findings"] if "callout style" in f.get("types", [])]
+    assert not bad, bad
+
+
+def _spec_table_pdf(path, look) -> str:
+    """A spec table (PC | OS | Description), two rows holding a real "Note" box in their description
+    cell (taller than the table's plain rows) and two plain rows without one."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=595.28, height=841.89)
+    pg.insert_text((40, 50), "System requirements", fontsize=18, fontname="hebo")
+    x0, x1, x2, x3 = 40, 110, 250, 555
+    y, plain_h, tall_h = 80, 26, 70
+    rows = (("Windows OS", "Windows 7 and above with Miracast support", True),
+            ("Mac OS", "Mac OS X 10.12 and above with Mirror Screen support", True),
+            ("Chrome OS", "for Cast/Mirroring support", False),
+            ("Android", "Android 9 above with Mirror Screen support", False))
+    for label, desc, has_note in rows:
+        h = tall_h if has_note else plain_h
+        pg.draw_rect(pymupdf.Rect(x0, y, x3, y + h), color=(0.8, 0.8, 0.8), width=0.6)
+        pg.draw_line((x1, y), (x1, y + h), color=(0.8, 0.8, 0.8), width=0.6)
+        pg.draw_line((x2, y), (x2, y + h), color=(0.8, 0.8, 0.8), width=0.6)
+        pg.insert_text((x1 + 6, y + 18), label, fontsize=10, fontname="helv")
+        pg.insert_text((x2 + 6, y + 18), desc, fontsize=10, fontname="helv")
+        if has_note:
+            ny = y + 30
+            if look == "box":
+                pg.draw_rect(pymupdf.Rect(x2 + 4, ny - 2, x2 + 180, ny + 34), color=None, fill=(0.855, 0.91, 0.949))
+            elif look == "border":
+                pg.draw_rect(pymupdf.Rect(x2 + 4, ny - 2, x2 + 180, ny + 34), color=(0.6, 0.6, 0.65), width=0.8)
+            pg.insert_text((x2 + 10, ny + 10), "Note", fontsize=9, fontname="helv")
+            pg.insert_text((x2 + 10, ny + 24), "Recommended configuration for best results.", fontsize=9, fontname="helv")
+        y += h
+    doc.set_toc([[1, "System requirements", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_note_nested_in_a_data_table_cell_is_still_a_callout(tmp_path):
+    """A real "Note" box inside a spec table's description cell (its row taller than the table's plain
+    rows, to fit the note) is still a styled callout, drawn differently prod vs stage - unlike the
+    legend's bare label, this is not excluded just for sitting inside a qualifying table."""
+    cfg = load_config()
+    cfg["typography"]["enabled"] = False
+    cfg["ignore"]["types"] = [t for t in cfg["ignore"]["types"] if t != "callout style"]
+    r = compare(_spec_table_pdf(tmp_path / "a.pdf", "border"), _spec_table_pdf(tmp_path / "b.pdf", "box"), cfg)
+    found = [f["message"] for s in r["sections"] for f in s["findings"] if "callout style" in f.get("types", [])]
+    assert any("Note style differs" in m for m in found), found

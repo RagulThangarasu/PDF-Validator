@@ -80,7 +80,7 @@ def _reset_caches() -> None:
             doc.close()
     for cache in (assets._DOCS, assets._VIS, assets._BLANK, integrity._DOCS, integrity._LINKS,
                   integrity._OFFPAGE, integrity._NAMES, tables._DOCS, tables._RAW, tables._RULES,
-                  tables._DIAGRAMS):
+                  tables._DIAGRAMS, tables._EDGES_Y):
         cache.clear()
     placement._shapes.cache_clear()
     from .checks import layout
@@ -302,6 +302,10 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             broken = failed_page_of(i)
             # the whole lost section: its word count, its text and every line of it highlighted (heading first)
             body = [k for k in range(an.word, end) if A.words[k].norm] if an.located else []
+            if an.located and not body and A.outline:
+                # a bookmarked section is a section whatever it holds: a page of dimension drawings, all of its
+                # text picture text (left out of the comparison), still goes missing as a section
+                body = [k for k in range(an.word, end) if A.words[k].text.strip()]
             if an.located and not body:
                 # nothing of it is compared text: its "heading" is a picture's label (a dimension note "Unit: mm"
                 # set large on a drawing, in a PDF whose headings are guessed from font sizes) - not a section
@@ -501,12 +505,17 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     if cfg["report"].get("split_by_page", True):  # every place visible: one issue per stage page
         for _, findings, _ in ran:
             findings[:] = [g for f in findings for g in _split_by_page(f)]
+    # the predefined check/category lists, extended with whatever check names actually turned up this run:
+    # a new check module is counted and reported even if CHECKS/CATEGORY was never updated for it
+    seen_checks = {f.check for _, fs, _ in ran for f in fs}
+    all_checks = tuple(dict.fromkeys((*CHECKS, *sorted(seen_checks - set(CHECKS)))))
+    all_categories = tuple(dict.fromkeys((*CATEGORIES, *sorted({_category(c) for c in seen_checks} - set(CATEGORIES)))))
     for u, findings, truncated in ran:
         # issues for the image report only (a picture's label missing in stage): kept apart - they do not count
         # in the section's verdict, the other reports or the viewer
         image_only = [f for f in findings if f.detail.get("image_report_only")]
         findings[:] = [f for f in findings if not f.detail.get("image_report_only")]
-        per_check = {c: _check_summary([f for f in findings if f.check == c]) for c in CHECKS}
+        per_check = {c: _check_summary([f for f in findings if f.check == c]) for c in all_checks}
         for c, n in truncated.items():
             per_check[c]["truncated"] = n
         for f in findings:
@@ -516,7 +525,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 style_map[key]["sections"] += 1
 
         # the findings as reported, tagged genuine or not (the PDF report = genuine issues + image issues)
-        found = [{"id": f"{len(out_sections):03d}-{k:03d}", "category": CATEGORY[f.check], **f.to_json()}
+        found = [{"id": f"{len(out_sections):03d}-{k:03d}", "category": _category(f.check), **f.to_json()}
                  for k, f in enumerate(findings)]
         for f in found:
             genuine.tag(f, genuine_types, data_min, genuine_skip, cfg.get("genuine", {}).get("everything", False))
@@ -530,10 +539,12 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
         pct = _issue_score(counted_for_pct, ccfg)
         content_status = ("pass" if pct >= ccfg.get("pass_pct", 98.0)
                           else "warn" if pct >= ccfg.get("warn_pct", 90.0) else "fail")
-        # text genuinely absent from stage (not merely moved/reordered) is never cheap enough to pass: at
-        # 0.1 % per issue a section would need 20 such findings before the flat per-issue score even reaches
-        # WARN, hiding a real content loss behind "PASS"
-        if content_status == "pass" and any(f["genuine"] and "missing text" in f["types"] for f in found):
+        # text genuinely absent from stage (not merely moved/reordered), extra text, a missing/broken image
+        # or a note-style issue is never cheap enough to pass: at 0.1 % per issue a section would need 20
+        # such findings before the flat per-issue score even reaches WARN, hiding a real content loss behind
+        # "PASS" - and, worse, the document's overall score (below) drops a passing section's issues entirely,
+        # so a real content-percentage issue must never leave a section merely "passing"
+        if content_status == "pass" and any(f["genuine"] and set(f["types"]) & CONTENT_PCT_TYPES for f in found):
             content_status = "warn"
         # a section that passes is OK: its issues take nothing off the document's overall score (they are
         # still listed in the report) - but the section's own displayed % is always the real computed score,
@@ -561,9 +572,9 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             "baseline": {"start": _pos(A, u.a_range[0]), "end": _pos(A, u.a_range[1]), "words": u.a_range[1] - u.a_range[0]},
             "candidate": {"start": _pos(B, u.b_range[0]), "end": _pos(B, u.b_range[1]), "words": u.b_range[1] - u.b_range[0]},
             "checks": per_check,
-            "categories": {c: sum(CATEGORY[f.check] == c for f in findings) for c in CATEGORIES},
+            "categories": {c: sum(_category(f.check) == c for f in findings) for c in all_categories},
             "findings": found,
-            "image_findings": [{"id": f"{len(out_sections):03d}-i{k:02d}", "category": CATEGORY[f.check], **f.to_json()}
+            "image_findings": [{"id": f"{len(out_sections):03d}-i{k:02d}", "category": _category(f.check), **f.to_json()}
                                for k, f in enumerate(image_only)],
         })
         for f in out_sections[-1]["image_findings"]:
@@ -608,11 +619,11 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             "css": {"issues": sum(s["css"]["issues"] for s in out_sections),
                     "style": sum(s["css"]["style"] for s in out_sections),
                     "layout": sum(s["css"]["layout"] for s in out_sections)},
-            "by_check": {c: sum(s["checks"].get(c, {}).get("total", 0) for s in out_sections) for c in CHECKS},
+            "by_check": {c: sum(s["checks"].get(c, {}).get("total", 0) for s in out_sections) for c in all_checks},
             "by_category": {c: {"total": sum(1 for s in out_sections for f in s["findings"] if f["category"] == c),
                                 "types": dict(Counter(t for s in out_sections for f in s["findings"]
                                                       if f["category"] == c for t in f["types"]).most_common())}
-                            for c in CATEGORIES},
+                            for c in all_categories},
             "result": "fail" if status["fail"] else "pass",
         },
         "sync": _monotonic(sync_points, A, B, _scope_end(A, scope)),
@@ -632,6 +643,13 @@ CHECKS = ("toc", "structure", "content", "tables", "assets", "integrity", "style
 CATEGORY = {"content": "content", "assets": "images", "tables": "tables", "structure": "structure",
             "integrity": "links", "style": "css", "layout": "css", "toc": "toc"}
 CATEGORIES = ("content", "images", "tables", "toc", "structure", "links", "css")
+
+
+def _category(check: str) -> str:
+    """Category shown to users for a check. A check not in CATEGORY (a new check module whose
+    author forgot to register it there) falls back to its own name instead of crashing the whole
+    run with a KeyError or silently losing its findings from the category/check summaries."""
+    return CATEGORY.get(check, check)
 _KIND_TYPE = {  # detail.kind -> type, for checks that tag findings with a kind
     "missing": "missing image", "extra": "extra image", "changed": "image changed", "raster-vs-vector": "raster vs vector",
     "glyph": "broken glyph", "offpage": "text off page", "broken-link": "broken link", "missing-link": "missing link", "extra-link": "extra link",
@@ -1162,7 +1180,7 @@ def _drop_cover_pages(ran, A: Doc, B: Doc, anA: list, anB: list) -> None:
     heading is content (stage ends on the "Working with a tripod" page: no back cover), and a short
     PDF (a page or two) has no cover."""
     def edge(doc: Doc, anchors: list) -> set:
-        if len(doc.pages) < 4:
+        if len(doc.pages) < 4 or doc.raw_tables is not None:  # (a web guide has no cover / back cover)
             return set()
         return {0, len(doc.pages) - 1} - {an.page for an in anchors}
     ea, eb = edge(A, anA), edge(B, anB)

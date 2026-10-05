@@ -27,7 +27,7 @@ from PIL import Image as PILImage
 from PIL import ImageChops, ImageDraw, ImageFilter
 
 from ..model import Doc, Finding, Image, Loc
-from . import Aligner, Unit
+from . import Aligner, Unit, snippet
 from .tables import is_curve
 
 _DOCS: dict[str, pymupdf.Document] = {}
@@ -98,10 +98,13 @@ def _has_artwork(doc: Doc, page: int, rect) -> bool:
 
 
 def size_reported(rel_x: float, rel_y: float, acfg: dict) -> bool:
-    """A size difference worth reporting: stage shows the picture at less than [assets] smaller_report_ratio (0.5)
-    of prod's size (prod 300 -> stage below 150; widths relative to each document's text width). A bigger picture,
-    or one only a little smaller, is fine."""
-    return rel_x > 0 and rel_y < rel_x * acfg.get("smaller_report_ratio", 0.5)
+    """A size difference worth reporting: the stage picture grew or shrank by more than [assets]
+    size_ratio_tolerance (relative) or width_tolerance (as a fraction of the content box) - either
+    direction, not only a big shrink, so every real size change is captured with its exact numbers."""
+    if rel_x <= 0:
+        return False
+    return abs(rel_x - rel_y) > acfg.get("width_tolerance", 0.10) or \
+        abs(rel_y / rel_x - 1) > acfg.get("size_ratio_tolerance", 0.2)
 
 
 def find_artwork(img_doc: Doc, im: Image, other: Doc, at, min_score: float, max_dist: float,
@@ -355,6 +358,23 @@ def pixel_compare(a: Doc, x: Image, b: Doc, y: Image) -> tuple[float, float]:
     fa, fb = _thumb(a, x, trim=False), _thumb(b, y, trim=False)
     dark = float(((fb < 40) & (fa >= 80)).mean())
     return sim, dark
+
+
+def _mirror_scores(a: Doc, x: Image, b: Doc, y: Image) -> tuple[float, float, float]:
+    """(direct correlation, correlation flipped left-right, correlation flipped top-bottom). A simple
+    line diagram (a screen box, an icon, a silhouette) can hash and correlate almost identically to its
+    own mirror image - the ink mass barely changes - so a flipped diagram can pass as "the same picture"
+    even though the reader sees it the wrong way round. Comparing against the flipped candidate too
+    catches that a notably better match."""
+    ta, tb = _thumb(a, x), _thumb(b, y)
+    ca = ta - ta.mean()
+    na = np.sqrt((ca * ca).sum()) + 1e-9
+
+    def corr(t: np.ndarray) -> float:
+        c = t - t.mean()
+        return float((ca * c).sum() / (na * np.sqrt((c * c).sum()) + 1e-9))
+
+    return corr(tb), corr(np.fliplr(tb)), corr(np.flipud(tb))
 
 
 def visual_distance(a: Doc, x: Image, b: Doc, y: Image) -> float:
@@ -1164,7 +1184,7 @@ def check(u: Unit) -> list[Finding]:
         if similar and max(rel_x, rel_y) >= icon_w and (abs(rel_x - rel_y) > acfg["width_tolerance"]
                                                         or abs(grow) > acfg.get("size_ratio_tolerance", 0.2)):
             if not size_reported(rel_x, rel_y, acfg):
-                continue  # the same picture, only bigger or a little smaller in stage: fine
+                continue  # not a real size difference after all (within tolerance)
             wx, hx, wy, hy = x.bbox[2] - x.bbox[0], x.bbox[3] - x.bbox[1], y.bbox[2] - y.bbox[0], y.bbox[3] - y.bbox[1]
             findings.append(Finding(
                 "assets", acfg.get("size_severity", "warning"),
@@ -1173,7 +1193,7 @@ def check(u: Unit) -> list[Finding]:
                 f"width {rel_x:.0%} → {rel_y:.0%} of content box",
                 [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
                 {"kind": "size", "baseline_width": round(rel_x, 3), "candidate_width": round(rel_y, 3),
-                 "visual_distance": round(vis, 3)}, types=["image smaller"]))
+                 "visual_distance": round(vis, 3)}, types=["image smaller" if grow < 0 else "image bigger"]))
             continue
         findings.append(Finding(
             "assets", acfg.get("similar_image_severity", "warning") if similar else acfg.get("changed_severity", "error"),
@@ -1266,7 +1286,8 @@ def check(u: Unit) -> list[Finding]:
                     f"Image size differs: the same picture drawn {abs(grow):.0%} {'larger' if grow > 0 else 'smaller'} in stage "
                     f"(prod p.{at.page + 1} ↔ stage p.{y.page + 1}): {wx:.0f}×{hx:.0f} pt → {wy:.0f}×{hy:.0f} pt, "
                     f"width {rel_x:.0%} → {rel_y:.0%} of content box",
-                    [Loc(at.page, twin)], [Loc(y.page, y.bbox)], {"kind": "size"}, types=["image smaller"]))
+                    [Loc(at.page, twin)], [Loc(y.page, y.bbox)], {"kind": "size"},
+                    types=["image smaller" if grow < 0 else "image bigger"]))
             continue
         findings.append(Finding(
             "assets", acfg.get("icons", "warning") if icon else acfg.get("count_severity", "error"),
@@ -1274,6 +1295,20 @@ def check(u: Unit) -> list[Finding]:
             [], [Loc(y.page, y.bbox)], {"kind": "extra", "icon": icon},
             baseline_at=at))
     u.image_pairs = [(x, y) for x, y, _ in pairs]
+    # a matched picture flipped in stage: the hash/correlation above tolerates it (same shapes, same ink
+    # mass), so a real left-right or top-bottom flip would otherwise pass as "the same picture" unreported
+    mirror_gap = acfg.get("mirrored_min_gap", 0.15)
+    for x, y, vis in pairs:
+        if _rel_width(u.a, x) < icon_w or vis > acfg.get("mirrored_max_distance", 0.15):
+            continue  # an icon (too simple to tell mirrored from not), or already different enough elsewhere
+        direct, flip_h, flip_v = _mirror_scores(u.a, x, u.b, y)
+        if max(flip_h, flip_v) - direct >= mirror_gap:
+            axis = "left-right" if flip_h >= flip_v else "top-bottom"
+            findings.append(Finding(
+                "assets", acfg.get("mirrored_severity", "error"),
+                f"Image mirrored in stage: the picture is flipped {axis} (prod p.{x.page + 1} ↔ stage p.{y.page + 1})",
+                [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
+                {"kind": "mirrored", "axis": axis, "direct_similarity": round(direct, 3)}, types=["image mirrored"]))
     findings += _sequence(u, [(x, y) for x, y, _ in pairs], acfg)
     # pixelated: stage prints the picture from far fewer pixels per inch than prod does (a low-resolution
     # export or a screenshot of the picture), so it looks blocky / blurred on screen and on paper
@@ -1423,13 +1458,131 @@ def check(u: Unit) -> list[Finding]:
                 {"baseline_aspect": round(ar_x, 3), "candidate_aspect": round(ar_y, 3),
                  "baseline_width": round(rel_x, 3), "candidate_width": round(rel_y, 3)},
                 types=["image distorted"] if distorted else (["image alignment"] if all(p.startswith("alignment") for p in problems)
-                                                             # stage under half prod's size: the reader sees that
-                                                             else ["image smaller"] if " pt → " in problems[0] and grow < 0 else []),
+                                                             # a real size change, either direction
+                                                             else (["image smaller" if grow < 0 else "image bigger"]
+                                                                   if " pt → " in problems[0] else [])),
             ))
     if acfg.get("grid_repair", True):
         findings = _grid_repair(u, findings, acfg)
+    if acfg.get("check_vertical_alignment", True):
+        findings += _vertical_alignment(u, acfg)
     _annotate(u, findings)
     return findings
+
+
+_ICONS: dict[tuple, list] = {}
+
+
+def _icons(doc: Doc, page: int, max_pt: float) -> list[tuple]:
+    """Small pictures of a page - embedded images and vector drawings up to max_pt wide and high (a warning
+    triangle, a note icon beside its paragraph)."""
+    key = (doc.path, len(doc.words), page, max_pt)
+    if key not in _ICONS:
+        if len(_ICONS) > 2000:
+            _ICONS.clear()
+        out = [tuple(im.bbox) for im in doc.images if im.page == page
+               and 8 <= im.bbox[2] - im.bbox[0] <= max_pt and 8 <= im.bbox[3] - im.bbox[1] <= max_pt]
+        try:
+            pdf = _DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+            over = lambda r: any(min(r.x1, o[2]) > max(r.x0, o[0]) and min(r.y1, o[3]) > max(r.y0, o[1]) for o in out)
+            drawings = pdf[page].get_drawings()
+            for r in pdf[page].cluster_drawings(drawings=drawings):
+                if 8 <= r.width <= max_pt and 8 <= r.height <= max_pt and not over(r):
+                    out.append(tuple(r))
+            # a page whose drawings all hang together (crop marks, a frame around everything) is one cluster: the
+            # icons are then found as what they are drawn with - a small shape filled in a colour (not white)
+            for d in drawings:
+                r, fill = pymupdf.Rect(d["rect"]), d.get("fill")
+                if fill is not None and sum(fill[:3]) < 2.4 and 12 <= r.width <= max_pt and 12 <= r.height <= max_pt \
+                        and 0.5 <= r.width / max(r.height, 1) <= 2.0 and not over(r):
+                    out.append(tuple(r))
+        except Exception:
+            pass
+        _ICONS[key] = out
+    return _ICONS[key]
+
+
+def _vertical_alignment(u: Unit, acfg: dict) -> list[Finding]:
+    """An icon beside a paragraph: where it sits against that text - centred on it in prod, at its first line in
+    stage (or the other way round). The paragraph is the same on both sides (its matched words), so the icons are
+    compared whatever they are made of (a vector drawing in prod, a bitmap in stage: never paired as pictures)."""
+    max_pt, reach = acfg.get("icon_beside_text_max_pt", 60), acfg.get("icon_beside_text_gap_pt", 45)
+    key = lambda t: "".join(c for c in (t or "").lower() if c.isalnum())
+    a_keys = [(k, key(u.a.words[k].text)) for k in range(*u.a_range)]
+    a_keys = [(k, t) for k, t in a_keys if t]
+
+    def find(b_words: list[int], start: int) -> int | None:
+        """Prod index of the first of these stage words, as the same consecutive words at or after `start`."""
+        want = [key(u.b.words[j].text) for j in b_words]
+        want = [t for t in want if t]
+        if not want:
+            return None
+        for n in range(len(a_keys) - len(want) + 1):
+            if a_keys[n][0] >= start and all(a_keys[n + m][1] == want[m] for m in range(len(want))):
+                return a_keys[n][0]
+        return None
+
+    by_line: dict[int, list[int]] = defaultdict(list)
+    for j in range(*u.b_range):
+        by_line[u.b.words[j].line].append(j)
+    lines = sorted(by_line)
+    out, seen = [], set()
+    for page in sorted({u.b.words[j].page for j in range(*u.b_range)}):
+        for ic in _icons(u.b, page, max_pt):
+            cy, h = (ic[1] + ic[3]) / 2, ic[3] - ic[1]
+            # the paragraph right of the icon: the line level with it, then the lines running on below / above
+            # at the same left edge
+            near = [li for li in lines if u.b.lines[li].page == page and 0 <= u.b.lines[li].bbox[0] - ic[2] <= reach
+                    and u.b.lines[li].bbox[1] - 4 <= cy <= u.b.lines[li].bbox[3] + max(h, 12)]
+            if not near:
+                continue
+            start = min(near, key=lambda li: abs((u.b.lines[li].bbox[1] + u.b.lines[li].bbox[3]) / 2 - cy))
+            x0 = u.b.lines[start].bbox[0]
+            block, k = [start], lines.index(start)
+            for step in (1, -1):
+                n = k + step
+                while 0 <= n < len(lines):
+                    ln, prev = u.b.lines[lines[n]], u.b.lines[block[-1] if step == 1 else block[0]]
+                    gap = ln.bbox[1] - prev.bbox[3] if step == 1 else prev.bbox[1] - ln.bbox[3]
+                    if ln.page != page or abs(ln.bbox[0] - x0) > 4 or gap > 0.6 * (prev.bbox[3] - prev.bbox[1]):
+                        break
+                    block.append(lines[n]) if step == 1 else block.insert(0, lines[n])
+                    n += step
+            top_b, bot_b = u.b.lines[block[0]].bbox[1], u.b.lines[block[-1]].bbox[3]
+            words_b = [j for li in block for j in by_line[li] if u.b.words[j].norm]
+            if bot_b - top_b < 2 * h or len(words_b) < 6:
+                continue  # one or two lines: centred and top are the same place
+            # the same paragraph in prod: by its text (its first and its last words), since a block read in another
+            # order on the two sides (columns) is not in the matched word pairs
+            ia = find(words_b[:4], u.a_range[0])
+            iz = find(words_b[-3:], ia) if ia is not None else None
+            if ia is None or iz is None:
+                continue
+            iz += 2
+            wa, wz = u.a.words[ia], u.a.words[iz]
+            if wa.page != wz.page or iz - ia > 3 * len(words_b):
+                continue
+            top_a, bot_a = u.a.lines[wa.line].bbox[1], u.a.lines[wz.line].bbox[3]
+            ax0 = min(u.a.lines[u.a.words[k].line].bbox[0] for k in range(ia, iz + 1))
+            cands = [o for o in _icons(u.a, wa.page, max_pt) if 0 <= ax0 - o[2] <= reach
+                     and top_a - (o[3] - o[1]) <= (o[1] + o[3]) / 2 <= bot_a + (o[3] - o[1])]
+            if len(cands) != 1 or bot_a - top_a < 2 * (cands[0][3] - cands[0][1]):
+                continue  # no icon beside the prod paragraph (a missing icon is another check's), or not clear which
+            pa = cands[0]
+            rel = lambda box, top, bot: ((box[1] + box[3]) / 2 - top) / max(bot - top, 1)
+            ra, rb = rel(pa, top_a, bot_a), rel(ic, top_b, bot_b)
+            name = lambda r: "at the top of" if r < 0.3 else "at the bottom of" if r > 0.7 else "centred on"
+            if name(ra) == name(rb) or abs(ra - rb) < acfg.get("icon_vertical_tolerance", 0.25) or (page, ic) in seen:
+                continue
+            seen.add((page, ic))
+            out.append(Finding(
+                "assets", acfg.get("vertical_alignment_severity", "warning"),
+                f"Image vertical alignment differs: {name(ra)} its text in prod, {name(rb)} its text in stage "
+                f"(prod p.{wa.page + 1} ↔ stage p.{page + 1}, beside “{' '.join(u.b.words[j].text for j in words_b[:6])}”)",
+                [Loc(wa.page, pa)], [Loc(page, ic)],
+                {"kind": "vertical alignment", "baseline": round(ra, 2), "candidate": round(rb, 2)},
+                types=["image vertical alignment"], links=[(Loc(wa.page, pa), Loc(page, ic))]))
+    return out
 
 
 _GRID_KINDS = ("missing", "extra", "changed", "raster-vs-vector")

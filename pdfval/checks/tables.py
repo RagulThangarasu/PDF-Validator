@@ -177,8 +177,11 @@ def _loose(t: str) -> str:
 
 
 def _bag(doc: Doc, idx) -> Counter:
-    # split at hyphens/slashes: where a cell wraps decides whether "non-condensing" is one word or two
-    return Counter(k for i in idx for part in re.split(r"[-/–—]", doc.words[i].norm) if (k := _loose(part)))
+    # the letter / digit pieces of the words, split at every punctuation mark: where a cell wraps decides whether
+    # "non-condensing" is one word or two, and a space set or left out before a bracket decides whether
+    # "MP3(.mp3)" is one word or "MP3" + "(.mp3)" - the same row either way (a row of such words would otherwise
+    # share no word with itself: reported missing in stage and extra in stage)
+    return Counter(k for i in idx for k in re.findall(r"[^\W_]+", doc.words[i].norm.lower()))
 
 
 def _inside(doc: Doc, rng, page: int, box) -> list[int]:
@@ -319,7 +322,10 @@ def diagram_boxes(doc: Doc, page: int) -> list[tuple]:
     return out
 
 
-def tables(doc: Doc, rng: tuple[int, int]) -> list[TTable]:
+def tables(doc: Doc, rng: tuple[int, int], loose: bool = False) -> list[TTable]:
+    """loose: also the grids that are not a table of rows on their own - the part of a table that runs on over
+    a page with one tall label cell beside several bordered parts (text in two columns, but only one column
+    with text in two rows)."""
     pages = sorted({doc.words[i].page for i in range(*rng)})
     out = []
     for p in pages:
@@ -346,6 +352,8 @@ def tables(doc: Doc, rng: tuple[int, int]) -> list[TTable]:
             # (a bordered Note/Tip box is detected as icon | text: only one text column)
             used = Counter(c for r in trows for c in r.cols)
             if len(trows) >= 2 and sum(1 for n in used.values() if n >= 2) >= 2:
+                out.append(TTable((p, t), p, tbox, trows))
+            elif loose and trows and len(used) >= 2:
                 out.append(TTable((p, t), p, tbox, trows))
     return out
 
@@ -489,6 +497,27 @@ def _longest_increasing(xs: list) -> set[int]:
 def _continuation(a: TTable, b: TTable, doc: Doc) -> bool:
     """b continues a across a page break (same table split by pagination, not by the author)."""
     return b.page == a.page + 1 and a.bbox[3] > 0.7 * doc.pages[a.page].height and b.bbox[1] < 0.3 * doc.pages[b.page].height
+
+
+def _one_table(all_tables: list[TTable], parts: list[TTable], doc: Doc) -> bool:
+    """The parts are one table running over page breaks. Parts on consecutive pages: each continues the
+    one before it. Parts further apart (a table over p.43, p.44 and p.45 whose p.44 part is not among them -
+    one tall row, not a data table of its own): the first ends low on its page, the last starts at the top
+    of its page, and every page between them holds a detected table running from its top to its bottom."""
+    if len(parts) < 2:
+        return True
+    for a, b in zip(parts, parts[1:]):
+        if _continuation(a, b, doc) or _continues(a, b, doc):
+            continue
+        if b.page <= a.page + 1:
+            return False  # the same page, or the next one without running on: two tables
+        if a.bbox[3] < 0.6 * doc.pages[a.page].height or b.bbox[1] > 0.3 * doc.pages[b.page].height:
+            return False
+        for pg in range(a.page + 1, b.page):
+            H = doc.pages[pg].height
+            if not any(t[1][1] <= 0.3 * H and t[1][3] >= 0.6 * H for t in _raw(doc, pg)):
+                return False  # a page between them without the table going through it
+    return True
 
 
 def _alike(a: Counter, b: Counter) -> float:
@@ -700,7 +729,7 @@ def check(u: Unit) -> list[Finding]:
             _missing_header(t, ta, tb, dest, rows_a, missing_row, findings, add, tcfg, thr, A, B, al, rtext)
         if len(dest) >= 2:
             bt = [x for x in tb if x.key in dest]
-            if not all(_continuation(p, q, B) for p, q in zip(bt, bt[1:])):
+            if not _one_table(tb, bt, B):
                 add(tcfg.get("table_split_severity", "warning"),
                     f"Table split in stage: prod table (p.{t.page + 1}, “{rtext(A, t.rows[0], 6)}”) is {len(dest)} tables in stage",
                     [Loc(t.page, t.bbox)], [Loc(x.page, x.bbox) for x in bt], "table split")
@@ -717,7 +746,7 @@ def check(u: Unit) -> list[Finding]:
         srcs = {key for key, n in cnt.items() if n >= need or n >= size.get(key, 0) >= 1}
         if len(srcs) >= 2:
             at = [x for x in ta if x.key in srcs]
-            if not all(_continuation(p, q, A) for p, q in zip(at, at[1:])):
+            if not _one_table(ta, at, A):
                 add(tcfg.get("table_merged_severity", "warning"),
                     f"Tables merged in stage: {len(srcs)} prod tables are one table in stage (stage p.{t.page + 1}, "
                     f"“{rtext(B, t.rows[0], 6)}”)", [Loc(x.page, x.bbox) for x in at], [Loc(t.page, t.bbox)], "tables merged")
@@ -802,7 +831,11 @@ def check(u: Unit) -> list[Finding]:
     findings += _overflow(u, al)
     if tcfg.get("check_borders", True):
         findings += _borders(u, al, ta_pages, tb_pages)
-    if tcfg.get("check_row_background", True):
+    # (a web page's PDF is a screenshot: no rules or fills to read - its borders / shading cannot be compared)
+    web = B.raw_tables is not None
+    if tcfg.get("check_cell_borders", True) and not web:
+        findings += _cell_borders(u, al, tables(A, u.a_range, loose=True))
+    if tcfg.get("check_row_background", True) and not web:
         findings += _row_background(u, tb_pages)
     if tcfg.get("check_header_align", True):
         findings += _header_align(u, tb_pages)
@@ -836,6 +869,12 @@ def _row_icons(u: Unit, rows_a: list[TRow], rows_b: list[TRow], fwd: dict, targe
         s = rows_b[fwd[k][0][0]]
         ia, ib = _icons_in(A, r), _icons_in(B, s)
         if not ia and not ib:
+            continue
+        # a note's icon in one document, its label ("NOTE") in the other: the same house-style difference
+        # _icons_in already excludes within one document - here the icon has no label there to exclude it
+        # by (the prod note is icon-only), so the row's own label words settle it instead
+        has_label = lambda d, row: any(d.words[i].norm.startswith("<label:") for i in row.idx)
+        if len(ia) != len(ib) and (has_label(A, r) or has_label(B, s)):
             continue
         if len(ia) != len(ib):
             groups[(r.table, "icon missing" if len(ia) > len(ib) else "icon extra")].append((r, s, ia, ib))
@@ -1334,6 +1373,104 @@ def _borders(u: Unit, al, ta: list, tb: list) -> list[Finding]:
                 f"table “{label}”)", box_a, box_b,
                 {"kind": "table-border-added", "added": added, "baseline_borders": pa, "candidate_borders": pb},
                 types=["table border added"]))
+    return out
+
+
+_EDGES_Y: dict[tuple, list] = {}  # (path, page) -> horizontal edges drawn on the page (y, x0, x1)
+
+
+def _edges_y(doc: Doc, page: int) -> list:
+    """Everything on the page that reads as a horizontal line: rules, and the top / bottom edge of every
+    drawn box - a row set apart by its background band has its line there."""
+    key = (doc.path, page)
+    if key not in _EDGES_Y:
+        out = list(_rules(doc, page)[1])
+        pdf = (_DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path)))
+        try:
+            for d in pdf[page].get_drawings():
+                for it in d["items"]:
+                    if it[0] == "re" and it[1].width > 4:
+                        out += [(it[1].y0, it[1].x0, it[1].x1), (it[1].y1, it[1].x0, it[1].x1)]
+        except Exception:
+            pass
+        _EDGES_Y[key] = out
+    return _EDGES_Y[key]
+
+
+def _cell_borders(u: Unit, al, ta: list) -> list[Finding]:
+    """Every line prod draws between two cells, one by one: the text right above it and right below it is
+    found in stage, and stage must draw a line between the two as well. (The table-wide border check looks at
+    shares of rows; a table that keeps its row lines but loses the lines between the parts of one tall cell -
+    “Advanced Color Temperature Tuning” | “Color Management” | “Wide Color Gamut” beside one label - passes it.)
+    Only a real cell border counts: a rule inside the table whose two ends meet a column line or the table's
+    edge (not a link underline, not a box drawn inside a cell). Nothing is said when the two texts are not
+    both found in stage, or stage breaks the page between them."""
+    A, B = u.a, u.b
+    out = []
+    for t in ta:
+        # (a table continued over pages has a part with one tall row - a label beside several bordered parts:
+        # still a table, though not one with two full rows)
+        if is_callout(A, t) or _on_image(A, t):
+            continue
+        x0, y0, x1, y1 = t.bbox
+        ver, hor = _rules(A, t.page)
+        # column lines: the long vertical rules (the frame of a small picture inside a cell is not one)
+        stops = [x0, x1] + [x for x, a, b in ver if x0 - 3 <= x <= x1 + 3 and b > y0 and a < y1
+                            and b - a >= max(60, 0.3 * (y1 - y0))]
+        # segments on one height that touch are one line
+        by_y: dict = {}
+        for y, a, b in hor:
+            if y0 + 3 < y < y1 - 3 and b > x0 and a < x1:
+                by_y.setdefault(round(y), []).append((a, b))
+        lines = []
+        for y, segs in by_y.items():
+            segs.sort()
+            lo, hi = segs[0]
+            for a, b in segs[1:]:
+                if a <= hi + 2:
+                    hi = max(hi, b)
+                else:
+                    lines.append((y, lo, hi))
+                    lo, hi = a, b
+            lines.append((y, lo, hi))
+        words = [i for r in t.rows for i in r.idx]
+        missing = []
+        for y, a, b in sorted(lines):
+            if b - a < 30 or not (any(abs(a - x) <= 4 for x in stops) and any(abs(b - x) <= 4 for x in stops)):
+                continue
+            mid = lambda i: (A.words[i].bbox[0] + A.words[i].bbox[2]) / 2
+            col = [i for i in words if a - 1 <= mid(i) <= b + 1 and i in al.a2b]
+            above = [i for i in col if A.words[i].bbox[3] <= y + 1.5]
+            below = [i for i in col if A.words[i].bbox[1] >= y - 1.5]
+            if not above or not below:
+                continue
+            i_up = max(above, key=lambda i: (A.words[i].bbox[3], A.words[i].bbox[0]))
+            i_dn = min(below, key=lambda i: (A.words[i].bbox[1], A.words[i].bbox[0]))
+            if y - A.words[i_up].bbox[3] > 40 or A.words[i_dn].bbox[1] - y > 40:
+                continue  # the nearest text found in stage is far from the line: not the two cells it parts
+            wu, wd = B.words[al.a2b[i_up]], B.words[al.a2b[i_dn]]
+            if wu.page != wd.page or wd.bbox[1] < wu.bbox[3] - 1:
+                continue  # a page break between them, or not one below the other in stage
+            left, right = min(wu.bbox[0], wd.bbox[0]) - 5, max(wu.bbox[2], wd.bbox[2]) + 5
+            if any(wu.bbox[3] - 2 <= yy <= wd.bbox[1] + 2 and s1 - s0 >= 20 and s1 > left and s0 < right
+                   for yy, s0, s1 in _edges_y(B, wu.page)):
+                continue
+            line_of = lambda d, w: " ".join(d.lines[w.line].text.split()[:6])
+            missing.append(((y, a, b), wu, wd, line_of(A, A.words[i_up]), line_of(A, A.words[i_dn])))
+        if not missing:
+            continue
+        eg = "; ".join(f"between “{up}” and “{dn}”" for _, _, _, up, dn in missing[:3])
+        pages = sorted({wu.page + 1 for _, wu, _, _, _ in missing})
+        out.append(Finding(
+            "tables", u.cfg["tables"].get("cell_border_severity", "warning"),
+            f"Table cell border missing in stage: {len(missing)} line(s) between cells of the prod table are not drawn "
+            f"in stage - {eg} (prod p.{t.page + 1} ↔ stage p.{', '.join(map(str, pages))})",
+            [Loc(t.page, (a, y - 2, b, y + 2)) for (y, a, b), *_ in missing],
+            # where the line belongs in stage: the gap between the two texts, as wide as the prod line
+            [Loc(wu.page, (min(wu.bbox[0], wd.bbox[0]) - 2, wu.bbox[3] - 1,
+                           min(min(wu.bbox[0], wd.bbox[0]) - 2 + (b - a), B.pages[wu.page].width - 12),
+                           max(wd.bbox[1] + 1, wu.bbox[3] + 3))) for (_, a, b), wu, wd, _, _ in missing],
+            {"kind": "cell-border", "lines": len(missing)}, types=["cell border"]))
     return out
 
 

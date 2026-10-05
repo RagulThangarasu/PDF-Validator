@@ -15,6 +15,7 @@ from collections import Counter, defaultdict
 import pymupdf
 
 from ..model import Doc, Finding, Loc
+from . import tables as tables_mod
 
 
 def _hex(c) -> str:
@@ -51,6 +52,17 @@ def notes(doc: Doc, labels: list[str]) -> list[dict]:
         return []
     title_re = re.compile(r"^(%s)\s*:?\s*$" % "|".join(map(re.escape, labels)), re.I)
     pdf = pymupdf.open(doc.path)
+    # a legend row ("Symbol | Item | Meaning", "Warning" named in its own cell) names the label, it is not
+    # a styled callout, even when the row itself carries a bar / fill of its own (the table's own style) -
+    # unlike a real note box nested in a cell, which makes that row noticeably taller than the table's
+    # others to fit the note's own explanatory lines; a plain label row stays the table's usual row height
+    cells = defaultdict(list)  # page -> [(table bbox, [row bbox, ...])]
+    try:
+        for tb in tables_mod.tables(doc, (0, len(doc.words))):
+            if tables_mod.is_data_table(doc, tb) or len(tb.rows) >= 3 or max(r.cells for r in tb.rows) >= 3:
+                cells[tb.page].append((pymupdf.Rect(tb.bbox), [pymupdf.Rect(r.box) for r in tb.rows]))
+    except Exception:
+        pass  # a Doc without extracted words (a test's own stand-in): no table exclusion, nothing to lose
     out = []
     for pno, pg in enumerate(pdf):
         drawings = None
@@ -60,9 +72,20 @@ def notes(doc: Doc, labels: list[str]) -> list[dict]:
                 m = title_re.match(t)
                 if not m:
                     continue
+                r = pymupdf.Rect(ln["bbox"])
+                center = r.tl + (r.width / 2, r.height / 2)
+                hosting = next(((tb_box, rows) for tb_box, rows in cells[pno] if tb_box.contains(center)), None)
+                if hosting is not None:
+                    row_boxes = hosting[1]
+                    row = next((rb for rb in row_boxes if rb.contains(center)), None)
+                    # the table's plain row height (its smallest row, not a median - half the rows can
+                    # be note-tall and skew a median upward): a row much taller than that holds a real
+                    # note box, not just this table's own ordinary row height
+                    plain_h = min((rb.height for rb in row_boxes), default=None)
+                    if row is None or plain_h is None or row.height <= 1.5 * plain_h:
+                        continue  # an ordinary row of the table (its own style, or a plain label): not a note
                 if drawings is None:
                     drawings = pg.get_drawings()
-                r = pymupdf.Rect(ln["bbox"])
                 out.append({"type": m.group(1).lower(), "page": pno, "bbox": tuple(r), "look": look_of(pg, r, drawings),
                             "key": _key_below(pg, r)})
     return out
