@@ -36,7 +36,10 @@ def test_batch_mode_builds_only_the_delivered_reports_then_the_rest_on_demand(tm
     out = tmp_path / "run"
     writer.write_all(compare(a, b, cfg), str(out), "reports", full=False)
     made = {p.name for p in out.glob("*.pdf")}
-    assert {"genuine-issues.pdf", "image-issues.pdf"} <= made and not made & set(writer.DEFERRED)
+    assert "genuine-issues.pdf" in made and not made & set(writer.DEFERRED)
+    # the image report only when the publication has image issues: a PASS (this text-only pair) has none
+    images = json.loads((out / "results.json").read_text())["summary"]["images"]
+    assert images == {"issues": 0, "result": "pass"} and "image-issues.pdf" not in made
     writer.build_deferred(out, "report.pdf")
     assert set(writer.DEFERRED) <= {p.name for p in out.glob("*.pdf")}
     assert json.loads((out / "results.json").read_text())["meta"]["deferred"] == []

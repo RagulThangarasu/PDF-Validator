@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pymupdf
 
@@ -85,6 +85,89 @@ def detect(page: pymupdf.Page) -> list:
                                                  for r in tb.rows], grid))
     except Exception:
         pass
+    try:
+        out += _ruled(page, out)
+    except Exception:
+        pass
+    return out
+
+
+def _ruled(page: pymupdf.Page, found: list) -> list:
+    """Tables drawn with horizontal rules only (“UI element | Description”: a shaded header bar and a thin
+    line under each row, no vertical lines, no cell borders) - the grid detector finds at most the header
+    bar. A stack of 3+ rules of the same width with text between them is a table: a row per band, the
+    columns where the rows' text and icons start (a start shared by 2+ rows)."""
+    drawings = page.get_drawings()
+    segs: dict = {}
+    bars = []
+    for d in drawings:
+        r = d["rect"]
+        if r.height <= 2.5 and r.width >= 20:
+            segs.setdefault(round((r.y0 + r.y1) / 4) * 2, []).append((r.x0, r.x1))
+        elif d.get("fill") is not None and 10 <= r.height <= 45 and r.width >= 150 and max(d["fill"][:3]) < 0.97:
+            bars.append(r)  # a header bar: its top and bottom edges are rules
+    rules = []  # (y, x0, x1) with touching segments joined
+    for y, xs in segs.items():
+        xs.sort()
+        lo, hi = xs[0]
+        for a0, a1 in xs[1:] + [(10 ** 6, 10 ** 6)]:
+            if a0 <= hi + 2:
+                hi = max(hi, a1)
+            else:
+                if hi - lo >= 150:
+                    rules.append((y, lo, hi))
+                lo, hi = a0, a1
+    for b in bars:
+        rules += [(b.y0, b.x0, b.x1), (b.y1, b.x0, b.x1)]
+    bar_tops = [(b.y0, b.x0, b.x1) for b in bars]
+    lines = [(pymupdf.Rect(ln["bbox"]), "".join(sp["text"] for sp in ln["spans"]).strip())
+             for blk in page.get_text("dict")["blocks"] for ln in blk.get("lines", [])]
+    lines = [(r, t) for r, t in lines if t]
+    icons = [pymupdf.Rect(i["bbox"]) for i in page.get_image_info() if pymupdf.Rect(i["bbox"]).width <= 60]
+    taken = [pymupdf.Rect(t[1]) for t in found if len(t[2]) >= 2]
+    out = []
+    groups: dict = {}
+    for y, x0, x1 in rules:
+        key = next((k for k in groups if abs(k[0] - x0) <= 4 and abs(k[1] - x1) <= 4), (x0, x1))
+        groups.setdefault(key, []).append(y)
+    for (x0, x1), ys in groups.items():
+        ys = sorted(set(round(y, 1) for y in ys))
+        stack = [ys[0]]
+        for y in ys[1:] + [None]:
+            # one table: rules at most 160 pt apart; two rules a few points apart (the table's last line, then the
+            # top line of a Tip / Note block under it) end it
+            # a header bar starts a new table: the band above it (an “Output” heading between two tables) is no row
+            new_bar = y is not None and any(abs(y - by) <= 2 and abs(bx0 - x0) <= 4 for by, bx0, _ in bar_tops)
+            if y is not None and 6 <= y - stack[-1] <= 160 and not new_bar:
+                stack.append(y)
+                continue
+            # a table starts at its header bar (rules alone also frame Tip / Note blocks)
+            starts_ok = any(abs(stack[0] - by) <= 2 and abs(bx0 - x0) <= 4 for by, bx0, _ in bar_tops)
+            if not starts_ok:
+                stack = [y] if y is not None else []
+                continue
+            bands = [(a, b) for a, b in zip(stack, stack[1:]) if b - a >= 8
+                     and any(x0 - 2 <= r.x0 and r.x1 <= x1 + 2 and a - 1 <= (r.y0 + r.y1) / 2 <= b + 1 for r, _ in lines)]
+            box = pymupdf.Rect(x0, stack[0], x1, stack[-1])
+            if len(bands) >= 2 and not any((box & t).get_area() > 0.5 * box.get_area() for t in taken):
+                # column starts: text lines / icons starting at the same x in 2+ rows
+                starts = []
+                for a, b in bands:
+                    xs_ = {round(r.x0) for r, _ in lines if x0 - 2 <= r.x0 <= x1 and a <= (r.y0 + r.y1) / 2 <= b}
+                    xs_ |= {round(r.x0) for r in icons if x0 - 2 <= r.x0 <= x1 and a <= (r.y0 + r.y1) / 2 <= b}
+                    starts.append(xs_)
+                cand = sorted({x for st in starts for x in st})
+                cols = []
+                for x in cand:
+                    n = sum(1 for st in starts if any(abs(x - z) <= 4 for z in st))
+                    if n >= max(2, 0.4 * len(bands)) and (not cols or x - cols[-1] > 30):
+                        cols.append(x)
+                if len(cols) >= 2:
+                    edges = [x0] + [c - 2 for c in cols[1:]] + [x1]
+                    grid = [(edges[k], edges[k + 1]) for k in range(len(edges) - 1)]
+                    rows = [((x0, a, x1, b), (x0, a, grid[0][1], b)) for a, b in bands]
+                    out.append((100 + len(out), (x0, stack[0], x1, stack[-1]), rows, grid))
+            stack = [y] if y is not None else []
     return out
 
 
@@ -173,11 +256,77 @@ def _tabular(doc: Doc, idx: list[int]) -> bool:
     return False
 
 
+_DIAGRAM_TOKEN = re.compile(r"^\(?[\w=+.,:/×-]{1,12}\)?$")
+
+
+def diagram_grid(texts: list[str], cells: int) -> bool:
+    """A grid that is a figure, not a data table: every cell holds one short coordinate-like code in brackets
+    (“(1.1)”, “(2.1)”, “(H+1.V=1)” - a video-wall layout drawn as boxes) or one small number (“1” … “9”, the
+    displays of a wall numbered in order); no header, no words, no sentences. Its text is the figure's artwork."""
+    texts = [t for t in texts if t.strip()]
+    if not (2 <= len(texts) <= cells + 1) or not all(_DIAGRAM_TOKEN.match(t) for t in texts):
+        return False
+    bracketed = sum(t.startswith("(") or t.endswith(")") for t in texts) >= 0.6 * len(texts)
+    numbered = len(texts) >= 3 and all(re.fullmatch(r"\d{1,2}", t) for t in texts)
+    return bracketed or numbered
+
+
+_DIAGRAMS: dict[tuple, list] = {}
+
+
+def diagram_boxes(doc: Doc, page: int) -> list[tuple]:
+    """The boxes of the page's diagram grids (see diagram_grid): detected "tables", and groups of drawn boxes
+    the table detector does not report (a single row or column of boxes). A cell's code is its line of text
+    joined (“(H” “=” “1.V” “=” “1)” is one code)."""
+    key = (doc.path, page)
+    if key in _DIAGRAMS:
+        return _DIAGRAMS[key]
+
+    def codes(box) -> tuple[list[str], int]:
+        by_line: dict = {}
+        n = 0
+        for w in doc.words:
+            if w.page == page and box[0] - 1 <= (w.bbox[0] + w.bbox[2]) / 2 <= box[2] + 1 \
+                    and box[1] - 1 <= (w.bbox[1] + w.bbox[3]) / 2 <= box[3] + 1:
+                by_line.setdefault(w.line, []).append(w.text)
+                n += 1
+        # one line may hold a row's cells side by side (“(1.1)” “(2.1)”): each bracketed code is its own
+        out = []
+        for ws in by_line.values():
+            joined = "".join(ws)
+            parts = re.findall(r"\([^()]{1,12}\)?", joined) if joined.count("(") > 1 else None
+            out += parts if parts and "".join(parts) == joined else ([joined] if len(ws) > 1 and "(" in joined else ws)
+        return out, n
+    out = []
+    for _, tbox, rows, grid in _raw(doc, page):
+        texts, _n = codes(tbox)
+        if diagram_grid(texts, max(len(texts), max(1, len(rows)) * max(1, len(grid)))):
+            out.append(tuple(tbox))
+    try:  # box groups that are no "table": a column / a row of boxes
+        pdf = _DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+        pg = pdf[page]
+        for r in pg.cluster_drawings():
+            if r.width < 30 or r.height < 20 or r.get_area() > 0.6 * pg.rect.get_area():
+                continue
+            if any(abs(r.x0 - o[0]) < 6 and abs(r.y0 - o[1]) < 6 and abs(r.x1 - o[2]) < 6 and abs(r.y1 - o[3]) < 6 for o in out):
+                continue
+            texts, _n = codes(tuple(r))
+            if diagram_grid(texts, len(texts)):
+                out.append(tuple(r))
+    except Exception:
+        pass
+    _DIAGRAMS[key] = out
+    return out
+
+
 def tables(doc: Doc, rng: tuple[int, int]) -> list[TTable]:
     pages = sorted({doc.words[i].page for i in range(*rng)})
     out = []
     for p in pages:
+        figures = diagram_boxes(doc, p)
         for t, tbox, rows, grid in _raw(doc, p):
+            if tuple(tbox) in figures:
+                continue  # a layout diagram drawn as a grid: a figure, not a table to compare row by row
             trows, taken = [], set()
             for box, first in rows:
                 # a row spans the whole table: the detector only reports the cells it can see
@@ -224,7 +373,12 @@ def _map(rows_a: list[TRow], rows_b: list[TRow], thr: float, expect) -> dict[int
             best = max(c for _, c in hits)
             e = expect(r.idx[0])
             near = lambda m: abs(rows_b[m].idx[0] - e) if e is not None else 0
-            hits.sort(key=lambda h: (h[1] < best - 0.15, near(h[0]), -h[1]))
+            # among the good candidates, the row most alike both ways first: “The touch positioning is
+            # incorrect” is contained in “The touchscreen is not responding” too (the same advice), but its
+            # own row is the one that holds nothing else
+            n_r = sum(r.bag.values())
+            dice = lambda m: 2 * sum((r.bag & rows_b[m].bag).values()) / max(1, n_r + sum(rows_b[m].bag.values()))
+            hits.sort(key=lambda h: (h[1] < best - 0.15, -round(dice(h[0]), 2), near(h[0]), -h[1]))
         out[k] = hits
     return out
 
@@ -291,6 +445,11 @@ def _missing_header(t, ta, tb, dest, rows_a, missing_row, findings, add, tcfg, t
     if len(t.rows) < 3 or (k and _continuation(ta[k - 1], t, A)):
         return
     head = t.rows[0]
+    # a note set right above the table ("Note  Actual screen and features may vary…") that the detector took
+    # in as its first row: a callout, not the table's header (stage has it as a NOTE box of its own)
+    lead = [A.words[i].text.strip() for i in head.idx[:2]]
+    if any(_CALLOUT_LABEL.match(t_) or A.words[i].norm.startswith("<label:") for t_, i in zip(lead, head.idx[:2])):
+        return
     first = min((x for x in tb if x.key in dest), key=lambda x: (x.page, x.bbox[1]))
     holders = [first]
     j = next(n for n, x in enumerate(tb) if x is first)
@@ -332,6 +491,78 @@ def _continuation(a: TTable, b: TTable, doc: Doc) -> bool:
     return b.page == a.page + 1 and a.bbox[3] > 0.7 * doc.pages[a.page].height and b.bbox[1] < 0.3 * doc.pages[b.page].height
 
 
+def _alike(a: Counter, b: Counter) -> float:
+    n = max(sum(a.values()), sum(b.values()))
+    return sum((a & b).values()) / n if n else 0.0
+
+
+def _continues(a: TTable, b: TTable, doc: Doc) -> bool:
+    """b is a running onto the next page: b starts at the top of the next page with nothing above it (a heading
+    or text above it makes it a new table) and a ends in the lower part of its page (a table broken early by
+    a picture or a keep-with-next rule still ends below the middle)."""
+    if b.page != a.page + 1 or a.bbox[3] < 0.6 * doc.pages[a.page].height or b.bbox[1] > 0.3 * doc.pages[b.page].height:
+        return False
+    return not any(w.page == b.page and w.norm and w.bbox[3] <= b.bbox[1] + 1 for w in doc.words)
+
+
+def joined(ts: list[TTable], doc: Doc) -> tuple[list[TTable], list[TRow]]:
+    """One table per table, not per page: a table running onto the next page (its part ends near the page
+    bottom, the next part starts near the top) is one table, its parts in order. The header rows a
+    continuation page repeats at its top (“Timing Support” / “PC/Video Signal Support” / “Resolution | Frame
+    Frequency …”) are pagination, not data: dropped, so they are neither compared as rows nor reported as
+    extra / missing / out of order. Returns (tables, the dropped header rows). Rows are copies (their table
+    key is the whole table's); the per-page tables stay as they are for the checks that need the pages."""
+    out: list[TTable] = []
+    dropped: list[TRow] = []
+    last = None  # the previous page part of the current table
+    for t in ts:
+        repeats = bool(out and t.rows and out[-1].rows and _alike(t.rows[0].bag, out[-1].rows[0].bag) >= 0.9)
+        at_top = last is not None and t.page == last.page + 1 and t.bbox[1] <= 0.3 * doc.pages[t.page].height and \
+            not any(w.page == t.page and w.norm and w.bbox[3] <= t.bbox[1] + 1 for w in doc.words)
+        # a table goes on over a page break when it ends low on its page - or, wherever it ends (a tall row
+        # moved on), when the next page starts with its header repeated
+        if out and last is not None and (_continues(last, t, doc) or (repeats and at_top)):
+            whole = out[-1]
+            head = [r for r in whole.rows[:6]]
+            k = 0  # leading rows of the new part that repeat the table's first rows (its header)
+            while k < len(t.rows) - 1 and k < len(head) and _alike(t.rows[k].bag, head[k].bag) >= 0.9:
+                k += 1
+            ws = [doc.words[i] for i in t.rows[0].idx if doc.words[i].norm]
+            if not k and ws and sum(w.style.weight >= 500 for w in ws) / len(ws) >= 0.9:
+                # it starts with a header row of its own (“PD3226G/ PD2730S Settings” under “PD2706QN Settings”):
+                # the next table, not this one continued
+                out.append(TTable(t.key, t.page, t.bbox, [replace(r) for r in t.rows]))
+                last = t
+                continue
+            dropped += t.rows[:k]
+            rest = [replace(r, table=whole.key) for r in t.rows[k:]]
+            # a row cut by the page break: the first row of the new part has nothing in its first cell (the
+            # label stays on the previous page) - it is the last row of the previous part, continued
+            if rest and not rest[0].own_label and whole.rows:
+                last_row, cont = whole.rows[-1], rest.pop(0)
+                whole.rows[-1] = replace(last_row, idx=last_row.idx + cont.idx, bag=last_row.bag + cont.bag,
+                                         cols=last_row.cols | cont.cols)
+            whole.rows += rest
+            last = t
+            continue
+        out.append(TTable(t.key, t.page, t.bbox, [replace(r) for r in t.rows]))
+        last = t
+    return out, dropped
+
+
+def _on_image(doc: Doc, t: "TTable") -> bool:
+    """Most of this table's own area sits on an embedded raster image: a screenshot/UI mockup the detector
+    framed as a table grid (its labels happen to line up in columns), not real table data. Raster images
+    only - not is_data_table's vector-drawing check, which also catches a table's own border/background
+    rectangle and would wrongly reject real tables too."""
+    tb_ = pymupdf.Rect(t.bbox)
+    area = tb_.get_area()
+    if not area:
+        return False
+    pic = sum((pymupdf.Rect(im.bbox) & tb_).get_area() for im in doc.images if im.page == t.page)
+    return pic >= 0.5 * area
+
+
 def check(u: Unit) -> list[Finding]:
     tcfg = u.cfg["tables"]
     if not tcfg.get("enabled", True):
@@ -339,7 +570,12 @@ def check(u: Unit) -> list[Finding]:
     thr = tcfg.get("row_match_ratio", 0.5)
     al = Aligner(u)
     A, B = u.a, u.b
-    ta, tb = tables(A, u.a_range), tables(B, u.b_range)
+    ta_pages, tb_pages = tables(A, u.a_range), tables(B, u.b_range)
+    ta_pages = [t for t in ta_pages if not _on_image(A, t)]
+    tb_pages = [t for t in tb_pages if not _on_image(B, t)]
+    # rows are compared per whole table: a table split over pages is one, its repeated header rows left out
+    ta, head_a = joined(ta_pages, A)
+    tb, head_b = joined(tb_pages, B)
     rows_a = [r for t in ta for r in t.rows]
     rows_b = [r for t in tb for r in t.rows]
     text_a, text_b = _bag(A, range(*u.a_range)), _bag(B, range(*u.b_range))
@@ -369,6 +605,13 @@ def check(u: Unit) -> list[Finding]:
         if parts and _wrapped(r, [rows_b[m] for m in parts[1:]]):
             continue  # the row's cell text continues on the next line/page in stage
         if parts:
+            # the same prod row on both sides of a page break: one finding, its stage rows together
+            same = next((f for f in findings if f.detail.get("kind") == "row split"
+                         and f.message.startswith(f"Row split in stage: prod row “{rtext(A, r)}”")), None)
+            if same is not None:
+                same.baseline.append(Loc(r.page, r.box))
+                same.candidate += [Loc(rows_b[m].page, rows_b[m].box) for m in parts]
+                continue
             add(tcfg.get("split_row_severity", "warning"),
                 f"Row split in stage: prod row “{rtext(A, r)}” is spread over {len(parts)} stage rows",
                 [Loc(r.page, r.box)], [Loc(rows_b[m].page, rows_b[m].box) for m in parts], "row split")
@@ -425,7 +668,11 @@ def check(u: Unit) -> list[Finding]:
     row_table_b = {m: rows_b[m].table for m in range(len(rows_b))}
     for t in ta:
         ks = [rows_a.index(r) for r in t.rows if id(r) not in rep_a]
-        dest = {row_table_b[fwd[k][0][0]] for k in ks if fwd[k] and id(rows_b[fwd[k][0][0]]) not in rep_b}
+        # a stage table counts as a destination only with a real share of the rows: a timing table's rows
+        # (“640x480 60 V V V”) also read the same in the next model's table, a few stray matches are no split
+        hits = Counter(row_table_b[fwd[k][0][0]] for k in ks if fwd[k] and id(rows_b[fwd[k][0][0]]) not in rep_b)
+        need = max(3, 0.2 * sum(hits.values())) if hits else 0
+        dest = {key for key, n in hits.items() if n >= need} or set(hits)
         tbag = Counter()
         for r in t.rows:
             tbag |= r.bag
@@ -457,12 +704,17 @@ def check(u: Unit) -> list[Finding]:
                 add(tcfg.get("table_split_severity", "warning"),
                     f"Table split in stage: prod table (p.{t.page + 1}, “{rtext(A, t.rows[0], 6)}”) is {len(dest)} tables in stage",
                     [Loc(t.page, t.bbox)], [Loc(x.page, x.bbox) for x in bt], "table split")
-    src_of: dict[tuple, set] = defaultdict(set)
+    src_n: dict[tuple, Counter] = defaultdict(Counter)
     for k, r in enumerate(rows_a):
         if fwd[k] and id(r) not in rep_a and id(rows_b[fwd[k][0][0]]) not in rep_b:
-            src_of[row_table_b[fwd[k][0][0]]].add(r.table)
+            src_n[row_table_b[fwd[k][0][0]]][r.table] += 1
     for t in tb:
-        srcs = src_of.get(t.key, set())
+        cnt = src_n.get(t.key, Counter())
+        need = max(3, 0.2 * sum(cnt.values())) if cnt else 0
+        # a prod table counts with a real share of the rows, or when all its rows went there (a small table
+        # of two rows merged into the one above it)
+        size = Counter(r.table for r in rows_a if id(r) not in rep_a)
+        srcs = {key for key, n in cnt.items() if n >= need or n >= size.get(key, 0) >= 1}
         if len(srcs) >= 2:
             at = [x for x in ta if x.key in srcs]
             if not all(_continuation(p, q, A) for p, q in zip(at, at[1:])):
@@ -471,6 +723,15 @@ def check(u: Unit) -> list[Finding]:
                     f"“{rtext(B, t.rows[0], 6)}”)", [Loc(x.page, x.bbox) for x in at], [Loc(t.page, t.bbox)], "tables merged")
         elif not srcs:
             mirror = [al.b2a[i] for r in t.rows for i in r.idx if i in al.b2a]
+            cols = max((r.cells for r in t.rows), default=0)
+            cell = _one_cell_box(A, mirror) if cols >= 2 and len(mirror) >= 2 else None
+            if cell is not None:
+                # prod holds the data in one cell (a one-column / one-cell table), stage splits it into columns
+                add(tcfg.get("cells_severity", "warning"),
+                    f"Cells split in stage: the data is one cell in prod (p.{cell[0] + 1}), a {cols}-column table in "
+                    f"stage (stage p.{t.page + 1}, {len(t.rows)} row(s): “{rtext(B, t.rows[0], 8)}”)",
+                    [Loc(cell[0], cell[1])], [Loc(t.page, t.bbox)], "cells split")
+                continue
             if len(mirror) >= 4 and (_tabular(A, mirror) or _in_detected_table(A, mirror)
                                      or not _rows_run_together(t.rows, al.b2a, A)):
                 continue  # already tabular in prod (columns / detected table / rows on their own lines)
@@ -503,6 +764,7 @@ def check(u: Unit) -> list[Finding]:
                     [Loc(rows_b[fwd[k][0][0]].page, rows_b[fwd[k][0][0]].box) for k in moved], "row order")
     # ---- a table running onto a new page must repeat its header there (stage)
     if tcfg.get("check_continuation_header", True):
+        tb = tb_pages  # page by page: the header each continuation page shows
         for k in range(1, len(tb)):
             prev, t = tb[k - 1], tb[k]
             if not _continuation(prev, t, B) or len(t.rows) < 1:
@@ -535,14 +797,83 @@ def check(u: Unit) -> list[Finding]:
                     f"Table header missing on continuation page: the table continues on stage p.{t.page + 1} "
                     f"without its header row “{rtext(B, head, 10)}” (first shown on p.{first.page + 1})",
                     [], [Loc(t.page, t.rows[0].box)], "missing header", a_at=None)
+    if tcfg.get("check_icons", True):
+        findings += _row_icons(u, rows_a, rows_b, fwd, target)
     findings += _overflow(u, al)
     if tcfg.get("check_borders", True):
-        findings += _borders(u, al, ta, tb)
+        findings += _borders(u, al, ta_pages, tb_pages)
     if tcfg.get("check_row_background", True):
-        findings += _row_background(u, tb)
+        findings += _row_background(u, tb_pages)
     if tcfg.get("check_header_align", True):
-        findings += _header_align(u, tb)
+        findings += _header_align(u, tb_pages)
     return findings
+
+
+def _icons_in(doc: Doc, row: TRow) -> list:
+    """The small pictures (icons, buttons) inside a table row, left to right then top to bottom."""
+    x0, y0, x1, y1 = row.box
+    ims = [im for im in doc.images if im.page == row.page and im.bbox[2] - im.bbox[0] <= 60
+           and x0 - 2 <= (im.bbox[0] + im.bbox[2]) / 2 <= x1 + 2 and y0 - 2 <= (im.bbox[1] + im.bbox[3]) / 2 <= y1 + 2]
+    # a note's own icon (the pencil before “NOTE” in a note box inside the cell) belongs to the note, not the row
+    labels = [doc.words[i] for i in row.idx if doc.words[i].norm.startswith("<label:")]
+    ims = [im for im in ims if not any(0 <= w.bbox[0] - im.bbox[2] <= 30 and w.bbox[1] < im.bbox[3] + 4
+                                       and im.bbox[1] < w.bbox[3] + 4 for w in labels)]
+    return sorted(ims, key=lambda im: (round(im.bbox[1] / 8), im.bbox[0]))
+
+
+def _row_icons(u: Unit, rows_a: list[TRow], rows_b: list[TRow], fwd: dict, target: dict) -> list[Finding]:
+    """The icons in each table row, prod against stage (rows paired one to one): an icon missing or extra in
+    stage, the icons in another order (“⌄ / ⌃” in prod, “⌃ / ⌄” in stage), and an icon set above its text in
+    stage where prod sets it beside the text in a column of its own. One finding per kind and table."""
+    from .assets import visual_distance
+    A, B = u.a, u.b
+    sev = u.cfg["tables"].get("icon_severity", "warning")
+    rtext = lambda d, r: snippet(d, r.label or r.idx, 6)
+    groups: dict[tuple, list] = defaultdict(list)
+    for k, r in enumerate(rows_a):
+        if not fwd.get(k) or len(target.get(fwd[k][0][0], [])) != 1:
+            continue
+        s = rows_b[fwd[k][0][0]]
+        ia, ib = _icons_in(A, r), _icons_in(B, s)
+        if not ia and not ib:
+            continue
+        if len(ia) != len(ib):
+            groups[(r.table, "icon missing" if len(ia) > len(ib) else "icon extra")].append((r, s, ia, ib))
+            continue
+        one_line = lambda ims: max(im.bbox[1] for im in ims) - min(im.bbox[1] for im in ims) <= \
+            0.5 * min(im.bbox[3] - im.bbox[1] for im in ims)
+        # order is compared for icons set side by side (“⌄ / ⌃”); icons inside wrapping text move with the wrap
+        if len(ia) >= 2 and one_line(ia) and one_line(ib):
+            # each prod icon's look-alike in stage: another position = another order
+            dist = [[visual_distance(A, x, B, y) for y in ib] for x in ia]
+            best = [min(range(len(ib)), key=lambda j: dist[i][j]) for i in range(len(ia))]
+            straight = sum(dist[i][i] for i in range(len(ia)))
+            swapped = sum(dist[i][best[i]] for i in range(len(ia)))
+            # swapped only when that pairing is clearly the better one (small look-alike icons are no proof)
+            if len(set(best)) == len(best) and best != list(range(len(ia))) and swapped < straight - 0.08 * len(ia):
+                groups[(r.table, "icon order")].append((r, s, ia, ib))
+        # where the icon sits against the row's first text: beside it (prod) vs on a line above it (stage)
+        word = lambda d, i: d.words[i].norm and any(c.isalnum() for c in d.words[i].text)
+        la = [A.words[i] for i in r.idx if word(A, i)]  # the row's first real word (“/” between two icons is not)
+        lb = [B.words[i] for i in s.idx if word(B, i)]
+        if la and lb:
+            beside = lambda im, w: im.bbox[2] <= w.bbox[0] + 2 and im.bbox[1] < w.bbox[3] and w.bbox[1] < im.bbox[3]
+            above = lambda im, w: im.bbox[3] <= w.bbox[1] + 2 and abs(im.bbox[0] - w.bbox[0]) <= 40
+            if beside(ia[-1], la[0]) and above(ib[-1], lb[0]):
+                groups[(r.table, "icon above text")].append((r, s, ia, ib))
+    out = []
+    for (_, kind), items in groups.items():
+        eg = "; ".join(f"“{rtext(A, r)}”" for r, *_ in items[:4])
+        msg = {"icon missing": f"Icon missing in a table row in stage: {len(items)} row(s) show fewer icons than in prod (e.g. {eg})",
+               "icon extra": f"Extra icon in a table row in stage: {len(items)} row(s) show more icons than in prod (e.g. {eg})",
+               "icon order": f"Icons in another order in stage: in {len(items)} table row(s) the icons are swapped (e.g. {eg})",
+               "icon above text": f"Icon not beside its text in stage: in {len(items)} table row(s) the icon sits above the "
+                                  f"text in the same cell, where prod sets it beside the text in a column of its own (e.g. {eg})"}[kind]
+        out.append(Finding("tables", sev, msg,
+                           [Loc(im.page, im.bbox) for _, _, ia, _ in items for im in ia] or [Loc(r.page, r.box) for r, *_ in items],
+                           [Loc(im.page, im.bbox) for _, _, _, ib in items for im in ib] or [Loc(s.page, s.box) for _, s, *_ in items],
+                           {"kind": kind, "rows": len(items)}, types=[kind]))
+    return out
 
 
 def _is_header_bar(doc: Doc, row: TRow) -> bool:
@@ -1071,3 +1402,32 @@ def _overflow(u: Unit, al: Aligner) -> list[Finding]:
                     {"kind": "overflow", "text": text},
                     baseline_at=None if idx_a else al.loc_in_a(idx_b[0]), types=["text outside table border"]))
     return out
+
+
+def _one_cell_box(doc: Doc, idx: list[int]) -> tuple | None:
+    """(page, box) of one drawn cell holding all the words idx: a stroked rectangle (or four rules) around
+    them, with no column rule through them - the prod side of “one cell in prod, columns in stage”."""
+    ws = [doc.words[i] for i in idx]
+    if not ws or len({w.page for w in ws}) != 1:
+        return None
+    page = ws[0].page
+    x0, y0 = min(w.bbox[0] for w in ws), min(w.bbox[1] for w in ws)
+    x1, y1 = max(w.bbox[2] for w in ws), max(w.bbox[3] for w in ws)
+    pdf = (_DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path)))
+    best = None
+    rules = []
+    for d in pdf[page].get_drawings():
+        r = d["rect"]
+        if d.get("color") is not None and r.width > 2 and r.height > 2 and \
+                r.x0 <= x0 + 1 and r.y0 <= y0 + 1 and r.x1 >= x1 - 1 and r.y1 >= y1 - 1 and r.width < 0.95 * pdf[page].rect.width:
+            if best is None or r.get_area() < best.get_area():
+                best = pymupdf.Rect(r)
+        for it in d["items"]:
+            if it[0] == "l" and abs(it[1].x - it[2].x) < 0.5:  # a vertical rule
+                rules.append((it[1].x, min(it[1].y, it[2].y), max(it[1].y, it[2].y)))
+    if best is None:
+        return None
+    # a column rule inside the box crossing the words: prod has columns too, it is not one cell
+    if any(x0 + 2 < x < x1 - 2 and ya < y1 and yb > y0 for x, ya, yb in rules):
+        return None
+    return page, tuple(best)

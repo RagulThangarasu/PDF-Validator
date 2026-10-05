@@ -195,10 +195,10 @@ class Jobs:
             (run_dir / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
             writer.write_genuine_csv(result, run_dir / "genuine-issues.csv")
             writer.write_viewer(result, run_dir)
-            pdf_report.build(result, run_dir, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
+            writer.write_pdf_report(result, run_dir)
             if (run_dir / "css-issues.pdf").exists():  # a batch run builds it when first opened
                 pdf_report.build(result, run_dir, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
-            pdf_report.build(result, run_dir, options=pdf_report.IMAGE_REPORT, filename="image-issues.pdf")
+            writer.write_image_report(result, run_dir)
             if (run_dir / "report.pdf").exists():
                 from ..report import shots as shotmod
                 sev = shotmod.SEVERITIES.get(result["meta"].get("screenshots", "all")) or None
@@ -358,6 +358,7 @@ class Jobs:
                 # a batch run builds only what the batch delivers (genuine-issues + image report, with their
                 # screenshots); the full report and the CSS report are built when first opened
                 batch = bool(job.get("batch"))
+                result["meta"]["name"] = job["name"]  # the product / publication: named in every report
                 writer.write_all(result, str(self.path(jid)), "reports" if batch else job["options"].get("screenshots", "all"),
                                  progress=lambda f, m: self.update(jid, progress=round(0.45 + 0.55 * f, 3), message=m),
                                  full=not batch)
@@ -384,8 +385,9 @@ def _batches(jobs: Jobs) -> list[dict]:
 
 
 def _batch_zip(jobs: Jobs, bid: str) -> Path:
-    """One zip with the PDF report (genuine issues) and the image report of every finished run of the batch,
-    one folder per publication."""
+    """One zip with the PDF report (genuine issues) and the image report of every finished product of the batch,
+    named after the product: "<product> - PDF report.pdf", "<product> - Image report.pdf". A product with no
+    genuine issues has no PDF report, one with no image issues has no image report - never an empty "0 issues" file."""
     import tempfile
     import zipfile
     runs = [j for j in jobs.list() if j.get("batch") == bid]
@@ -394,30 +396,30 @@ def _batch_zip(jobs: Jobs, bid: str) -> Path:
     fd, tmp = tempfile.mkstemp(suffix=".zip", dir=jobs.dir)
     os.close(fd)
     used: set[str] = set()
-    lines = ["Publication\tStatus\tGenuine issues\tRun"]
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
         for j in sorted(runs, key=lambda j: j["name"].lower()):
-            folder = re.sub(r"[^\w .()&+-]+", "_", j["name"]).strip() or j["id"]
-            while folder in used:
-                folder += "_"
-            used.add(folder)
-            gen = ((j.get("summary") or {}).get("genuine") or {}).get("total", "")
-            lines.append(f"{j['name']}\t{j['status']}\t{gen}\t{j['id']}")
             if j["status"] != "done":
                 continue
             run_dir = jobs.path(j["id"])
+            src = run_dir / "genuine-issues.pdf"
             img = run_dir / "image-issues.pdf"
-            if not img.exists() and (run_dir / "results.json").exists():  # a run made before the image report existed
-                from ..report import pdf_report as _pr
-                _pr.build(json.loads((run_dir / "results.json").read_text()), run_dir, options=_pr.IMAGE_REPORT,
-                          filename="image-issues.pdf")
-            for src, name in (("genuine-issues.pdf", "pdf-report"), ("image-issues.pdf", "image-report")):
-                if (run_dir / src).exists():
-                    z.write(run_dir / src, f"{folder}/{name}-{j['id']}.pdf")
-        z.writestr("summary.tsv", "\n".join(lines) + "\n")
-        pdf, csv_ = _batch_consolidated(jobs, bid)
-        z.write(pdf, "consolidated-report.pdf")
-        z.write(csv_, "consolidated-report.csv")
+            # the image report only for a publication whose images FAIL (a PASS has none); built here for a run
+            # made before the image report / its verdict existed
+            if (run_dir / "results.json").exists() and (not img.exists() or "images" not in (j.get("summary") or {})):
+                try:
+                    writer.write_image_report(json.loads((run_dir / "results.json").read_text()), run_dir)
+                except Exception:
+                    traceback.print_exc()
+            if not src.exists() and not img.exists():
+                continue  # nothing to report for this product: a clean pass on both content and images
+            name = re.sub(r"[^\w .()&+-]+", "_", j["name"]).strip() or j["id"]
+            while name in used:
+                name += "_"
+            used.add(name)
+            if src.exists():
+                z.write(src, f"{name} - PDF report.pdf")
+            if img.exists():
+                z.write(img, f"{name} - Image report.pdf")
     return Path(tmp)
 
 
@@ -584,6 +586,14 @@ def make_handler(jobs: Jobs, root: Path):
                     except KeyError:
                         return self._json({"error": "unknown batch"}, 404)
                     return self._file(pdf if m[2] == "pdf" else csv_, download=f"{m[1]}-consolidated.{m[2]}")
+                if m := re.fullmatch(r"/api/batches/(batch-[\w-]+)/image-consolidated\.(pdf|csv)", p):
+                    # publication | image issues PASS / FAIL (a PASS has no image report)
+                    from ..report import batch_report
+                    runs = [j for j in jobs.list() if j.get("batch") == m[1]]
+                    if not runs:
+                        return self._json({"error": "unknown batch"}, 404)
+                    pdf, csv_ = batch_report.build_images(m[1], runs, jobs.dir, jobs.dir / "_batches")
+                    return self._file(pdf if m[2] == "pdf" else csv_, download=f"{m[1]}-image-consolidated.{m[2]}")
                 if m := re.fullmatch(r"/api/batches/(batch-[\w-]+)/reports\.zip", p):
                     path = _batch_zip(jobs, m[1])
                     try:
@@ -623,9 +633,8 @@ def make_handler(jobs: Jobs, root: Path):
                         _sp.build(json.loads((base / "results.json").read_text()), base)
                     if target.name == "image-issues.pdf" and not target.exists() and (base / "results.json").exists():
                         # a run finished before the image report existed: build it on first download
-                        from ..report import pdf_report as _pr
-                        _pr.build(json.loads((base / "results.json").read_text()), base,
-                                  options=_pr.IMAGE_REPORT, filename="image-issues.pdf")
+                        # (nothing is built when its images PASS: the file stays missing -> 404)
+                        writer.write_image_report(json.loads((base / "results.json").read_text()), base)
                     return self._file(target, download=dl)
                 return self._json({"error": "not found"}, 404)
             except (KeyError, FileNotFoundError):
@@ -825,11 +834,31 @@ class Pairs:
     <Brand>/<Category>/<product>/) with its prod PDF from the prod library. A stage map is paired through the
     migration Excel (the map's model row -> its file, e.g. GW2291_EN_V0 = the prod archive), else by name."""
 
-    def __init__(self, stage_dir: Path):
-        self.dir = stage_dir
+    def __init__(self, stage_dir: Path, flat_dir: Path | None = None):
+        self.aem_dir, self.flat_dir = stage_dir, flat_dir
+
+    @property
+    def dir(self) -> Path:
+        """Where the stage PDFs are read from: [ui] stage_dir, else stage-pdf/ when it holds PDFs (stage PDFs
+        saved by hand, named by their Document Title), else the AEM downloads in aem-map-pdfs/."""
+        want = (engine.load_config().get("ui") or {}).get("stage_dir") or ""
+        if want:
+            p = Path(want)
+            return p if p.is_absolute() else PROJECT / p
+        if self.flat_dir is not None and self.flat_dir.is_dir() and any(self.flat_dir.glob("*.pdf")):
+            return self.flat_dir
+        return self.aem_dir
 
     def stage_files(self) -> list[dict]:
         out = []
+        if self.dir.is_dir() and not any(p.is_dir() and p.name not in ("other-outputs",) for p in self.dir.iterdir()):
+            # a flat folder of stage PDFs named by title (“Monitor GW90P Series user manual.pdf”)
+            for p in sorted(self.dir.glob("*.pdf")):
+                product = re.sub(r"\s*\(\d+\)$", "", p.stem)
+                out.append({"path": str(p.resolve()), "name": p.name, "lang": "en", "title": product,
+                            "product": re.sub(r"\s+user\s+manual$", "", product, flags=re.I),
+                            "folder": self.dir.name, "size": p.stat().st_size})
+            return out
         for p in sorted(self.dir.rglob("*.pdf")) if self.dir.is_dir() else []:
             rel = p.relative_to(self.dir)
             if "other-outputs" in rel.parts or len(rel.parts) < 3:
@@ -852,8 +881,11 @@ class Pairs:
         except Exception:
             rows = []
         stage = self.stage_files()
+        by_title = {metadata._norm(r.get("exp_doc", "")): r for r in rows if r.get("exp_doc")}
         for s in stage:
-            row = metadata.match(s["product"], s["product"], rows) if rows else None
+            # a file named by its Document Title is that sheet row; else the map / folder name
+            row = (by_title.get(metadata._norm(s.get("title", ""))) if s.get("title") else None) or \
+                (metadata.match(s["product"], s["product"], rows) if rows else None)
             keys = [k for k in ((row or {}).get("file"), (row or {}).get("model"), s["product"]) if k]
             hit, via = None, ""
             for n_k, k in enumerate(keys):
@@ -868,7 +900,7 @@ class Pairs:
         return {"stage": stage, "prod": prod, "stage_dir": str(self.dir)}
 
 
-PAIRS = Pairs(PROJECT / "aem-map-pdfs")
+PAIRS = Pairs(PROJECT / "aem-map-pdfs", PROJECT / "stage-pdf")
 
 
 class MetadataCheck:

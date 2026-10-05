@@ -795,11 +795,14 @@ async function viewRuns() {
       <div class="bar" style="width:160px"><i style="width:${100 * (b.done + b.error) / b.runs}%"></i></div>
       <span class="spacer"></span>
       ${b.done ? `<a class="btn ${left ? '' : 'primary'} sm" href="/api/batches/${b.id}/reports.zip"
-          title="PDF report + image report of every finished publication, one folder each">⬇ Download reports (zip)${left ? ` — ${b.done} of ${b.runs} ready` : ''}</a>`
+          title="The PDF report and the image report of every finished product">⬇ Download reports (zip)${left ? ` — ${b.done} of ${b.runs} ready` : ''}</a>`
         : '<span class="small muted">reports appear here as runs finish</span>'}
       ${b.done ? `<a class="btn sm" href="/api/batches/${b.id}/consolidated.pdf" target="_blank" rel="noopener"
           title="Every product with its content match %, section results and issue counts">📊 Consolidated report</a>
-        <a class="btn sm" href="/api/batches/${b.id}/consolidated.csv" title="The same as a spreadsheet">CSV</a>` : ''}</div></div>`;
+        <a class="btn sm" href="/api/batches/${b.id}/consolidated.csv" title="The same as a spreadsheet">CSV</a>
+        <a class="btn sm" href="/api/batches/${b.id}/image-consolidated.pdf" target="_blank" rel="noopener"
+          title="Every publication with its image result: PASS (no image issue, no image report) or FAIL (image issues, see its image report)">🖼 Image consolidated report</a>
+        <a class="btn sm" href="/api/batches/${b.id}/image-consolidated.csv" title="The same as a spreadsheet">CSV</a>` : ''}</div></div>`;
   }).join('');
   const active = runs.filter(r => r.status === 'running' || r.status === 'queued').length;
   app.innerHTML = `<div class="row"><h1>Runs</h1><span class="spacer"></span>
@@ -823,10 +826,16 @@ async function viewRuns() {
           <td class="n">${s?.css?.issues ?? ''}</td>
           <td class="n">${s ? `${s.fail} / ${s.warn} / ${s.pass}` : ''}</td>
           <td style="white-space:nowrap">${r.status === 'running' || r.status === 'queued' ? `<button class="btn sm" data-stop="${r.id}" title="Stop this run">■ Stop</button>` : ''}
+            ${r.status === 'done' ? (() => { const nm = encodeURIComponent((r.name || r.id).replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, ''));
+              return `<a class="btn sm" data-dl href="/runs/${r.id}/genuine-issues.pdf?download=pdf-report-${nm}.pdf" title="Download this run's PDF report">⬇ PDF</a>
+            ${s && s.images && s.images.result === 'pass'
+                ? `<span class="small" style="color:#16a34a" title="No image issue: no image report for this publication">Images ✓ PASS</span>`
+                : `<a class="btn sm" data-dl href="/runs/${r.id}/image-issues.pdf?download=image-report-${nm}.pdf" title="Download this run's image report (picture issues only)">⬇ Images${s && s.images ? ` — FAIL (${s.images.issues})` : ''}</a>`}`; })() : ''}
             <button class="btn sm" data-rerun="${r.id}" title="Run again with the same inputs">↻ Rerun</button>
             <button class="btn sm danger" data-del="${r.id}" title="Delete run">Delete</button></td></tr>`;
       }).join('')}</tbody></table>` : `<div class="empty">No runs yet. <a href="#/new">Start a comparison</a>.</div>`}</div>`;
   app.onclick = async e => {
+    if (e.target.closest('a[data-dl]')) { e.stopPropagation(); return; }  // a report download: do not open the run
     if (e.target.closest('[data-stopall]')) {
       if (confirm('Stop every running and queued run?')) { await api('/api/runs/stop-all', { method: 'POST' }); viewRuns(); }
       return;
@@ -936,10 +945,11 @@ async function viewRun(id, qs) {
         ${(() => { const n = d.sections.reduce((k, x) => k + x.findings.filter(f => f.category === 'css' && !f.genuine).length, 0);
                    return `<a class="btn" href="${base}css-issues.pdf?download=${encodeURIComponent('css-report-' + id + '.pdf')}"
             title="Fonts, sizes, colours, line heights and design-spec styles not in the PDF report, with screenshots">⬇ CSS report (${n})</a>`; })()}
-        ${(() => { const n = d.sections.reduce((k, x) => k + x.findings.filter(f => f.check === 'assets'
-                     || (f.types || []).some(t => ['missing image label', 'label in picture', 'text in image'].includes(t))).length, 0);
-                   return `<a class="btn" href="${base}image-issues.pdf?download=${encodeURIComponent('image-report-' + id + '.pdf')}"
-            title="Only picture issues: missing / changed / smaller or bigger / pixelated / blurred pictures, and picture labels missing in stage, with screenshots">⬇ Image report (${n})</a>`; })()}
+        ${(() => { const im = (d.summary || {}).images;  // the image verdict: PASS = no image issue, no image report
+                   if (im && im.result === 'pass')
+                     return `<span class="btn" style="color:#16a34a;cursor:default" title="No image issue: no image report for this publication">Images ✓ PASS</span>`;
+                   return `<a class="btn ${im ? 'danger' : ''}" href="${base}image-issues.pdf?download=${encodeURIComponent(`${(R.job.name || id).replace(/[^\w .()&+-]+/g, '_').trim()} - Image report.pdf`)}"
+            title="Only picture issues, each shown as the prod and the stage picture side by side">⬇ Image report${im ? ` — FAIL (${im.issues})` : ''}</a>`; })()}
         <a class="btn" href="${base}side-by-side.pdf?download=${encodeURIComponent('side-by-side-report-' + id + '.pdf')}"
            title="Page by page: each prod page beside the matching stage page, the issues boxed and numbered on both, with their full description">⬇ Side-by-side report</a>
       </div></div>
@@ -1095,7 +1105,7 @@ function renderSectionList(filter) {
     const n = all.filter(x => x.s.id === s.id && matches(x, 'sec')).length;
     return `<button class="nav sec ${R.section === s.id ? 'on' : ''}" data-sec="${s.id}" title="${esc(s.title)}">
       <span class="dot st-${s.status}"></span><span class="t">${esc(s.title)}</span>
-      <span class="pct ${s.content.status}" title="content match">${s.content.match_pct.toFixed(0)}%</span><span class="n">${n || ''}</span></button>`;
+      <span class="pct ${s.content.status}" title="score: 100% − 0.1% per issue in the PDF report">${s.content.match_pct.toFixed(1)}%</span><span class="n">${n || ''}</span></button>`;
   }).join('');
 }
 

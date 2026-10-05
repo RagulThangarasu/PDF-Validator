@@ -159,18 +159,20 @@ def locate(text: str, path: str, page: int, bbox: tuple, dpi: int = 600) -> list
         return []
     # each OCR word, and 2-3 neighbours on one line joined (OCR splits a word: “Sup” “port.BenQ.com”)
     same_line = lambda a, b: min(a[3], b[3]) - max(a[1], b[1]) > 0.5 * min(a[3] - a[1], b[3] - b[1]) and 0 <= b[0] - a[2] < 8
-    cands = [(_key(t), box) for t, box in words]
+    cands = [(_key(t), box, False) for t, box in words]
     for i in range(len(words)):
         key, box = _key(words[i][0]), words[i][1]
         for j in range(i + 1, min(len(words), i + 3)):
             if not same_line(box, words[j][1]):
                 break
             key, box = key + _key(words[j][0]), (box[0], min(box[1], words[j][1][1]), words[j][1][2], max(box[3], words[j][1][3]))
-            cands.append((key, box))
+            cands.append((key, box, True))
     out = []
     for w in want:
         tol = len(w) // 4 or (1 if len(w) >= 4 else 0)
-        hit = [b for k, b in cands if k and (k == w or (len(w) >= 3 and _near(w, k, tol) and abs(len(k) - len(w)) <= tol))]
+        # joined words only for a long word (a web address, a product name): “30” + “00” is not “3000”
+        hit = [b for k, b, joined in cands if k and (not joined or len(w) >= 6)
+               and (k == w or (len(w) >= 3 and _near(w, k, tol) and abs(len(k) - len(w)) <= tol))]
         out += hit[:1]
     return out if len(out) >= max(1, (len(want) + 1) // 2) else []
 

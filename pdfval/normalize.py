@@ -4,8 +4,10 @@ from __future__ import annotations
 import re
 import unicodedata
 
-# Always: invisible / rendering-only characters (non-breaking space, soft hyphen, zero-width space).
-_INVISIBLE = str.maketrans({"\u00a0": " ", "\u00ad": "", "\u200b": ""})
+# Always: invisible / rendering-only characters (non-breaking space, soft hyphen, zero-width space), and
+# the hyphens that print exactly like "-": U+2010 hyphen, U+2011 non-breaking hyphen (AEM's “low‑speed”
+# vs InDesign's “low-speed” is the same text). En / em dashes are another mark: only with normalize_typography.
+_INVISIBLE = str.maketrans({"\u00a0": " ", "\u00ad": "", "\u200b": "", "\u2010": "-", "\u2011": "-"})
 # Only when content.normalize_typography = true: curly quotes and dash variants.
 _TYPOGRAPHY = str.maketrans({
     "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
@@ -118,11 +120,25 @@ def fold_xref_pages(doc) -> int:
         prev, on, page, num = ws[k - 1], ws[k], ws[k + 1], ws[k + 2]
         if not (on.norm and page.norm and num.norm) or on.norm.lower() != "on" or page.norm.lower() != "page":
             continue
-        m = re.fullmatch(r"(\d{1,4})([.,;:)]*)", num.norm)
+        # "20for" / "58and": stage sets the page number against the next word ("on page 20for more information")
+        m = re.fullmatch(r"(\d{1,4})([.,;:)]*)([A-Za-z][\w.,;:)]*)?", num.norm)
         if not m or not prev.norm:
             continue
         prev.norm += m.group(2)
-        on.norm = page.norm = num.norm = ""
+        on.norm = page.norm = ""
+        num.norm = m.group(3) or ""   # the glued word stays in the comparison ("for")
+        n += 1
+    # "(See page 12)" / "see page 12 - 14": the same reference written without a title - the page number is
+    # the template's as well; "see" stays
+    for k in range(1, len(ws) - 1):
+        see, page, num = ws[k - 1], ws[k], ws[k + 1]
+        if not (page.norm and num.norm) or page.norm.lower() != "page" or see.norm.lower().lstrip("(") not in ("see", "to"):
+            continue
+        m = re.fullmatch(r"(\d{1,4})([.,;:)]*)", num.norm)
+        if not m:
+            continue
+        see.norm += m.group(2)
+        page.norm = num.norm = ""
         n += 1
     return n
 

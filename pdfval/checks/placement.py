@@ -31,6 +31,9 @@ from . import Aligner, Unit, locs, snippet
 from .assets import alignment, icon_max
 
 
+INLINE_MAX_LINES = 2.5  # a graphic taller than this many text lines is a figure, not an inline graphic
+
+
 def relation(doc: Doc, rng: tuple[int, int], im: Image) -> tuple[str, int | None, int | None]:
     """('inline', word before, word after) or ('block', word above, word below).
 
@@ -54,8 +57,12 @@ def relation(doc: Doc, rng: tuple[int, int], im: Image) -> tuple[str, int | None
     b = max(before, key=lambda i: doc.words[i].bbox[2]) if before else None
     a = min(after, key=lambda i: doc.words[i].bbox[0]) if after else None
     near = lambda i, gap: i is not None and gap <= 1.5 * doc.words[i].style.size
-    if near(b, x0 - (doc.words[b].bbox[2] if b is not None else 0)) or \
-            near(a, (doc.words[a].bbox[0] if a is not None else 0) - x1):
+    # an inline graphic is icon-sized (a key, a button glyph in a sentence); a picture taller than a few text
+    # lines standing beside a list or paragraph is a figure next to the text, never part of its line
+    line_h = max((doc.words[i].style.size for i in same_line), default=10) * 1.3
+    tall = (y1 - y0) > INLINE_MAX_LINES * line_h
+    if not tall and (near(b, x0 - (doc.words[b].bbox[2] if b is not None else 0)) or
+                     near(a, (doc.words[a].bbox[0] if a is not None else 0) - x1)):
         return ("inline", b, a)
     above = [i for i in words if (doc.words[i].page, doc.words[i].bbox[3]) <= (im.page, y0 + 2)]
     below = [i for i in words if (doc.words[i].page, doc.words[i].bbox[1]) >= (im.page, y1 - 2)]
@@ -126,7 +133,10 @@ def check(u: Unit) -> list[Finding]:
                 msg = (f"Graphic moved into a text line: in prod it is on its own line below {_word(u.a, prev_a)}; "
                        f"in stage it sits inline {pos}")
         elif not same_neighbours and pa is not None and pb is not None and al.a2b[pa] != pb \
-                and not (kind_a != "inline" and icon_max(u.a, x, u.cfg["assets"]) and icon_max(u.b, y, u.cfg["assets"])):
+                and not (kind_a != "inline" and icon_max(u.a, x, u.cfg["assets"]) and icon_max(u.b, y, u.cfg["assets"])) \
+                and not (kind_a != "inline" and (_beside_text(u.a, x) or _beside_text(u.b, y))):
+            # (a figure with text beside it - picture left, list right - has no single "text before it": each
+            # PDF reads the two columns in its own order, so the word before it is not a placement difference)
             # (a small icon on its own - a status LED in a table cell - is not judged by the text before it:
             # rows of identical icons pair with the wrong row. An icon moving into / out of a sentence is.)
             where = "inline after" if kind_a == "inline" else "placed after"
@@ -141,6 +151,22 @@ def check(u: Unit) -> list[Finding]:
                 types=["placement"]))
     findings += _containment(u, al, sev, in_table)
     return findings
+
+
+def _beside_text(doc: Doc, im) -> bool:
+    """Text runs beside the picture (left or right of it, level with it): a figure set next to a list or
+    paragraph, not between paragraphs."""
+    x0, y0, x1, y1 = im.bbox
+    hits = 0
+    for ln in doc.lines:
+        if ln.page != im.page:
+            continue
+        cy = (ln.bbox[1] + ln.bbox[3]) / 2
+        if y0 <= cy <= y1 and (ln.bbox[0] >= x1 - 2 or ln.bbox[2] <= x0 + 2):
+            hits += 1
+            if hits >= 2:
+                return True
+    return False
 
 
 @lru_cache(maxsize=64)

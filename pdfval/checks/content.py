@@ -64,14 +64,126 @@ def _wrap_only(u: Unit, a_idx: list[int], b_idx: list[int]) -> bool:
             off += len(t)
             # a hyphen / slash / dash, or a soft hyphen ("But\xad" | "ton": the PDF shows "But-" only where the
             # line breaks; normalising drops it from the word)
-            out[off] = doc.words[i].line != doc.words[idx[k + 1]].line and len(t) > 1 and \
-                (t[-1] in "-/–—" or doc.words[i].text.endswith("\u00ad"))
+            nxt = doc.words[idx[k + 1]]
+            # ... or no hyphen at all: a word too long for its narrow table cell, broken where the cell ends
+            # ("Connec" | "tor", "Recept" | "acle") - the piece is the only word on its line and the next line goes
+            # on in lower case. Two words of a sentence that lost their space ("your" | "laptop") share their
+            # lines with other words: still a difference.
+            # (the same when the cell's line also holds the next cell's text: the rest of the word then sits right
+            # below its first piece - in a sentence a wrap runs from the line's right end to the next line's left start)
+            w0 = doc.words[i]
+            over = min(w0.bbox[2], nxt.bbox[2]) - max(w0.bbox[0], nxt.bbox[0])
+            below = w0.page == nxt.page and 0 < nxt.bbox[1] - w0.bbox[1] <= 2.5 * max(w0.bbox[3] - w0.bbox[1], 1) and \
+                over >= 0.5 * min(w0.bbox[2] - w0.bbox[0], nxt.bbox[2] - nxt.bbox[0])
+            forced = t[-1:].isalpha() and (nxt.norm[:1].islower()) and \
+                (len(doc.lines[w0.line].text.split()) == 1 or below)
+            out[off] = doc.words[i].line != nxt.line and len(t) > 1 and \
+                (t[-1] in "-/–—" or doc.words[i].text.endswith("\u00ad") or forced)
         return out
     if "".join(u.a.words[i].norm for i in a_idx).replace(" ", "") != "".join(u.b.words[j].norm for j in b_idx).replace(" ", ""):
         return False
     ba, bb = bounds(u.a, a_idx), bounds(u.b, b_idx)
     diff = [ba[o] for o in ba.keys() - bb.keys()] + [bb[o] for o in bb.keys() - ba.keys()]
     return bool(diff) and all(diff)
+
+
+def _code_wrap(u: Unit, a_idx: list[int], b_idx: list[int]) -> bool:
+    """A run of model / part codes ("T420/T650/TL550/TL650/" - letters, digits, slashes, no lower-case
+    prose) can wrap to a new line anywhere a narrow table cell forces it: unlike a prose word, there is
+    no hyphen/slash marking the split, and either side may pick up a stray hyphen at the break that is
+    not part of the code. Same letters and digits once the break's own space/hyphen is taken out -
+    layout, not content."""
+    raw_a = "".join(u.a.words[i].text or "" for i in a_idx)
+    raw_b = "".join(u.b.words[j].text or "" for j in b_idx)
+    if not raw_a or not raw_b or re.search(r"[a-z]", raw_a) or re.search(r"[a-z]", raw_b):
+        return False  # real lower-case prose: a dropped/added space there is a genuine content diff
+    strip = lambda s: re.sub(r"[-‐‑–—\s]", "", s)
+    na = strip("".join(u.a.words[i].norm or "" for i in a_idx))
+    nb = strip("".join(u.b.words[j].norm or "" for j in b_idx))
+    return bool(na) and na == nb
+
+
+def _wrapped_apart(u: Unit, a_idx: list[int], b_idx: list[int]):
+    """A changed block where most of the text is the same characters, only cut into words at other places
+    because a line breaks elsewhere (“RP700/R” | “P701/RP552” in a narrow cell vs “RP700/RP701/” | “RP552/”),
+    with a real difference somewhere inside: (prod words, stage words) that hold the difference - the rest
+    is the same text on another line. None when the block is not of that kind: the two sides are unrelated,
+    nothing is cut differently, or a cut that only one side has is not a line break (then a space is
+    missing or extra, which is a difference of its own)."""
+    def flat(doc, idx):
+        text, owner, ends = "", [], {}
+        for k, i in enumerate(idx):
+            t = re.sub(r"\s+", "", doc.words[i].norm or "")
+            text += t
+            owner += [k] * len(t)
+            if k + 1 < len(idx):
+                ends[len(text)] = k
+        return text, owner, ends
+    A, wa, ea = flat(u.a, a_idx)
+    B, wb, eb = flat(u.b, b_idx)
+    if A == B or min(len(A), len(B)) < 8 or max(len(A), len(B)) > 4000:
+        return None
+    sm = SequenceMatcher(None, A, B, autojunk=False)
+    if sm.ratio() < 0.6:
+        return None
+    da, db, to_a = set(), set(), {}
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            to_a.update((j1 + t, i1 + t) for t in range(i2 - i1))
+            continue
+        da.update(wa[i1:i2])
+        db.update(wb[j1:j2])
+        # text only one side has: the other side's word it would sit in / next to does not change
+    # a place where only one side ends a word must be that side's line break, after a hyphen / slash or inside
+    # a model code (no lower-case prose) - anywhere else the break stands for a space
+    def is_wrap(doc, idx, k) -> bool:
+        w, nxt = doc.words[idx[k]], doc.words[idx[k + 1]]
+        t = re.sub(r"\s+", "", w.norm or "")
+        code = not re.search(r"[a-z]", (w.text or "") + (nxt.text or ""))
+        return w.line != nxt.line and len(t) > 1 and (t[-1] in "-/–—" or (w.text or "").endswith("\u00ad") or code)
+    cuts_a = {o: k for o, k in ea.items() if k not in da and k + 1 not in da}
+    cuts_b = {}
+    for o, k in eb.items():
+        if k in db or k + 1 in db or o not in to_a or o - 1 not in to_a or to_a[o] != to_a[o - 1] + 1:
+            continue
+        cuts_b[to_a[o]] = k
+    differ = [is_wrap(u.a, a_idx, k) for o, k in cuts_a.items() if o not in cuts_b] + \
+        [is_wrap(u.b, b_idx, k) for o, k in cuts_b.items() if o not in cuts_a]
+    if not differ or not all(differ) or not (da or db):
+        return None
+    if len(da) == len(a_idx) and len(db) == len(b_idx):
+        return None
+    return [a_idx[k] for k in sorted(da)], [b_idx[k] for k in sorted(db)]
+
+
+def _break_hyphen_only(u: Unit, a_idx: list[int], b_idx: list[int]) -> bool:
+    """The only difference is a hyphen where one side breaks a word at the end of a line: “(Insta-” |
+    “Show™)” in a narrow table cell vs “(InstaShow™)” on one line (either side). Each side's
+    line-end hyphens followed by the word's rest on the next line are taken out; the texts must then
+    be the same, and at least one such hyphen must have made the difference (a hyphen inside a line,
+    “Insta-Show” vs “InstaShow”, stays a punctuation difference)."""
+    def text(doc, idx) -> tuple[str, int]:
+        out, n = [], 0
+        for k, i in enumerate(idx):
+            t = re.sub(r"\s+", "", doc.words[i].norm)
+            nxt = idx[k + 1] if k + 1 < len(idx) else None
+            if nxt is not None and doc.words[nxt].line != doc.words[i].line and len(t) > 1 \
+                    and t[-1] in "-‐‑" and t[-2].isalnum():
+                t, n = t[:-1], n + 1
+            else:
+                # the extractor already joined the word over the line break (“equip-” | “ment.” read as one
+                # “components/equip-ment.”): the hyphen where the printed word ended is the break's
+                raw = re.sub(r"\s+", "", doc.words[i].text)
+                j = i + 1
+                if len(raw) > 1 and raw[-1] in "-‐‑" and raw[-2].isalnum() and j < len(doc.words) \
+                        and doc.words[j].line != doc.words[i].line and not doc.words[j].norm \
+                        and t.startswith(raw) and len(t) > len(raw):
+                    t, n = t[:len(raw) - 1] + t[len(raw):], n + 1
+            out.append(t)
+        return "".join(out), n
+    ta, na = text(u.a, a_idx)
+    tb, nb = text(u.b, b_idx)
+    return (na or nb) > 0 and ta == tb
 
 
 def _parts(tokens) -> Counter:
@@ -93,15 +205,64 @@ def _mostly_relocated(c: Counter, pool: Counter, overlap: float) -> bool:
     return sum((c - pool).values()) <= (1 - overlap) * total
 
 
-def _drop_moved_phrases(d, idx: list[int], relocated: Counter, min_words: int = 3) -> tuple[list[int], Counter]:
+def _document_contains(doc: Doc, words: list[int], max_pages_away: int = 3) -> bool:
+    """Check if all unique words from indices exist in document (normalized),
+    but only on nearby pages (within ~max_pages_away). Detects reorganized/reformatted
+    content in the same area (e.g., table restructured on adjacent page).
+    Returns False for content that moved far away (likely to different section)."""
+    if not words:
+        return True
+    if not doc.words:
+        return False
+    
+    # Determine approximate location of expected content
+    first_idx = min((i for i in words if i < len(doc.words)), default=None)
+    if first_idx is None:
+        return False
+    first_page = doc.words[first_idx].page
+    latest_page = first_page + max_pages_away
+    
+    # Words to find
+    want = {(doc.words[i].norm or "").lower() for i in words if i < len(doc.words) and doc.words[i].norm}
+    if not want:
+        return True
+    
+    # Search only in nearby pages for efficiency and to avoid matching wrong sections
+    found = set()
+    for k, word in enumerate(doc.words):
+        if word.page > latest_page:
+            break  # Stop searching - we've gone too far, it's a different section
+        if word.norm:
+            w = word.norm.lower()
+            if w in want:
+                found.add(w)
+    
+    # All words must be found nearby (same area) to suppress "missing"
+    return want <= found
+
+
+def _list_cores(tokens) -> Counter:
+    """The words without a list separator (comma / semicolon) at their end: “RP8604,” and “RP8604” are the
+    same list item, whichever of them ends its list."""
+    return Counter(c for t in tokens if (c := re.sub(r"[,;]+$", "", t)))
+
+
+def _drop_moved_phrases(d, idx: list[int], relocated: Counter, min_words: int = 3,
+                        loose: Counter | None = None) -> tuple[list[int], Counter]:
     """Remove runs of >= min_words words that all sit unmatched on the other side (the phrase only
     moved) from a diff block that also holds other text. Returns (what is left, relocated minus the
-    removed words). A block that is all moved text is handled by the caller."""
+    removed words). A block that is all moved text is handled by the caller.
+    loose (the words unmatched on both sides, without a list separator at their end - _list_cores): a word
+    that ends a run but is on the other side too save for its list comma / semicolon - “RP8604,” where the
+    other side's list ends with “RP8604” - moved with the run: one such word per run. Any other punctuation
+    change in moved text is still a difference.)"""
     keep, run, left = [], [], Counter(relocated)
+    near: set[int] = set()  # words of the run matched without their list separator
+    loose_left = Counter(loose) if loose is not None else None
 
     def flush():
         nonlocal left
-        parts = _parts(d.words[i].norm for i in run)
+        parts = _parts(d.words[i].norm for i in run if i not in near)
         if len(run) >= min_words and not parts - left:
             left = left - parts
         else:
@@ -109,15 +270,42 @@ def _drop_moved_phrases(d, idx: list[int], relocated: Counter, min_words: int = 
         run.clear()
 
     for i in idx:
-        if _parts([d.words[i].norm]) - left:  # this word did not move: ends a run
-            flush()
-            keep.append(i)
-        else:
+        if not (_parts([d.words[i].norm]) - left):
             run.append(i)
+            continue
+        lb = _list_cores([d.words[i].norm]) if loose_left is not None else None
+        if lb and run and not any(k in near for k in run) and not lb - loose_left:
+            run.append(i)  # the run's last word, with another separator after it
+            near.add(i)
+            loose_left = loose_left - lb
+            continue
+        flush()  # this word did not move: ends a run
+        keep.append(i)
     flush()
     if not keep:  # all of it moved: leave the decision to the caller
         return idx, relocated
     return (keep, left) if len(keep) < len(idx) else (idx, relocated)
+
+
+def _landed(u: Unit, moved: list[int], kept: list[int], after: int) -> Loc | None:
+    """Where in stage the moved part of a prod block was read, next to the part that is left: the stage
+    word matching the moved run's last word (the rest follows it) or its first word (the rest precedes
+    it), found by the run's last / first three words (letters and digits), from stage word `after` on."""
+    if not moved or not kept:
+        return None
+    key = lambda d, k: _letters(d.words[k].norm)
+    tail = moved[-1] < kept[0]
+    if not tail and not moved[0] > kept[-1]:
+        return None  # the moved words are scattered through the block
+    want = [k for k in (key(u.a, i) for i in (moved[-3:] if tail else moved[:3])) if k]
+    if len(want) < 2:
+        return None
+    pos = [j for j in range(max(after, u.b_range[0]), u.b_range[1]) if key(u.b, j)]
+    for s0 in range(len(pos) - len(want) + 1):
+        if [key(u.b, j) for j in pos[s0:s0 + len(want)]] == want:
+            w = u.b.words[pos[s0 + len(want) - 1] if tail else pos[s0]]
+            return Loc(w.page, w.bbox)
+    return None
 
 
 def _repeated_header(d, idx: list[int]) -> list[int]:
@@ -144,8 +332,35 @@ def _repeated_header(d, idx: list[int]) -> list[int]:
         return rows
     seq, n = [d.words[i].norm for i in row], len(row)
     if any([w.norm for w in d.words[k:k + n]] == seq for k in range(idx[0] - n + 1)):
-        return row
+        # the first row may be only part of a header of several rows ("Resolution | Mode" beside cells
+        # that wrap above and below it: "Vertical frequency (Hz)"): the whole repeated header, when longer
+        rows = _repeated_header_rows(d, idx)
+        return rows if len(rows) > len(row) else row
     return _repeated_header_rows(d, idx)
+
+
+def _page_top_headers(d, idx: list[int]) -> set[int]:
+    """Words of table headers repeated at the top of a page inside idx (a section's words): at each page
+    start, the leading run that repeats, word for word, a run earlier in the document over 2+ rows
+    (_repeated_header_rows), and sits in a table of that page (on its header bar or inside its box)."""
+    from . import tables as tables_mod
+    out: set[int] = set()
+    for k in range(1, len(idx)):
+        if d.words[idx[k]].page == d.words[idx[k - 1]].page:
+            continue
+        rest = [i for i in idx[k:] if d.words[i].page == d.words[idx[k]].page]
+        run = _repeated_header_rows(d, rest, max_rows_pt=220)  # a header of 4-5 rows with wrapped cells is tall
+        if not run:
+            continue
+        w = d.words[run[0]]
+        try:
+            boxes = [t[1] for t in tables_mod._raw(d, w.page)]
+        except Exception:
+            boxes = []
+        cx, cy = (w.bbox[0] + w.bbox[2]) / 2, (w.bbox[1] + w.bbox[3]) / 2
+        if _on_bar(d, run[0]) or any(b[0] - 2 <= cx <= b[2] + 2 and b[1] - 2 <= cy <= b[3] + 2 for b in boxes):
+            out.update(run)
+    return out
 
 
 def _bar_header(d, row: list[int], before: int) -> bool:
@@ -286,6 +501,31 @@ def _peel_labels(ops, at, bt):
     return out
 
 
+def _peel_list_edges(ops, at, bt):
+    """Items dropped from (or added to) the end / start of a list: “RP7504, RP8604, RE6504D, … RE9804FVD” ->
+    “RP7504, RP8604” is the missing items “RE6504D, … RE9804FVD”, not a changed text that names “RP8604,” as
+    missing too. The word at the edge of a changed block that is the same on both sides but for its list
+    separator (“RP8604,” / “RP8604”) is matched; what is left on one side only is the missing / extra block,
+    placed right after (before) that word. Only when nothing but that is left: any other change stays whole."""
+    core = lambda t: re.sub(r"[,;]+$", "", t)  # a list separator only: “Boost .” / “Boost.” is a word gap
+    out = []
+    for tag, i1, i2, j1, j2 in ops:
+        if tag != "replace":
+            out.append((tag, i1, i2, j1, j2))
+            continue
+        a1, a2, b1, b2 = i1, i2, j1, j2
+        pre, post = [], []
+        while a1 < a2 and b1 < b2 and core(at[a1]) and core(at[a1]) == core(bt[b1]):
+            pre.append(("equal", a1, a1 + 1, b1, b1 + 1)); a1 += 1; b1 += 1
+        while a1 < a2 and b1 < b2 and core(at[a2 - 1]) and core(at[a2 - 1]) == core(bt[b2 - 1]):
+            post.insert(0, ("equal", a2 - 1, a2, b2 - 1, b2)); a2 -= 1; b2 -= 1
+        if (pre or post) and (a1 == a2) != (b1 == b2):  # one side used up, the other has the items left over
+            out += pre + [("delete" if a1 < a2 else "insert", a1, a2, b1, b2)] + post
+        else:
+            out.append((tag, i1, i2, j1, j2))
+    return out
+
+
 _QUOTES = "\"'“”‘’«»„"
 
 
@@ -350,12 +590,46 @@ def check(u: Unit) -> list[Finding]:
     ccfg, rcfg = u.cfg["content"], u.cfg["report"]
     ai = [i for i in range(*u.a_range) if u.a.words[i].norm]
     bi = [i for i in range(*u.b_range) if u.b.words[i].norm]
+    # the section's own heading line is compared as the section heading (structure check), not as body
+    # text: normally it aligns as a trivial match and stripping it is a no-op, but a section that starts
+    # before its heading (text beside the heading read first, see engine.pull_back) can leave it unpaired
+    # on one side only - reported as "extra"/"missing" content for text that both sides actually show
+    def head(d, anc) -> set[int]:
+        if anc is None or not anc.located or anc.word >= len(d.words):
+            return set()
+        # the heading is its title's words, on however many lines it wraps (prod: "...Kit/Pin:" | "PL490/.../PH5502",
+        # stage: "...Kit/Pin: PL490/PL552/PL553/" | "PH5501/PH5502") - not just its first line, or the rest of a
+        # heading wrapped at another word is compared as body text and reads as changed
+        key = lambda t: re.sub(r"[^\w]+", "", (t or "").lower())
+        want, got, k = key(anc.title), "", anc.word
+        while want and k < len(d.words) and len(got) < len(want):
+            nxt = got + key(d.words[k].text)
+            if not want.startswith(nxt):
+                break
+            got, k = nxt, k + 1
+        if want and got == want:
+            return set(range(anc.word, k))
+        k, line = anc.word, d.words[anc.word].line
+        while k < len(d.words) and d.words[k].line == line:
+            k += 1
+        return set(range(anc.word, k))
+
+    ha, hb = head(u.a, u.a_anchor), head(u.b, u.b_anchor)
+    ai, bi = [i for i in ai if i not in ha], [j for j in bi if j not in hb]
+    if ccfg.get("ignore_repeated_headers", True):
+        # a table header repeated at the top of a continuation page is pagination: left out before the text
+        # is matched (matched first, its words pair with look-alike words nearby - "Color space" of the
+        # repeated header against the row label under it - and what is left no longer reads as a header)
+        ra, rb = _page_top_headers(u.a, ai), _page_top_headers(u.b, bi)
+        if ra or rb:
+            u.repeated_headers = (sorted(ra), sorted(rb))
+            ai, bi = [i for i in ai if i not in ra], [j for j in bi if j not in rb]
     at = [u.a.words[i].norm for i in ai]
     bt = [u.b.words[i].norm for i in bi]
 
     sm = SequenceMatcher(None, at, bt, autojunk=False)
     u.similarity = sm.ratio() if (at or bt) else 1.0
-    ops = _peel_labels(sm.get_opcodes(), at, bt)
+    ops = _peel_list_edges(_peel_labels(sm.get_opcodes(), at, bt), at, bt)
     moved = _moved_blocks(ops, at, bt)
     crit_words = ccfg.get("critical_missing_words", 8)
     sev = ccfg.get("severity", "warning")
@@ -434,6 +708,7 @@ def check(u: Unit) -> list[Finding]:
             types=[kind], links=paired_locs(u.a, u.b, same_words(u, a_idx, b_idx), rcfg["max_locs"]) if a_idx and b_idx else []))
 
     for n, (tag, i1, i2, j1, j2) in enumerate(ops):
+        landed = None  # the stage spot of this block's moved part, when it has one
         if tag == "equal":
             u.pairs.extend(zip(ai[i1:i2], bi[j1:j2]))
             matched += i2 - i1
@@ -462,13 +737,18 @@ def check(u: Unit) -> list[Finding]:
         # insertion point on the empty side: between the matched words around the gap
         a_at = insertion_loc_by(u.a, ai[i1 - 1] if i1 > 0 else None, ai[i1] if i1 < len(ai) else None, u.b, b_idx, bi[j1 - 1] if j1 > 0 else None, bi[j2] if j2 < len(bi) else None) if not a_idx else None
         b_at = insertion_loc_by(u.b, bi[j1 - 1] if j1 > 0 else None, bi[j1] if j1 < len(bi) else None, u.a, a_idx, ai[i1 - 1] if i1 > 0 else None, ai[i2] if i2 < len(ai) else None) if not b_idx else None
-        critical = tag in ("delete", "replace") and absent >= crit_words and absent >= 0.5 * len(a_idx)
-        ctype = ("missing text" if tag == "delete" or critical else "extra text" if tag == "insert"
-                 else classify(at[i1:i2], bt[j1:j2]))
+        # the same text cut into words at other places (a model list wrapping elsewhere in its cell) is judged
+        # as what it is - a wrap or a word gap - before its odd pieces can count as words stage lacks
+        kind = classify(at[i1:i2], bt[j1:j2]) if tag == "replace" else ""
+        critical = tag in ("delete", "replace") and absent >= crit_words and absent >= 0.5 * len(a_idx) \
+            and kind not in ("spacing", "hyphenation")
+        ctype = ("missing text" if tag == "delete" or critical else "extra text" if tag == "insert" else kind)
         sup_gap = ctype == "spacing" and u.cfg["content"].get("ignore_superscript_spacing", True) and \
             any(_superscript(u.a.words[k]) for k in a_idx) or ctype == "spacing" and \
             u.cfg["content"].get("ignore_superscript_spacing", True) and any(_superscript(u.b.words[k]) for k in b_idx)
-        if ctype == "hyphenation" or (ctype == "spacing" and (_wrap_only(u, a_idx, b_idx) or sup_gap)):
+        if ctype == "hyphenation" or (ctype == "spacing" and (_wrap_only(u, a_idx, b_idx) or sup_gap
+                or _code_wrap(u, a_idx, b_idx))) \
+                or (ctype == "punctuation" and (_break_hyphen_only(u, a_idx, b_idx) or _code_wrap(u, a_idx, b_idx))):
             # a word split / wrapped across lines on one side only: same text, a layout difference
             u.pairs.extend(zip(a_idx, b_idx))
             u.wraps.append((a_idx, b_idx))
@@ -476,6 +756,18 @@ def check(u: Unit) -> list[Finding]:
             pool.subtract(bt[j1:j2])
             hyphen_matched += i2 - i1
             continue
+        apart = _wrapped_apart(u, a_idx, b_idx) if tag == "replace" else None
+        if apart:
+            # ... and with a real difference inside it: only the words that hold the difference go on, the
+            # rest is the same text on another line
+            wa_, wb_ = [i for i in a_idx if i not in set(apart[0])], [j for j in b_idx if j not in set(apart[1])]
+            u.wraps.append((wa_, wb_))
+            unmatched_a.subtract(u.a.words[i].norm for i in wa_)
+            pool.subtract(u.b.words[j].norm for j in wb_)
+            hyphen_matched += len(wa_)
+            a_idx, b_idx = apart
+            ta, tb = [u.a.words[i].norm for i in a_idx], [u.b.words[j].norm for j in b_idx]
+            ctype = "missing text" if not b_idx else "extra text" if not a_idx else classify(ta, tb)
         if ccfg.get("ignore_repeated_headers", True):
             # a table header repeated at the top of a continuation page: pagination, not content
             ha, hb = _repeated_header(u.a, a_idx), _repeated_header(u.b, b_idx)
@@ -554,10 +846,16 @@ def check(u: Unit) -> list[Finding]:
                 relocated_b, b_idx = relocated_b - cb, []
             # a moved phrase glued to other text: "1 x Webcam accessory" (a list item read in another
             # column order) + "NOTE:" - drop the phrase, report only what is left
-            a_keep, relocated_a = _drop_moved_phrases(u.a, a_idx, relocated_a)
-            b_keep, relocated_b = _drop_moved_phrases(u.b, b_idx, relocated_b)
+            sep_relocated = _list_cores(lost.elements()) & _list_cores(pool.elements())
+            a_keep, relocated_a = _drop_moved_phrases(u.a, a_idx, relocated_a, loose=sep_relocated)
+            b_keep, relocated_b = _drop_moved_phrases(u.b, b_idx, relocated_b, loose=sep_relocated)
             moved_note([i for i in a_idx if i not in set(a_keep)], [j for j in b_idx if j not in set(b_keep)],
                        "Text on another line / in another order in stage")
+            # what is left of a prod block whose other part moved (a table cell going on on the next stage page:
+            # “… RP7504, RP8604,” read there, “RE6504D, …” gone) belongs where that part landed in stage, not
+            # where the surrounding text aligns
+            landed = _landed(u, [i for i in a_idx if i not in set(a_keep)], a_keep,
+                             bi[j1 - 1] if j1 > 0 else u.b_range[0]) if a_keep and not b_keep else None
             a_idx, b_idx = a_keep, b_keep
         if not a_idx and not b_idx:
             continue
@@ -579,9 +877,12 @@ def check(u: Unit) -> list[Finding]:
                 absent = sum((_loose_bag(ta) - _loose_bag(pool.elements())).values())
                 a_at = insertion_loc_by(u.a, ai[i1 - 1] if i1 > 0 else None, ai[i1] if i1 < len(ai) else None, u.b, b_idx, bi[j1 - 1] if j1 > 0 else None, bi[j2] if j2 < len(bi) else None) if not a_idx else None
                 b_at = insertion_loc_by(u.b, bi[j1 - 1] if j1 > 0 else None, bi[j1] if j1 < len(bi) else None, u.a, a_idx, ai[i1 - 1] if i1 > 0 else None, ai[i2] if i2 < len(ai) else None) if not b_idx else None
-                critical = tag in ("delete", "replace") and absent >= crit_words and absent >= 0.5 * len(a_idx)
-                ctype = ("missing text" if tag == "delete" or critical else "extra text" if tag == "insert"
-                         else classify(ta, tb))
+                if not b_idx and landed is not None:
+                    b_at = landed
+                kind = classify(ta, tb) if tag == "replace" else ""
+                critical = tag in ("delete", "replace") and absent >= crit_words and absent >= 0.5 * len(a_idx) \
+                    and kind not in ("spacing", "hyphenation")
+                ctype = ("missing text" if tag == "delete" or critical else "extra text" if tag == "insert" else kind)
             same =same_words(u, a_idx, b_idx) if a_idx and b_idx else []
             u.style_pairs.extend(same)
             label = "Missing content block" if critical else _TYPE_LABEL.get(ctype, _KIND[tag])
@@ -626,14 +927,31 @@ def check(u: Unit) -> list[Finding]:
     # a move that stays at its place on the page, or is only list numbers / bullets ("2." read after
     # its item's text): reading order, not a difference (the words are paired, their style compared)
     marker_only = lambda idx: all(re.fullmatch(r"\(?\w{1,3}[.)]|[^\w\s]{1,3}", u.a.words[i].norm or "") for i in idx)
-    in_place = {id(f) for f, a_idx, b_idx in moves if _visually_in_place(u, a_idx, b_idx) or marker_only(a_idx)}
+    # ... or too little to be text that moved: a callout number "1" (a circled badge in the sentence), a symbol, a
+    # word or two read at another point - the order of a section's text is judged on its words, whatever the
+    # page breaks, and such a token is still matched (not missing), only not reported as reordered
+    min_words = ccfg.get("reorder_min_words", 3)
+    too_small = lambda idx: sum(any(c.isalpha() for c in (u.a.words[i].norm or "")) for i in idx) < min_words
+    in_place = {id(f) for f, a_idx, b_idx in moves
+                if _visually_in_place(u, a_idx, b_idx) or marker_only(a_idx) or too_small(a_idx)}
     findings = [f for f in findings if id(f) not in in_place]
     findings = _split_unrelated(u, findings, words_of)
     findings = _pair_near(findings)
     findings = _pair_parts(u, findings, words_of)
     _house_style(u, findings, words_of)
+    findings = [f for f in findings if not f.detail.get("icon_matches_label")]
     findings = [f for f in findings if not _looks_the_same(u, f, words_of)]
     findings = _merge_quotes(u, findings, words_of)
+    findings, found_m, found_e = _present_unmatched(u, findings)
+    if found_m or found_e:  # the words are in the other PDF's section: matched, not missing / extra
+        reordered += found_m
+        matched += found_m
+        missing, extra = max(0, missing - found_m), max(0, extra - found_e)
+    findings, swapped = _swapped_blocks(u, findings)
+    if swapped:  # those words are on both sides: matched, not missing / extra
+        reordered += swapped
+        matched += swapped
+        missing, extra = max(0, missing - swapped), max(0, extra - swapped)
     scripts = _scripts(u, sev)
     findings += scripts
     # every content difference counts: prod words missing or changed, words stage adds, spacing and
@@ -651,6 +969,75 @@ def check(u: Unit) -> list[Finding]:
         "match_pct": round(100.0 * max(matched - spacing - len(scripts), 0) / denom, 2) if denom else 100.0,
     }
     return findings
+
+
+def _present_unmatched(u: Unit, findings: list[Finding]) -> tuple[list[Finding], int, int]:
+    """A missing (or extra) block of 3+ words whose every word is among the other PDF's words of this section
+    that the comparison left unmatched: the text is there, only read at another point (table rows or cells in
+    another order, a block set before / after a picture). Not a content difference: the finding is dropped and
+    its words count as matched. Each unmatched word explains one block only. Returns (findings, prod words
+    found, stage words found)."""
+    min_words = u.cfg["content"].get("present_min_words", 3)
+    key = lambda t: re.sub(r"[^\w°%+]+", "", t.lower())
+    pa, pb = {i for i, _ in u.pairs}, {j for _, j in u.pairs}
+    free_a = Counter(k for i in range(*u.a_range) if i not in pa and u.a.words[i].norm for k in [key(u.a.words[i].text)] if k)
+    free_b = Counter(k for j in range(*u.b_range) if j not in pb and u.b.words[j].norm for k in [key(u.b.words[j].text)] if k)
+    out, got_m, got_e = [], 0, 0
+    # larger blocks first: a long block is the surest match for the words it needs
+    order = sorted(findings, key=lambda f: -int((f.detail or {}).get("words", 0)))
+    drop = set()
+    for f in order:
+        types = f.types or []
+        if types == ["missing text"]:
+            text, pool = f.detail.get("baseline_text") or "", free_b
+        elif types == ["extra text"]:
+            text, pool = f.detail.get("candidate_text") or "", free_a
+        else:
+            continue
+        bag = Counter(k for k in (key(t) for t in text.split()) if k)
+        n = sum(bag.values())
+        # a short block (1-2 words) only when its words are distinctive ("6.9W", "Standby"), not "to" / "the"
+        distinct = all(any(ch.isdigit() for ch in k) or len(k) >= 4 for k in bag)
+        if n == 0 or (n < min_words and not distinct) or any(pool[k] < c for k, c in bag.items()):
+            continue
+        pool.subtract(bag)
+        drop.add(id(f))
+        if types == ["missing text"]:
+            got_m += n
+        else:
+            got_e += n
+    return [f for f in findings if id(f) not in drop], got_m, got_e
+
+
+def _swapped_blocks(u: Unit, findings: list[Finding]) -> tuple[list[Finding], int]:
+    """A "missing" and an "extra" finding of the section with exactly the same words (case and punctuation
+    ignored): the text is on both sides, only read in another order (short blocks swapped around a table or
+    a heading - "Blurred image key." / "key. Blurred image."). One info note instead of two differences."""
+    key = lambda t: re.sub(r"[^\w]+", "", t.lower())
+    bag = lambda f, side: Counter(k for k in (key(t) for t in (f.detail.get(side + "_text") or "").split()) if k)
+    miss = [f for f in findings if (f.types or []) == ["missing text"] and not f.critical]
+    extra = [f for f in findings if (f.types or []) == ["extra text"]]
+    drop, out_new, words = set(), [], 0
+    for m in miss:
+        bm = bag(m, "baseline")
+        if not bm or sum(bm.values()) > 40:
+            continue
+        e = next((e for e in extra if id(e) not in drop and bag(e, "candidate") == bm), None)
+        if e is None:
+            continue
+        drop.update((id(m), id(e)))
+        words += sum(bm.values())
+        if sum(any(c.isalpha() for c in t) for t in bm.elements()) < u.cfg["content"].get("reorder_min_words", 3):
+            continue  # a number or a word or two read at another point: present, not worth a finding
+        out_new.append(Finding(
+            "content", u.cfg["content"].get("reorder_severity", "info"),
+            f"Reordered: “{m.detail.get('baseline_text', '')}” (stage reads “{e.detail.get('candidate_text', '')}”)",
+            m.baseline, e.candidate, {"op": "move", "baseline_text": m.detail.get("baseline_text", ""),
+                                      "candidate_text": e.detail.get("candidate_text", ""), "words": sum(bm.values())},
+            types=["reordered"]))
+    if not drop:
+        return findings, 0
+    return [f for f in findings if id(f) not in drop] + out_new, words
 
 
 def _visual_rank(doc, rng) -> dict[int, int]:
@@ -753,6 +1140,11 @@ def _pair_near(findings: list[Finding]) -> list[Finding]:
             kind = classify(ta, tb)
             if kind not in ("spacing", "punctuation", "case", "case + punctuation"):
                 continue
+            if kind == "spacing" and "".join(ta) == "".join(tb) and (_stacked(m.baseline, ta) or _stacked(e.candidate, tb)):
+                # a word too long for its table cell, broken onto the next line with no hyphen ("Recept" | "acle" =
+                # "Receptacle"): layout, not a difference - neither piece is reported
+                drop.update((id(m), id(e)))
+                break
             m.message = f"{_TYPE_LABEL[kind]}: “{m.detail['baseline_text']}” → “{e.detail['candidate_text']}”"
             m.candidate, m.candidate_at, m.types = e.candidate, None, [kind]
             m.links = [(m.baseline[0], e.candidate[0])]
@@ -760,6 +1152,20 @@ def _pair_near(findings: list[Finding]) -> list[Finding]:
             drop.add(id(e))
             break
     return [f for f in findings if id(f) not in drop]
+
+
+def _stacked(locs_: list, toks: list[str]) -> bool:
+    """The words are pieces of one word set one below the other (each piece its own line, the next right under it,
+    going on in lower case): a forced break inside a narrow cell."""
+    if len(toks) < 2 or len(locs_) != len(toks) or not all(t[:1].islower() for t in toks[1:]) \
+            or not all(t[-1:].isalpha() for t in toks[:-1]):
+        return False
+    for a, b in zip(locs_, locs_[1:]):
+        over = min(a.bbox[2], b.bbox[2]) - max(a.bbox[0], b.bbox[0])
+        if a.page != b.page or not 0 < b.bbox[1] - a.bbox[1] <= 2.5 * max(a.bbox[3] - a.bbox[1], 1) \
+                or over < 0.5 * min(a.bbox[2] - a.bbox[0], b.bbox[2] - b.bbox[0]):
+            return False
+    return True
 
 
 def _letters_alike(ta: list[str], tb: list[str]) -> float:
@@ -798,6 +1204,30 @@ def _split_unrelated(u: Unit, findings: list[Finding], words_of: dict) -> list[F
         words_of[id(miss)], words_of[id(extra)] = (a_idx, []), ([], b_idx)
         out += [miss, extra]
     return out
+
+
+def _icon_vs_label(u: Unit, f: Finding, at: Loc, norms: list[str]) -> None:
+    """Stage prints a callout label where prod's note has only its icon: the icon says which label it
+    stands for ([content] callout_icons: a pencil is a Note, an exclamation mark a Warning). The same
+    label: not an issue (the finding is dropped). Another one: the callout's type differs."""
+    from . import callout_icons
+    icons = u.cfg["content"].get("callout_icons") or {}
+    label = next((n[len("<label:"):-1] for n in norms if n.startswith("<label:")), None)
+    if not icons or not label:
+        return
+    box = callout_icons.icon_left_of(u.a, at)
+    kind = callout_icons.kind(u.a, at.page, box) if box else None
+    if kind is None or kind not in icons:
+        return  # an icon not recognised: the label-only finding stands
+    if label in {l.lower() for l in icons[kind]}:
+        f.detail = {**f.detail, "icon_matches_label": True}
+        return
+    want = " / ".join(l.upper() for l in icons[kind])
+    f.severity, f.types = u.cfg["content"].get("callout_type_severity", "warning"), ["callout type differs"]
+    f.message = (f"Callout type differs: stage labels the note “{label.upper()}”, prod's note has the {kind} icon "
+                 f"(a {want})")
+    f.baseline = [Loc(at.page, box)]
+    f.detail = {**f.detail, "prod_icon": kind, "stage_label": label}
 
 
 def _house_style(u: Unit, findings: list[Finding], words_of: dict) -> None:
@@ -841,6 +1271,7 @@ def _house_style(u: Unit, findings: list[Finding], words_of: dict) -> None:
                     f.candidate_at = at
                 else:
                     f.baseline_at = at
+                    _icon_vs_label(u, f, at, norms)
         elif len(norms) <= 8 and any(re.sub(r"\W", "", n.lower()) == "continued" for n in norms):
             f.severity, f.critical, f.types = "info", False, ["continued header"]
             f.message = (f"Continuation header only in {side}: “{snippet(d, idx)}” "
@@ -939,7 +1370,7 @@ def _pair_parts(u: Unit, findings: list[Finding], words_of: dict) -> list[Findin
             i, n = hit
             a_idx = a_all[i:i + n]
             kind = classify(ta[i:i + n], tb)
-            if kind == "spacing" and _soft_split_only(u, a_idx, b_idx):
+            if kind == "spacing" and (_soft_split_only(u, a_idx, b_idx) or _wrap_only(u, a_idx, b_idx)):
                 # "pass­" | "word": prod hyphenates the word at a line break (a table cell read out of order), stage
                 # has "password" - layout, not a difference; the words are explained, nothing is reported
                 for donor, a_rest, b_rest in ((m, a_all[:i] + a_all[i + n:], words_of[id(m)][1]),
@@ -1125,6 +1556,35 @@ def _spacing(u: Unit, findings: list[Finding]) -> int:
         if u.cfg["content"].get("ignore_superscript_spacing", True) and \
                 any(_superscript(w) for w in (A[i], A[i2], B[j], B[j2])):
             continue  # the gap beside a superscript ("Wi-Fi ®", "page 3 ¹") is not a word gap
+        # A run of model codes ("T420/T650/TL550/TL650/..."): no lowercase letter means no real prose
+        # space was ever meant here - a narrow table cell can force a mid-code wrap with no hyphen to mark
+        # it, so any gap difference in such a run is layout, not content
+        combined_a = (A[i].text or "") + (A[i2].text or "")
+        combined_b = (B[j].text or "") + (B[j2].text or "")
+        if combined_a and combined_b and not re.search(r"[a-z]", combined_a) and not re.search(r"[a-z]", combined_b):
+            continue
+        if A[i].line != A[i2].line or B[j].line != B[j2].line:
+            continue  # words wrapped to different lines: spacing difference is from layout reflow, not content
+        # Hyphenated word break: if one side's word ends with hyphen/dash and next word continues it,
+        # the spacing difference is from hyphenation layout, not content ("Connec-" | "tor" vs "Connector")
+        ta, ta_next = A[i].text or "", A[i2].text or ""
+        tb, tb_next = B[j].text or "", B[j2].text or ""
+        ta_norm, ta_next_norm = (A[i].norm or "").lower(), (A[i2].norm or "").lower()
+        tb_norm, tb_next_norm = (B[j].norm or "").lower(), (B[j2].norm or "").lower()
+        # Skip if prod's adjacent words form a hyphenated unit but stage has them as one:
+        # "Connec-" + "tor" (prod) vs "Connector" (stage) - dehyphenate may have missed it
+        if len(ta_norm) > 1 and ta_norm[-1] in "-‐‑–—" and ta_next_norm and \
+                not any(c in ta_next_norm for c in " -‐‑–—\t"):  # next word doesn't start with hyphen/space
+            # Prod side appears hyphenated; check if stage combined them
+            combined_norm = ta_norm.rstrip("-‐‑–—") + ta_next_norm
+            if combined_norm == tb_norm:  # Stage has the combined version
+                continue  # This is a hyphenation difference, not spacing
+        # Same check for stage side
+        if len(tb_norm) > 1 and tb_norm[-1] in "-‐‑–—" and tb_next_norm and \
+                not any(c in tb_next_norm for c in " -‐‑–—\t"):
+            combined_norm = tb_norm.rstrip("-‐‑–—") + tb_next_norm
+            if combined_norm == ta_norm:
+                continue
         from .. import normalize
         if normalize.nospace_char(A[i].text[-1:]) or normalize.nospace_char(A[i2].text[:1]):
             # beside a Chinese / Japanese character the gap is the typesetter's CJK-Roman spacing
@@ -1158,7 +1618,14 @@ def _space_before_stop(u: Unit, findings: list[Finding]) -> int:
             continue  # “/ .” (a key icon left out of the text) or no space
         i = al.get(j - 1)
         if i is None:
-            continue
+            # the word before the mark is not matched (prod: “location on page 22.” - stage: “location .”): the
+            # prod spot from the nearest matched word before it, then prod's same word just after that
+            k = next((k for k in range(j - 2, max(u.b_range[0], j - 12) - 1, -1) if k in al), None)
+            if k is None:
+                continue
+            key = re.sub(r"\W", "", prev.text.lower())
+            i = next((x for x in range(al[k], min(len(A.words), al[k] + 12))
+                      if re.sub(r"\W", "", A.words[x].text.lower()) == key), al[k])
         # prod: the same word followed by the same mark after a space too -> both PDFs print it so
         if i + 1 < len(A.words) and A.words[i + 1].text == w.text and (A.words[i].space_after or 0) >= 1:
             continue

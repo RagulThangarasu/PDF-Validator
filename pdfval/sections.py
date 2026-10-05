@@ -40,10 +40,13 @@ def _drop_cover(doc: Doc, anchors: list[Anchor], max_words: int) -> list[Anchor]
 def _from_outline(doc: Doc, scfg: dict) -> list[Anchor]:
     thr = scfg.get("locate_threshold", 0.8)
     anchors, min_line = [], 0
-    for level, title, page in doc.outline:
+    tos = getattr(doc, "outline_to", None) or []
+    flat = lambda t: "".join(t.lower().split())
+    for n_entry, (level, title, page) in enumerate(doc.outline):
         if page < 1:
             continue
         norm = normalize.title(title)
+        to_y = tos[n_entry] if n_entry < len(tos) else None
         best = None
         for p in (page - 1, page):  # bookmark page, then next page as fallback
             for li in range(min_line, len(doc.lines)):
@@ -56,8 +59,18 @@ def _from_outline(doc: Doc, scfg: dict) -> list[Anchor]:
                 if li + 1 < len(doc.lines) and doc.lines[li + 1].page == p:
                     cand.append(ln.text + " " + doc.lines[li + 1].text)  # wrapped heading
                 score = max(SequenceMatcher(None, norm, normalize.title(c)).ratio() for c in cand)
-                if score >= thr and (best is None or (score, ln.size) > (best[0], best[1])):
-                    best = (score, ln.size, li)
+                if score < thr:
+                    continue
+                # which of several matching lines is the heading: the one the bookmark lands on (when the PDF
+                # says where), written exactly like the title (a wrapped body line “Receiver.” is not the
+                # heading “Receiver”), bold, larger - not simply the first one on the page
+                near = int(to_y is not None and p == page - 1 and abs(ln.bbox[1] - to_y) <= 40)
+                exact = int(any(flat(c) == flat(title) for c in cand))
+                w = doc.words[ln.first_word] if 0 <= ln.first_word < len(doc.words) else None
+                bold = int(bool(w) and w.style.weight >= 600)
+                key = (round(score, 2), near, exact, bold, ln.size)
+                if best is None or key > best[0]:
+                    best = (key, ln.size, li)
             if best:
                 break
         if best:

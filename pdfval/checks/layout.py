@@ -222,6 +222,17 @@ def _list_items(doc: Doc, rng: tuple[int, int], is_marker, tol_em: float, max_ga
                       for li in row_lines[doc.words[f].page])
         return None if between else m
 
+    def marker_above(f: int) -> int | None:
+        """A marker-only line just above word f, ending where its text starts (“5.” set a line higher
+        than “WAN/LAN port”): the item's number, out of line with its text."""
+        wf = doc.words[f]
+        em = max(wf.style.size, 1)
+        cands = [m for m in lone_by_page.get(wf.page, []) if m not in marker_claims and not same_row(doc, m, f)
+                 and wf.bbox[1] - 1.5 * em <= doc.words[m].bbox[3] <= wf.bbox[1] + 0.25 * em
+                 and doc.words[m].bbox[1] < wf.bbox[1] - 0.3 * em
+                 and -1.5 <= wf.bbox[0] - doc.words[m].bbox[2] <= 3 * em]
+        return max(cands, key=lambda m: doc.words[m].bbox[3], default=None)
+
     items: dict[int, dict] = {}
     owner: dict[int, dict | None] = {}  # line -> the list item it belongs to (None: plain text line)
     marker_claims: dict[int, int] = {}  # marker word -> first text word of the item it introduces
@@ -237,16 +248,24 @@ def _list_items(doc: Doc, rng: tuple[int, int], is_marker, tol_em: float, max_ga
         if w.page != page:
             page, cur = w.page, None
         m = t = None
+        above = False
         if len(ws) >= 2 and is_marker(w.text) and not is_marker(doc.words[f + 1].text):
             m, t = f, f + 1
         elif not is_marker(w.text):
             m, t = marker_left_of(f), f
+            if m is None:  # no number on the row: one set a line above the text
+                m = marker_above(f)
+                above = m is not None
         if m is not None and m in marker_claims:
             # The same marker can be seen from multiple extracted lines (e.g. wrapped text in a table cell).
             # Reuse the original item instead of creating duplicate "marker missing" findings.
             cur = items.get(marker_claims[m])
         elif m is not None:
-            cur = items[t] = {"marker": m, "text": t, "ref": None, "hang": None, "line": li}
+            # out of line with its text: the number's middle clearly higher than the text's (“5.” set over
+            # “WAN/LAN port”) - however the PDF stores the two (one line or two)
+            mw_, tw_ = doc.words[m], doc.words[t]
+            above = above or ((tw_.bbox[1] + tw_.bbox[3]) - (mw_.bbox[1] + mw_.bbox[3])) / 2 > 0.4 * max(tw_.style.size, 1)
+            cur = items[t] = {"marker": m, "text": t, "ref": None, "hang": None, "line": li, "above": above}
             marker_claims[m] = t
         elif cur is not None and doc.lines[li].block == doc.lines[doc.words[cur["text"]].line].block:
             if cur["hang"] is None:  # first wrapped line of the item
@@ -383,7 +402,8 @@ def _item_pairs(u: Unit, ia: dict, ib: dict, min_words: int = 3) -> list[tuple[i
                 out.append(w.norm)
         return tuple(out)
 
-    same = lambda x, y: min(len(x), len(y)) >= min_words and x[:len(y)] == y[:len(x)]
+    # the same first line - however short (“WAN/LAN port”, “Lid”) - or, from min_words on, one the start of the other
+    same = lambda x, y: (bool(x) and x == y) or (min(len(x), len(y)) >= min_words and x[:len(y)] == y[:len(x)])
     pairs = [(i, j) for i, j in u.pairs if not (i in ia and j in ib) or same(text(u.a, i), text(u.b, j))]
     done_a, done_b = {i for i, _ in pairs}, {j for _, j in pairs}
     ta = {i: text(u.a, i) for i in ia if i not in done_a}
@@ -399,6 +419,10 @@ def _item_pairs(u: Unit, ia: dict, ib: dict, min_words: int = 3) -> list[tuple[i
 
 MARKER_KINDS = {"bullet marker", "numbering style", "numbering format", "numbering sequence", "marker glued"}
 
+# interchangeable bullet glyphs ("-" used as a bullet, "•" ...): a design choice, not a content/marker
+# issue - stage using one where prod uses another is not reported
+_BULLET_GLYPHS = set("•●▪■◦‣·-–—*")
+
 
 def _marker_same_row(doc: Doc, wb, mark_text: str) -> bool:
     """The marker's exact text sits elsewhere on the word's row (a table's own "No." column, read as
@@ -410,12 +434,22 @@ def _marker_same_row(doc: Doc, wb, mark_text: str) -> bool:
                and abs((w.bbox[1] + w.bbox[3]) / 2 - cy) <= half for w in doc.words)
 
 
+def _in_table(d: Doc, k: int) -> bool:
+    """Word k inside a table the detector found (grid or rules only)."""
+    from . import tables
+    w = d.words[k]
+    cx, cy = (w.bbox[0] + w.bbox[2]) / 2, (w.bbox[1] + w.bbox[3]) / 2
+    return any(t[1][0] - 1 <= cx <= t[1][2] + 1 and t[1][1] - 1 <= cy <= t[1][3] + 1 and len(t[2]) >= 2
+               for t in tables._raw(d, w.page))
+
+
 def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
     """Bullet / numbered list alignment, compared on items whose text matched.
     positions=False: only the markers (missing, different, numbering), not where they sit."""
     lcfg, rcfg = u.cfg["layout"], u.cfg["report"]
     if not lcfg.get("check_bullets", True):
         return []
+    positions = positions and lcfg.get("check_bullet_position", True)
     marker, tol = _marker_test(lcfg), lcfg.get("bullet_tolerance_em", lcfg["line_height_tolerance_em"])
     A, B = u.a, u.b
     gap = lcfg["bullet_intro_max_gap_em"]
@@ -432,6 +466,10 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
         if not xa and not xb:
             continue
         wa, wb = A.words[i], B.words[j]
+        if (xa and _cells_apart(A, xa["marker"], i)) or (xb and _cells_apart(B, xb["marker"], j)):
+            # the “marker” is a table's numbering column (“12.” in the “No.” cell, “Dashboard” in the next one):
+            # a column of the table, not a list marker - neither its presence nor its place is a list issue
+            continue
         if not (xa and xb):  # a bullet / number on one side only, the other side's text starts its line plainly
             if (xa and line_start(B, j)) or (xb and line_start(A, i)):
                 groups[(wa.role, "bullet marker", kind_of(A, xa) if xa else "none",
@@ -440,7 +478,8 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
         em_a, em_b = max(wa.style.size, 1), max(wb.style.size, 1)
         ma, mb = A.words[xa["marker"]], B.words[xb["marker"]]
         symbol = lambda t: not any(c.isalnum() for c in t)  # a bullet glyph; numbers / letters are content
-        if ma.text != mb.text and symbol(ma.text) and symbol(mb.text):
+        both_bullets = ma.text.strip() in _BULLET_GLYPHS and mb.text.strip() in _BULLET_GLYPHS
+        if ma.text != mb.text and symbol(ma.text) and symbol(mb.text) and not both_bullets:
             groups[(wa.role, "bullet marker", f"“{ma.text}”", f"“{mb.text}”")].append((xa, xb, i, j))
         if xa.get("enum") and xb.get("enum"):
             # numbering: style (a, b, c vs i, ii, iii vs 1, 2, 3), format (a. vs a) vs (a)), sequence
@@ -465,8 +504,17 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
         gap_a, gap_b = (wa.bbox[0] - ma.bbox[2]) / em_a, (wb.bbox[0] - mb.bbox[2]) / em_b
         if gap_b < glue <= gap_a / 2 and wb.page == mb.page and abs(wb.bbox[1] - mb.bbox[1]) < em_b:
             groups[(wa.role, "marker glued", "", "")].append((xa, xb, i, j))  # one finding per role: gaps in the message
+        if xb.get("above") and not xa.get("above"):
+            # the number a line above its text (“5.” over “WAN/LAN port”), where prod sets it beside the text
+            groups[(wa.role, "marker above", "beside its text", "a line above its text")].append((xa, xb, i, j))
         if not positions:
             continue
+        if _cells_apart(A, xa["marker"], i) or _cells_apart(B, xb["marker"], j):
+            # “A.” in a table's “No.” column, “Lid” in the “Item” column: two cells, not a list item - the
+            # space between them is the column layout, not a bullet gap / indent
+            continue
+        if _in_table(A, i) or _in_table(B, j):
+            continue  # a list inside a table cell: where its bullets sit is the cell's own layout
         vals = {
             # only comparable when both are measured against the same kind of line
             "bullet indent": ((ma.bbox[0] - xa["ref"]) / em_a, (mb.bbox[0] - xb["ref"]) / em_b)
@@ -487,7 +535,8 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
             "marker glued": "no space between the list number / bullet and its text in stage",
             "hanging indent": "wrapped lines from the item text", "bullet marker": "list marker",
             "numbering style": "how the list is numbered", "numbering format": "punctuation around the number",
-            "numbering sequence": "the number does not follow the item before it"}
+            "numbering sequence": "the number does not follow the item before it",
+            "marker above": "the list number is not on its item's line"}
     findings = []
     for (role, prop, x, y), items in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         if len(items) < lcfg.get("min_lines", 1):
@@ -510,6 +559,11 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
                 mark = (B.words[xb["marker"]] if added else A.words[xa["marker"]]).text
                 if not added and _marker_same_row(B, B.words[j], mark):
                     continue  # the number is there, read as its own table cell/column, not glued to the text
+                # a number far left of the text on its row is not that text's list number: a step number beside a
+                # figure ("2." under the picture column, "Remark:" in the text column 250 pt to its right)
+                mw, tw = (B.words[xb["marker"]], B.words[j]) if added else (A.words[xa["marker"]], A.words[i])
+                if tw.bbox[0] - mw.bbox[2] > 6 * max(tw.style.size, 1):
+                    continue
                 a1, b1 = ([i] if added else [xa["marker"], i]), ([xb["marker"], j] if added else [j])
                 findings.append(Finding(
                     check, lcfg.get("severity", {}).get("indent", "warning"),
@@ -526,6 +580,10 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
             has = "prod" if side == "stage" else "stage"
             text = (f"[{role}] List marker missing in {side}: {marks} before the items in {has}, "
                     f"none in {side} ({len(items)} items, e.g. {eg})")
+        if prop == "marker above":
+            marks = ", ".join(dict.fromkeys(f"“{B.words[it[1]['marker']].text}”" for it in items))
+            text = (f"[{role}] List number not aligned with its item in stage: {marks} sit a line above the item text "
+                    f"instead of beside it as in prod ({len(items)} items, e.g. {eg})")
         if prop == "marker glued":
             marks = ", ".join(dict.fromkeys(f"“{B.words[it[1]['marker']].text}”" for it in items))
             gap = lambda d, k, it: (d.words[it[k + 2]].bbox[0] - d.words[it[k]["marker"]].bbox[2]) / max(d.words[it[k + 2]].style.size, 1)
@@ -538,7 +596,8 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
             text,
             locs(A, a_idx, rcfg["max_locs"]), locs(B, b_idx, rcfg["max_locs"]),
             {"role": role, "property": "indent", "kind": prop, "baseline": x, "candidate": y, "lines": len(items)},
-            types=[prop, "bullet"] if prop in MARKER_KINDS else ["indent", "bullet"],
+            types=[prop, "bullet"] if prop in MARKER_KINDS else ["marker above", "bullet"] if prop == "marker above"
+            else ["indent", "bullet"],
             links=paired_locs(A, B, pairs, rcfg["max_locs"]),
         ))
     return findings + level_findings
@@ -570,6 +629,24 @@ def _in_box(d: Doc, li: int) -> tuple | None:
     b = d.lines[li].bbox
     return next((r for r in _boxes(d, d.lines[li].page)
                  if r[0] - 1 <= b[0] and b[2] <= r[2] + 1 and r[1] - 1 <= b[1] and b[3] <= r[3] + 1), None)
+
+
+def _cells_apart(d: Doc, m: int, t: int) -> bool:
+    """Marker word m and text word t sit in different columns of a table on their page (a numbering
+    column beside an item column), by the table's column grid."""
+    from . import tables
+    wm, wt = d.words[m], d.words[t]
+    if wm.page != wt.page:
+        return False
+    cx = lambda w: (w.bbox[0] + w.bbox[2]) / 2
+    cy = lambda w: (w.bbox[1] + w.bbox[3]) / 2
+    for _, tbox, _, grid in tables._raw(d, wm.page):
+        if not all(tbox[0] - 1 <= cx(w) <= tbox[2] + 1 and tbox[1] - 1 <= cy(w) <= tbox[3] + 1 for w in (wm, wt)):
+            continue
+        col = lambda x: next((k for k, (x0, x1) in enumerate(grid) if x0 - 1 <= x <= x1 + 1), None)
+        cm, ct = col(cx(wm)), col(wt.bbox[0] + 1)
+        return cm is not None and ct is not None and cm != ct
+    return False
 
 
 def _shares_row(d: Doc, li: int) -> bool:

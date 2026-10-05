@@ -3,6 +3,7 @@ import io
 
 import pymupdf
 import pytest
+from conftest import every_picture_issue
 from PIL import Image, ImageDraw
 
 from pdfval import engine
@@ -12,7 +13,7 @@ from pdfval import engine
 def cfg():
     c = engine.load_config()
     c["typography"]["enabled"] = False  # prod vs stage only
-    return c
+    return every_picture_issue(c)
 
 
 def _screenshot() -> bytes:
@@ -42,7 +43,9 @@ def _doc(path, red: bool) -> str:
 
 
 def _marks(r):
-    return [f for s in r["sections"] for f in s["findings"] if f["detail"].get("kind") == "marks"]
+    # highlight marks on one side only are an image overlay: reported in the image report (image_findings)
+    return [f for s in r["sections"] for f in s["findings"] + (s.get("image_findings") or [])
+            if f["detail"].get("kind") == "marks"]
 
 
 def test_red_marks_in_prod_only_is_a_different_image(tmp_path, cfg):
@@ -52,7 +55,9 @@ def test_red_marks_in_prod_only_is_a_different_image(tmp_path, cfg):
     f = got[0]
     assert f["message"].startswith("Image different in stage: red highlight marks missing")
     assert "\nProd: red marks drawn on the picture\nStage: the same picture without the red marks" in f["message"]
-    assert f["genuine"] and "image changed" in f["types"] and f["severity"] == "error"
+    # an image overlay: in the image report only (never the PDF report / verdict)
+    from pdfval.report import image_report
+    assert f["detail"].get("image_report_only") and any(name == "Image overlay" for _, _, name in image_report.issues(r))
     x0, y0, x1, y1 = f["baseline"][0]["bbox"]  # the highlight surrounds the red outline
     assert x0 <= 185 <= x1 and y0 <= 245 <= y1 and x0 <= 415 <= x1 and y0 <= 355 <= y1
     assert f["color"] != "#dc2626"  # not a red highlight over red marks

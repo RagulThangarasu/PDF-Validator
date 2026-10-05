@@ -22,4 +22,11 @@ CSS_IGNORED = {"font-size", "font-family", "font-weight", "font-style", "color",
 
 def all_checks(c: dict) -> dict:
     c["ignore"]["types"] = [t for t in c["ignore"]["types"] if t not in CSS_IGNORED]
+    return every_picture_issue(c)
+
+
+def every_picture_issue(c: dict) -> dict:
+    """Tests of the picture detectors (another version, alignment, distorted, wrong section, ...): the reports
+    keep only [assets] report_types (artwork / label missing, much smaller) - the detectors are tested unfiltered."""
+    c["assets"]["report_types"] = None
     return c

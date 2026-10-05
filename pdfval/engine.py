@@ -16,6 +16,12 @@ from .checks import PIPELINE, Aligner, Unit, insertion_loc, locs, snippet
 from .checks import typography as checks_typography
 from .checks import footer as checks_footer
 from .model import SEVERITY_RANK, Anchor, Doc, Finding, Loc
+from .report.pdf_report import is_image_issue
+
+# the content match % counts only these: content missing/extra, image missing/broken, note style -
+# everything else (table merges, css, layout, toc, structure ...) still shows in the report, just
+# does not move the percentage
+CONTENT_PCT_TYPES = {"missing text", "extra text", "missing image", "broken image", "callout style"}
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config" / "default.toml"
 
@@ -73,13 +79,16 @@ def _reset_caches() -> None:
         for doc in mod._DOCS.values():
             doc.close()
     for cache in (assets._DOCS, assets._VIS, assets._BLANK, integrity._DOCS, integrity._LINKS,
-                  integrity._OFFPAGE, integrity._NAMES, tables._DOCS, tables._RAW, tables._RULES):
+                  integrity._OFFPAGE, integrity._NAMES, tables._DOCS, tables._RAW, tables._RULES,
+                  tables._DIAGRAMS):
         cache.clear()
     placement._shapes.cache_clear()
     from .checks import layout
     layout._BOXES.clear()
     from . import ocr
     ocr.reset()
+    from . import genuine as _gen
+    _gen._LINE_ART.clear()
 
 
 def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str | None = None,
@@ -96,6 +105,10 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     A = extract.load(baseline, "baseline", cfg, reference=None if candidate_doc else candidate)
     report(0.2, "Extracting candidate")
     B = candidate_doc or extract.load(candidate, "candidate", cfg, reference=baseline)
+    if cfg["content"].get("skip_picture_text", True):  # the words of a picture are its artwork, not content
+        from . import genuine as _g
+        _g.skip_picture_text(A, cfg)
+        _g.skip_picture_text(B, cfg)
     labels = cfg["content"].get("label_words") or []
     if labels:  # "Tips" -> "TIPS:", "Note" -> "NOTE:" is house style, not a content change
         normalize.fold_labels(A, labels)
@@ -174,6 +187,28 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 bounds.append((anA[c].title, anA[c], None, anA[c].word, 0))
     for i, j, _ in pairs:
         bounds.append((anA[i].title, anA[i], anB[j], anA[i].word, anB[j].word))
+    # a heading in one column, its section's text in the other column read first: the PDF stream has that text
+    # before the heading (prod: a remote-control key table to the right of the "Remote control" heading), so it
+    # would fall into the previous section - reported missing there and changed here. The words right before a
+    # heading on its page that do not lie above it start its section too.
+    def pull_back(D, w: int, floor: int, anchor) -> int:
+        if anchor is None or not getattr(anchor, "located", True) or not 0 < w < len(D.words):
+            return w
+        hw = D.words[w]
+        top = hw.bbox[1] - 0.5 * (hw.bbox[3] - hw.bbox[1])
+        k = w
+        while k - 1 > floor and D.words[k - 1].page == hw.page and D.words[k - 1].bbox[1] >= top:
+            k -= 1
+        return k
+
+    for side, pos in (("a", 3), ("b", 4)):
+        D, anc = (A, 1) if side == "a" else (B, 2)
+        starts = sorted({b[pos] for b in bounds})
+        for n, b in enumerate(bounds):
+            floor = max((s for s in starts if s < b[pos]), default=-1)
+            k = pull_back(D, b[pos], floor, b[anc])
+            if k != b[pos]:
+                bounds[n] = b[:pos] + (k,) + b[pos + 1:]
     units: list[Unit] = []
     seen = Counter()
     # each section runs to the next paired heading in ITS OWN document, so a section that
@@ -267,6 +302,11 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             broken = failed_page_of(i)
             # the whole lost section: its word count, its text and every line of it highlighted (heading first)
             body = [k for k in range(an.word, end) if A.words[k].norm] if an.located else []
+            if an.located and not body:
+                # nothing of it is compared text: its "heading" is a picture's label (a dimension note "Unit: mm"
+                # set large on a drawing, in a PDF whose headings are guessed from font sizes) - not a section
+                missing_spans.pop()
+                continue
             last_page = A.words[end - 1].page + 1 if body else an.page + 1
             pages = f"p.{an.page + 1}" + (f"–{last_page}" if last_page > an.page + 1 else "")
             struct[unit_for("a", an.word).id].append(Finding(
@@ -358,7 +398,11 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
 
     doc_findings = _document_findings(A, B, cfg)
     from .checks import notes as checks_notes
-    doc_findings += checks_notes.compare(A, B, cfg)  # the same kind of note drawn another way (bar vs filled box)
+    # the same kind of note drawn another way (bar vs filled box): shown in every section that has such notes
+    note_findings = checks_notes.place(checks_notes.compare(A, B, cfg), A, units)
+    # a picture's callout numbers, labels and leader lines, prod against stage (for the image report)
+    from .checks import picture_labels as checks_picture_labels
+    picture_findings = checks_picture_labels.check(A, B, units, cfg)
     doc_findings += checks_typography.document(B, cfg)  # stage vs the design spec (config/typography.toml)
     genuine_types = set(cfg.get("genuine", {}).get("types", []))
 
@@ -376,6 +420,8 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
         findings = list(struct.get(u.id, []))
         if n == 0:
             findings += doc_findings + toc_findings
+        findings += note_findings.get(u.id, [])
+        findings += picture_findings.get(u.id, [])
         truncated: Counter = Counter()
         for fn in PIPELINE:
             res = fn(u)
@@ -427,7 +473,17 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     report(0.97, "Relating sections")
     genuine.cross_section([(u, fs) for u, fs, _ in ran], A, B, cfg, (candidate_meta or {}).get("mode", "pdf"),
                           progress=lambda m: report(0.97, f"Relating sections - {m}"))
+    # reordered text in a table: the data compared cell by cell (dropped when every cell is the same)
+    from .checks import table_cells as checks_table_cells
+    checks_table_cells.validate_reordered(ran, A, B, cfg)
     _apply_ignore(ran, A, B, cfg)
+    if cfg.get("ignore", {}).get("cover_pages", True):
+        _drop_cover_pages(ran, A, B, anA, anB)
+    keep_pics = cfg.get("assets", {}).get("report_types")
+    if keep_pics is not None:  # [assets] report_types: the only picture issues reported
+        keep_pics = set(keep_pics)
+        for _, fs, _ in ran:
+            fs[:] = [f for f in fs if f.check != "assets" or set(f.types or []) & keep_pics]
     # bold / italic on the same words is a content difference (reported with the text, not as CSS)
     for _, fs, _ in ran:
         for f in fs:
@@ -438,11 +494,18 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     genuine_skip = set(cfg.get("genuine", {}).get("exclude_checks", []))
     if cfg["report"].get("merge_nearby", True):  # one issue per place: the same kind a few lines apart
         for _, findings, _ in ran:
-            findings[:] = _merge_nearby(findings, cfg["report"].get("merge_distance", 45))
+            # image-report-only findings (one per picture) are never merged into another issue
+            apart = [f for f in findings if f.detail.get("image_report_only")]
+            findings[:] = _merge_nearby([f for f in findings if not f.detail.get("image_report_only")],
+                                        cfg["report"].get("merge_distance", 45)) + apart
     if cfg["report"].get("split_by_page", True):  # every place visible: one issue per stage page
         for _, findings, _ in ran:
             findings[:] = [g for f in findings for g in _split_by_page(f)]
     for u, findings, truncated in ran:
+        # issues for the image report only (a picture's label missing in stage): kept apart - they do not count
+        # in the section's verdict, the other reports or the viewer
+        image_only = [f for f in findings if f.detail.get("image_report_only")]
+        findings[:] = [f for f in findings if not f.detail.get("image_report_only")]
         per_check = {c: _check_summary([f for f in findings if f.check == c]) for c in CHECKS}
         for c, n in truncated.items():
             per_check[c]["truncated"] = n
@@ -452,10 +515,30 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 style_map[key]["words"] += f.detail["words"]
                 style_map[key]["sections"] += 1
 
-        # --- verdict: content by percentage, CSS separately, critical always fails
-        pct = u.content.get("match_pct", 100.0)
+        # the findings as reported, tagged genuine or not (the PDF report = genuine issues + image issues)
+        found = [{"id": f"{len(out_sections):03d}-{k:03d}", "category": CATEGORY[f.check], **f.to_json()}
+                 for k, f in enumerate(findings)]
+        for f in found:
+            genuine.tag(f, genuine_types, data_min, genuine_skip, cfg.get("genuine", {}).get("everything", False))
+        reported = sum(bool(f["genuine"]) or is_image_issue(f) for f in found)
+        # the % itself counts only the content/image/note-style kinds above, never a table merge or
+        # any other genuine finding - those still appear in the section's issue list and the report
+        counted_for_pct = sum(f["genuine"] and bool(set(f.get("types") or []) & CONTENT_PCT_TYPES) for f in found)
+
+        # --- verdict: the score is 100 % less issue_weight_pct (0.1 %) for each issue in the PDF report;
+        # CSS separately, critical always fails
+        pct = _issue_score(counted_for_pct, ccfg)
         content_status = ("pass" if pct >= ccfg.get("pass_pct", 98.0)
                           else "warn" if pct >= ccfg.get("warn_pct", 90.0) else "fail")
+        # text genuinely absent from stage (not merely moved/reordered) is never cheap enough to pass: at
+        # 0.1 % per issue a section would need 20 such findings before the flat per-issue score even reaches
+        # WARN, hiding a real content loss behind "PASS"
+        if content_status == "pass" and any(f["genuine"] and "missing text" in f["types"] for f in found):
+            content_status = "warn"
+        # a section that passes is OK: its issues take nothing off the document's overall score (they are
+        # still listed in the report) - but the section's own displayed % is always the real computed score,
+        # not rounded up to 100, so a passing section with issues does not look like a clean 100 % match
+        counted = 0 if content_status == "pass" else counted_for_pct
         critical = [f for f in findings if f.critical]
         css = [f for f in findings if f.check in ("style", "layout")]
         other = max((SEVERITY_RANK[f.severity] for f in findings
@@ -468,7 +551,9 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             "level": u.a_anchor.level if u.a_anchor else 0,
             "candidate_title": u.b_anchor.title if u.b_anchor else u.title,
             "status": status,
-            "content": {**u.content, "status": content_status},
+            # match_pct: the issue score; word_match_pct: prod words present in stage (the former score)
+            "content": {**u.content, "word_match_pct": u.content.get("match_pct", 100.0), "match_pct": pct,
+                        "issues": reported, "counted_issues": counted, "status": content_status},
             "css": {"issues": len(css), "status": "warn" if css else "pass",
                     "style": sum(f.check == "style" for f in css), "layout": sum(f.check == "layout" for f in css)},
             "critical": len(critical),
@@ -477,10 +562,11 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             "candidate": {"start": _pos(B, u.b_range[0]), "end": _pos(B, u.b_range[1]), "words": u.b_range[1] - u.b_range[0]},
             "checks": per_check,
             "categories": {c: sum(CATEGORY[f.check] == c for f in findings) for c in CATEGORIES},
-            "findings": [{"id": f"{len(out_sections):03d}-{k:03d}", "category": CATEGORY[f.check], **f.to_json()}
-                         for k, f in enumerate(findings)],
+            "findings": found,
+            "image_findings": [{"id": f"{len(out_sections):03d}-i{k:02d}", "category": CATEGORY[f.check], **f.to_json()}
+                               for k, f in enumerate(image_only)],
         })
-        for f in out_sections[-1]["findings"]:
+        for f in out_sections[-1]["image_findings"]:
             genuine.tag(f, genuine_types, data_min, genuine_skip, cfg.get("genuine", {}).get("everything", False))
         out_sections[-1]["genuine"] = sum(f["genuine"] for f in out_sections[-1]["findings"])
 
@@ -503,7 +589,11 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             "sections": len(out_sections),
             "pass": status["pass"], "warn": status["warn"], "fail": status["fail"],
             "content": {
-                "match_pct": round(100.0 * good_words / base_words, 2) if base_words else 100.0,
+                "match_pct": _issue_score(sum(s["content"]["counted_issues"] for s in out_sections), ccfg),
+                "issues": sum(s["content"]["issues"] for s in out_sections),
+                "counted_issues": sum(s["content"]["counted_issues"] for s in out_sections),
+                "issue_weight_pct": ccfg.get("issue_weight_pct", 0.1),
+                "word_match_pct": round(100.0 * good_words / base_words, 2) if base_words else 100.0,
                 "baseline_words": sum(s["content"].get("baseline_words", 0) for s in out_sections),
                 "missing_words": sum(s["content"].get("missing_words", 0) for s in out_sections),
                 "extra_words": sum(s["content"].get("extra_words", 0) for s in out_sections),
@@ -690,10 +780,57 @@ def _resolve_one_sided(u: Unit, findings: list[Finding], cfg: dict) -> None:
     a2b, b2a = al.a2b, al.b2a
 
     sev = cfg["sections"].get("outline_only_severity", "warning")
+    import re as _re
+    key = lambda t: _re.sub(r"[^\w]+", "", (t or "").lower())
+
+    def find_title(doc, rng, title):
+        """First word of `title` as consecutive words of doc within rng (case and punctuation ignored:
+        "Blurred image." heads a stage section, prod has the line "Blurred image")."""
+        words = [k for k in (key(t) for t in (title or "").split()) if k]
+        if not words:
+            return None
+        ws = doc.words
+        lo, hi = max(0, rng[0]), min(len(ws), rng[1])
+        for k in range(lo, hi - len(words) + 1):  # the same words, anywhere
+            if all(key(ws[k + n].text) == words[n] for n in range(len(words))):
+                return k
+        # the same letters split into other words: prod prints a step "6.Turn-on the power." (one word
+        # "6.Turn-on"), the stage bookmark reads "6. Turn-on the power." - accepted only as whole lines, as a heading
+        # is set (not the same names in a sentence, a list of models or a wrapped table cell "SL5504/ | SH5504")
+        want = "".join(words)
+        for k in range(lo, hi):
+            if doc.lines[ws[k].line].first_word != k or not key(ws[k].text):
+                continue
+            got, n = "", k
+            head = doc.lines[ws[k].line]
+            # one line - or a heading wrapped onto the next lines, in the same size above body text ("9.Position your
+            # keyboard" / "properly.", 15 pt); not body-size text wrapped in a table cell
+            same = lambda m: ws[m].line == ws[k].line or (head.size >= (doc.body_size or 0) + 1
+                                                          and abs(doc.lines[ws[m].line].size - head.size) < 0.3)
+            while n < hi and len(got) < len(want) and same(n):
+                got += key(ws[n].text)
+                if not want.startswith(got):
+                    break
+                n += 1
+            if got == want and (n >= len(ws) or ws[n].line != ws[n - 1].line):
+                return k
+        return None
+
+    span = cfg["sections"].get("heading_search_words", 400)  # how far around the section to look for the text
     for f in findings:
         d = f.detail
         if f.check == "structure" and d.get("anchor_word") is not None:
             w = d["anchor_word"]
+            if d["anchor_side"] == "candidate" and w not in b2a and d.get("heading") \
+                    and d.get("kind") != "duplicate-section":
+                a = find_title(u.a, (u.a_range[0] - span, u.a_range[1] + span), d["heading"])
+                if a is not None:
+                    b2a = {**b2a, w: a}
+            if d["anchor_side"] == "baseline" and w not in a2b and d.get("heading") \
+                    and d.get("kind") != "duplicate-section":
+                b = find_title(u.b, (u.b_range[0] - span, u.b_range[1] + span), d["heading"])
+                if b is not None:
+                    a2b = {**a2b, w: b}
             if d["anchor_side"] == "candidate" and w in b2a:
                 # the heading's text is in prod right here (a sub-heading prod does not bookmark): not an
                 # extra section, nor a second copy of a same-titled section - only the bookmarks differ
@@ -1011,10 +1148,54 @@ def _apply_ignore(ran, A: Doc, B: Doc, cfg: dict) -> None:
             if rm:
                 rest = [t for t in types if t not in rm]
                 if not rest:
+                    genuine.credit_dropped(u, f)  # its words do not count against the content % either
                     continue
                 f.types = rest
             keep.append(f)
         findings[:] = keep
+
+
+def _drop_cover_pages(ran, A: Doc, B: Doc, anA: list, anB: list) -> None:
+    """[ignore] cover_pages: an issue whose every spot is on the first or last page of its PDF (cover,
+    back cover: "BenQ.com © 2025 BenQ Corporation ...") is not reported. Text missing / added there is
+    not counted against the section's content match either. A first / last page that holds a section
+    heading is content (stage ends on the "Working with a tripod" page: no back cover), and a short
+    PDF (a page or two) has no cover."""
+    def edge(doc: Doc, anchors: list) -> set:
+        if len(doc.pages) < 4:
+            return set()
+        return {0, len(doc.pages) - 1} - {an.page for an in anchors}
+    ea, eb = edge(A, anA), edge(B, anB)
+
+    def on_cover(f: Finding) -> bool:  # (the TOC is compared on its own: its spots are the TOC page)
+        return f.check != "toc" and bool(f.baseline or f.candidate) and all(l.page in ea for l in f.baseline) \
+            and all(l.page in eb for l in f.candidate)
+
+    for u, findings, _ in ran:
+        cover = [f for f in findings if on_cover(f)]
+        if not cover:
+            continue
+        findings[:] = [f for f in findings if not any(f is x for x in cover)]
+        c = u.content
+        if not c:
+            continue
+        for f in cover:
+            if f.check != "content" or f.detail.get("op") not in ("delete", "insert"):
+                continue
+            n = f.detail.get("words", 0)
+            if f.detail["op"] == "delete":
+                c["baseline_words"] = max(0, c.get("baseline_words", 0) - n)
+                c["missing_words"] = max(0, c.get("missing_words", 0) - f.detail.get("absent_words", n))
+            else:
+                c["extra_words"] = max(0, c.get("extra_words", 0) - n)
+        denom = c.get("baseline_words", 0) + c.get("extra_words", 0)
+        good = c.get("matched_words", 0) - c.get("spacing_issues", 0) - c.get("script_issues", 0)
+        c["match_pct"] = round(100.0 * max(good, 0) / denom, 2) if denom else 100.0
+
+
+def _issue_score(issues: int, ccfg: dict) -> float:
+    """100 % less [content] issue_weight_pct (default 0.1 %) for each issue in the PDF report, never below 0."""
+    return round(max(0.0, 100.0 - ccfg.get("issue_weight_pct", 0.1) * issues), 2)
 
 
 def _spec_prod_spots(ran, cfg: dict) -> None:

@@ -259,6 +259,7 @@ def check(u: Unit) -> list[Finding]:
         if (abs(la.bbox[0] - lb.bbox[0]) > 2 * spec["size"] or len(la.text.strip()) < 3 or len(lb.text.strip()) < 3
                 or not 0.5 * spec["line_height"] <= got <= 1.6 * spec["line_height"]):
             continue
+        u.cfg.setdefault("_typo_lh", {}).setdefault(r, Counter())[round(got * 2) / 2] += 1  # for the report's table
         if abs(got - spec["line_height"]) > lh_tol:
             groups[(r, "line-height", f"{spec['line_height']:g}pt", f"{round(got * 2) / 2:g}pt")].append(ib)
 
@@ -349,13 +350,16 @@ def reference(B: Doc, cfg: dict) -> dict | None:
 
 
 def _stage_actual(cfg: dict, role: str, weights: dict) -> dict | None:
-    """The font, weight, size and colour stage uses most for this style, and how many words use it."""
+    """The font, weight, size, line height and colour stage uses most for this style, and how many words use it
+    (line height: None when the style has no wrapped paragraph lines in stage to measure)."""
     c = (cfg.get("_typo_actual") or {}).get(role)
     if not c:
         return None
     (fam, wt, size, col), n = c.most_common(1)[0]
     names = {v: k for k, v in weights.items()}
+    lh = (cfg.get("_typo_lh") or {}).get(role)  # line height: the most common between wrapped lines of the style
     return {"font": fam, "weight": names.get(wt, str(wt)), "size": size, "color": col,
+            "line_height": lh.most_common(1)[0][0] if lh else None,
             "share": round(n / sum(c.values()), 2), "words": sum(c.values())}
 
 

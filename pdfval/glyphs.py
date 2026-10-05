@@ -83,7 +83,10 @@ def _suspects(pdf, fonts: set) -> tuple[list[set], set]:
         pos.append(here)
     # only fonts that are mostly unreadable: a stray unmapped glyph in a working font (an Arabic
     # ligature, a ﬁ) is one shaped glyph for several characters, not a character to read back
-    distrust = {f for f in total if unmapped[f] >= 0.5 * total[f] and unmapped[f] >= 5}
+    # A font used for one short word only (an OSD language list: “简体中文” in its own font, 4 glyphs)
+    # is as unreadable when every one of its glyphs is unmapped: read back too
+    distrust = {f for f in total if unmapped[f] >= 0.5 * total[f]
+                and (unmapped[f] >= 5 or unmapped[f] == total[f] >= 2)}
     return pos, distrust
 
 
@@ -142,10 +145,17 @@ def _lang(fonts, cfg_lang: str | None) -> str:
     if cfg_lang and cfg_lang != "auto":
         want = cfg_lang.split("+")
     else:
-        names = " ".join(fonts).lower()
-        want = [lang for pat, lang in _LANG_HINTS if re.search(pat, names)][:1] or ["chi_tra", "chi_sim"]
+        # every script the fonts name (a language list has Simplified Chinese, Traditional Chinese and
+        # Korean fonts side by side): one alone reads the others' glyphs as its own characters
+        want = list(dict.fromkeys(lang for f in fonts if (lang := _font_lang(f)))) or ["chi_tra", "chi_sim"]
         want.append("eng")
     return "+".join(x for x in want if x in have)
+
+
+def _font_lang(font: str, default: str | None = None) -> str | None:
+    """The tesseract language a font's name points to (“NotoSansKR-Bold” -> kor), else default."""
+    name = (font or "").lower()
+    return next((lang for pat, lang in _LANG_HINTS if re.search(pat, name)), default)
 
 
 _LANGS: list[str] | None = None
@@ -498,8 +508,10 @@ def decoder(pdf, path: str, cfg: dict, reference: str | None = None) -> dict:
     clip = lambda b: pymupdf.Rect(b[0] - 3, b[1] - 2, b[2] + 3, b[3] + 2)
     line_dpi = lambda b: int(min(800, max(300, 72 * 40 / max(b[3] - b[1], 1))))  # text ~40 px high
     with ThreadPoolExecutor(max_workers=6) as ex:
-        alone = list(ex.map(lambda k: _ocr_glyph(path, pages[k], where[k][2], single_lang), unsure))
-        reread = list(ex.map(lambda t: _ocr_chars(path, t[0], single_lang, line_dpi(t[1]), clip(t[1]), psm=7), again))
+        # each glyph in its own font's script, each line in the script of its unreadable glyphs
+        own = lambda gs: Counter(_font_lang(g[0], single_lang) for g in gs if g[4]).most_common(1)[0][0]
+        alone = list(ex.map(lambda k: _ocr_glyph(path, pages[k], where[k][2], _font_lang(k[0], single_lang)), unsure))
+        reread = list(ex.map(lambda t: _ocr_chars(path, t[0], own(t[2]), line_dpi(t[1]), clip(t[1]), psm=7), again))
     for k, ch in zip(unsure, alone):
         if ch:
             votes[k][_norm_read(ch, where[k][2], where[k][3])] += 2.0

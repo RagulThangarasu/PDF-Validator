@@ -441,7 +441,7 @@ function renderSide() {
   if (!s) { body.innerHTML = '<div class="empty">Select a section.</div>'; return; }
   const fs = s.findings.map((f, i) => [f, i]).filter(([f]) => state.cats.has(f.category));
   body.innerHTML = `<div class="sechead"><h2>${esc(s.title)}</h2>
-    <div class="meta">Baseline p.${s.baseline.start.page + 1}–${s.baseline.end.page + 1} · Candidate p.${s.candidate.start.page + 1}–${s.candidate.end.page + 1} · content match <b>${s.content.match_pct.toFixed(2)}%</b> (${s.content.status}) · ${s.content.missing_words} missing / ${s.content.extra_words} extra words · CSS issues ${s.css.issues}${s.critical ? ` · <span class="crit">${s.critical} critical</span>` : ''}</div></div>
+    <div class="meta">Baseline p.${s.baseline.start.page + 1}–${s.baseline.end.page + 1} · Candidate p.${s.candidate.start.page + 1}–${s.candidate.end.page + 1} · score <b>${s.content.match_pct.toFixed(2)}%</b> (${s.content.issues ?? 0} issues) · ${s.content.missing_words} missing / ${s.content.extra_words} extra words · CSS issues ${s.css.issues}${s.critical ? ` · <span class="crit">${s.critical} critical</span>` : ''}</div></div>
     <div class="checks" style="grid-template-columns:repeat(7,1fr)">${CATS.map(([c, l]) => `<div style="border-top:3px solid ${CAT_COLOR[c]}"><b>${s.categories?.[c] ?? 0}</b>${l}</div>`).join('')}</div>` +
     (fs.map(([f, i]) => {
       const pa = f.baseline[0] ? 'p.' + (f.baseline[0].page + 1) : '—', pb = f.candidate[0] ? 'p.' + (f.candidate[0].page + 1) : '—';

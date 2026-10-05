@@ -16,7 +16,7 @@ This module
 from __future__ import annotations
 
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 
 import pymupdf
 
@@ -33,6 +33,9 @@ _GOTO = (pymupdf.LINK_GOTO, pymupdf.LINK_NAMED)
 
 # text a reader sees in stage, only not as live text: dropped unless [genuine] report_visually_present = true
 VISUALLY_PRESENT = {"label in picture", "text in image", "text as graphic"}
+# text that belongs to a picture (its labels, callout numbers, dimension lines): dropped unless
+# [genuine] report_image_labels = true
+IMAGE_TEXT = {"missing image label", "label in picture", "text in image"}
 
 
 def cross_section(results: list[tuple[Unit, list[Finding]]], A: Doc, B: Doc, cfg: dict, mode: str = "pdf",
@@ -45,8 +48,10 @@ def cross_section(results: list[tuple[Unit, list[Finding]]], A: Doc, B: Doc, cfg
     _duplicate_images(results, A, B, cfg)
     _content(results, gcfg.get("moved_min_words", 5), gcfg.get("moved_overlap", 0.8))
     _duplicate_content(results, A, gcfg.get("moved_min_words", 5), gcfg.get("moved_overlap", 0.8))
+    _repeated_content(results, A, B, gcfg.get("duplicate_min_words", 3))
     say("Looking for missing text drawn as graphics")
     _text_as_graphics(results, A, B, cfg)  # first: it finds the text at its own spot, OCR anywhere
+    _graphics_in_prod(results, A, B, cfg)  # the other way: extra stage text that prod has drawn as a graphic
     _text_in_images(results, A, B, cfg, say)
     say("Checking links and image labels")
     _image_labels(results, A, B, cfg)
@@ -55,8 +60,34 @@ def cross_section(results: list[tuple[Unit, list[Finding]]], A: Doc, B: Doc, cfg
     if not gcfg.get("report_visually_present", False):
         # the text is there for the reader, only drawn into the stage picture instead of live text: not an issue
         # (the steps above still used these to know the words are not missing)
-        for _, findings in results:
+        for u, findings in results:
+            for f in findings:
+                if set(f.types or []) and set(f.types) <= VISUALLY_PRESENT:
+                    credit_dropped(u, f)
             findings[:] = [f for f in findings if not (set(f.types or []) and set(f.types) <= VISUALLY_PRESENT)]
+    if not gcfg.get("report_image_labels", False):
+        # labels, numbers and callout text in / on a picture (prod live text, stage drawn into the picture or
+        # without it): content of the image, not reported. A finding that is only that is dropped; one with
+        # another difference keeps that difference.
+        for u, findings in results:
+            keep = []
+            for f in findings:
+                types = set(f.types or [])
+                if types & IMAGE_TEXT:
+                    rest = [t for t in (f.types or []) if t not in IMAGE_TEXT]
+                    if not rest:
+                        credit_dropped(u, f)
+                        if "missing image label" in types:
+                            # a label of the picture missing in stage: kept for the image report only
+                            # (image-issues.pdf), not counted or shown anywhere else
+                            f.detail = {**f.detail, "image_report_only": True}
+                            keep.append(f)
+                        continue
+                    f.types = rest
+                keep.append(f)
+            findings[:] = keep
+        _drop_picture_text(results, A, B, cfg)
+    _xref_format(results, A, B)
     # suppress false "missing text" findings when the text appears in stage links
     _suppress_link_text_missing(results, B, cfg)
     if cfg["integrity"].get("links", True):
@@ -237,6 +268,108 @@ def _duplicate_content(results, A: Doc, min_words: int, overlap: float) -> None:
             f.detail = {**f.detail, "op": "duplicate", "baseline_section": src.title}
 
 
+def _repeated_content(results, A: Doc, B: Doc, min_words: int) -> None:
+    """Extra stage text that repeats content: judged by the content, not by headings. Points repeated
+    under one heading (the heading once, its bullets twice), a paragraph repeated in its own section, a
+    section's text repeated under another (or an unbookmarked) heading. Every sentence / bullet / line
+    block of stage that stage has more often than prod is a duplicate; an extra-text finding made of
+    such sentences is that duplicate (with other new words in it: both). Text read in another order
+    (a table) has the same count on both sides: not a duplicate."""
+    def sentences(doc: Doc) -> list[tuple[tuple, list[int]]]:
+        out, cur, toks = [], [], []
+
+        def close():
+            if len(toks) >= min_words:
+                out.append((tuple(toks), list(cur)))
+            cur.clear()
+            toks.clear()
+        prev_block = None
+        for k, w in enumerate(doc.words):
+            block = doc.lines[w.line].block if 0 <= w.line < len(doc.lines) else None
+            bullet = not any(c.isalnum() for c in w.text) and w.text.strip() in ("•", "·", "–", "-", "▪", "■", "○", "◦")
+            if (block != prev_block or bullet or w.page != (doc.words[k - 1].page if k else w.page)) and cur:
+                close()
+            prev_block = block
+            cur.append(k)
+            toks.extend(_tokens(w.text))
+            if re.search(r"[.!?:;]$", w.text):
+                close()
+        close()
+        return out
+
+    from .checks.table_cells import _page_tables
+    tbox: dict = {}
+
+    def in_table(doc: Doc, ws: list[int]) -> bool:
+        # table rows repeat by design (“HDMI v v v” in every colour-space table): the cell check's job
+        w = doc.words[ws[0]]
+        key = (id(doc), w.page)
+        if key not in tbox:
+            tbox[key] = [t["bbox"] for t in _page_tables(doc, w.page)]
+        cx, cy = (w.bbox[0] + w.bbox[2]) / 2, (w.bbox[1] + w.bbox[3]) / 2
+        return any(b[0] <= cx <= b[2] and b[1] <= cy <= b[3] for b in tbox[key])
+
+    sa = [(t, ws) for t, ws in sentences(A) if not in_table(A, ws)]
+    sb = [(t, ws) for t, ws in sentences(B) if not in_table(B, ws)]
+    count_a = Counter(t for t, _ in sa)
+    count_b = Counter(t for t, _ in sb)
+    # prod content that stage has more often: a copy of what prod has (text new to stage is extra text)
+    dup = [(t, ws) for t, ws in sb if count_b[t] > count_a[t] >= 1]
+    if not dup:
+        return
+    section_of = lambda k: next((u for u, _ in results if u.b_range[0] <= k < u.b_range[1]), None)
+
+    def inside(k: int, f: Finding) -> bool:
+        w = B.words[k]
+        cx, cy = (w.bbox[0] + w.bbox[2]) / 2, (w.bbox[1] + w.bbox[3]) / 2
+        return any(l.page == w.page and l.bbox[0] - 1 <= cx <= l.bbox[2] + 1 and l.bbox[1] - 1 <= cy <= l.bbox[3] + 1
+                   for l in f.candidate)
+
+    times = lambda n: "once" if n == 1 else f"{n} times"
+    for u, fs in results:
+        for f in [f for f in fs if f.check == "content" and "extra text" in (f.types or [])
+                  and f.detail.get("op") in ("insert", "replace") and not f.detail.get("moved_in") and f.candidate]:
+            hits = [(t, ws) for t, ws in dup if sum(inside(k, f) for k in ws) >= 0.6 * len(ws)]
+            if not hits:
+                continue
+            n_dup = sum(len(t) for t, _ in hits)
+            extra = len(_tokens(f.detail.get("candidate_text")))
+            t0, ws0 = hits[0]
+            # the other copy of the first duplicated sentence: an occurrence outside this finding
+            other = next((ws for t, ws in sb if t == t0 and not any(inside(k, f) for k in ws)), None)
+            where = ""
+            if other:
+                w, ou = B.words[other[0]], section_of(other[0])
+                where = f" (the other copy: stage p.{w.page + 1}" + \
+                    (f", “{ou.title}”)" if ou is not None and ou is not u else ", same section)")
+            text = " ".join(" ".join(B.words[k].text for k in ws) for _, ws in hits)
+            f.message = (f"Content duplicated in stage: “{snippet_text(text)}” is in stage {times(count_b[t0])} "
+                         f"but {times(count_a[t0])} in prod{where}"
+                         + (f" · {f.message}" if n_dup < 0.8 * extra else ""))
+            f.severity = "error"
+            f.types = ["duplicate content"] + ([t for t in f.types if t != "duplicate content"] if n_dup < 0.8 * extra else [])
+            f.detail = {**f.detail, "op": "duplicate", "duplicated_text": text, "stage_copies": count_b[t0],
+                        "prod_copies": count_a[t0],
+                        **({"other_copy": {"page": B.words[other[0]].page, "bbox": list(B.words[other[0]].bbox)}} if other else {})}
+    # an extra section (a heading prod does not have) whose text is all duplicated: the section is a duplicate
+    for u, fs in results:
+        for sf in [f for f in fs if f.check == "structure" and f.detail.get("anchor_side") == "candidate"
+                   and f.detail.get("anchor_word") is not None and "Extra section" in f.message]:
+            k = sf.detail["anchor_word"]
+            body = next((f for f in fs if "duplicate content" in (f.types or []) and len(f.types) == 1
+                         and (inside(k, f) or any(l.page == B.words[k].page and 0 <= l.bbox[1] - B.words[k].bbox[3] <= 40
+                                                  for l in f.candidate[:1]))), None)
+            if body is None:
+                continue
+            title = sf.detail.get("heading", "")
+            sf.message = (f"Duplicate section in stage: “{title}” (p.{B.words[k].page + 1}) repeats content stage already "
+                          f"has: {body.message.removeprefix('Content duplicated in stage: ')}")
+            sf.severity, sf.critical, sf.types = "error", True, ["duplicate section"]
+            sf.candidate = [*sf.candidate, *body.candidate]
+            sf.detail = {**sf.detail, "kind": "duplicate-section", "folded": sf.detail.get("folded", 0) + 1}
+            fs.remove(body)
+
+
 def _figures(A: Doc, cfg: dict) -> dict[int, list[pymupdf.Rect]]:
     """Where prod has figures, per page: its pictures (not icons) and its line drawings - vector
     paths with curves (a lamp, a person, a hand), merged into one box per drawing. Table rules
@@ -332,8 +465,28 @@ def _text_in_images(results, A: Doc, B: Doc, cfg: dict, progress=None) -> None:
             f.severity, f.critical, f.types = "info", False, ["text in image"]
             f.message = f"Text drawn in a picture in stage (read by OCR, stage p.{hit.page + 1}): “{snippet_text(text)}”"
             f.candidate, f.candidate_at = [Loc(hit.page, hit.bbox)], None
-            f.detail = {**f.detail, "ocr_page": hit.page, "ocr_box": list(hit.bbox)}
+            f.detail = {**f.detail, "ocr_page": hit.page, "ocr_box": list(hit.bbox), "credited": True}
             _count_present(u, n)
+
+
+def credit_dropped(u: Unit, f: Finding) -> None:
+    """A text finding left out of the report (picture labels, text drawn into a picture, an ignored type): its
+    words are not a content difference either - prod's missing words count as matched, stage's extra words
+    as nothing extra - so the content % says the same as the issues do. Once per finding."""
+    if not u.content or f.detail.get("credited") or f.check not in ("content", "layout"):
+        return
+    f.detail["credited"] = True
+    base, cand = _tokens(f.detail.get("baseline_text")), _tokens(f.detail.get("candidate_text"))
+    if base and (f.candidate == [] or "missing" in " ".join(f.types or []) or "label" in " ".join(f.types or [])
+                 or "graphic" in " ".join(f.types or []) or "image" in " ".join(f.types or [])):
+        _count_present(u, len(base))
+    elif cand and not base:
+        c = u.content
+        gone = min(len(cand), c.get("extra_words", 0))
+        c["extra_words"] -= gone
+        denom = c["baseline_words"] + c["extra_words"]
+        c["match_pct"] = round(100.0 * max(c["matched_words"] - c.get("spacing_issues", 0)
+                                           - c.get("script_issues", 0), 0) / denom, 2) if denom else 100.0
 
 
 def _count_present(u: Unit, n: int) -> None:
@@ -394,8 +547,148 @@ def _text_as_graphics(results, A: Doc, B: Doc, cfg: dict) -> None:
                 f.message = (f"Text shown as a graphic in stage, not as live text: “{snippet_text(text)}” "
                              f"(prod p.{f.baseline[0].page + 1} ↔ stage p.{at.page + 1})")
                 f.candidate, f.candidate_at = [Loc(at.page, r) for r in found], None
-                f.detail = {**f.detail, "kind": "text-as-graphic"}
+                f.detail = {**f.detail, "kind": "text-as-graphic", "credited": True}
                 _count_present(u, len(_tokens(text)))
+
+
+def _graphics_in_prod(results, A: Doc, B: Doc, cfg: dict) -> None:
+    """Extra stage text that prod shows as a graphic, not live text: a word converted to outlines in
+    prod (“العربية” in the OSD language list - vector paths, no text to extract) is live text in
+    stage. Each extra stage line is rendered and searched for among prod's pictures / drawings
+    around the aligned spot (prod's live text blanked). Found: the text is in prod too - not extra
+    content (“text as graphic”: reported only with [genuine] report_visually_present)."""
+    ccfg = cfg["content"]
+    if not ccfg.get("graphic_text", True):
+        return
+    max_words, thr = ccfg.get("graphic_text_max_words", 12), ccfg.get("graphic_text_score", 0.72)
+    edge_thr = ccfg.get("graphic_text_edge_score", 0.65)
+    hays: dict[tuple, "np.ndarray"] = {}
+    claimed: set = set()
+    for u, fs in results:
+        for f in [f for f in fs if f.check == "content" and "extra text" in (f.types or [])
+                  and f.detail.get("op") == "insert" and f.baseline_at and f.candidate
+                  and 0 < f.detail.get("words", 0) <= max_words]:
+            if not any(ch.isalnum() for ch in f.detail.get("candidate_text") or ""):
+                continue  # a lone bullet / dash matches any stroke
+            found = []
+            for loc in f.candidate:
+                hit = _drawn(B, loc.bbox, loc.page, A, f.baseline_at, thr, edge_thr, hays)
+                if hit is None and len(f.candidate) == 1 and f.detail.get("words", 0) <= 3:
+                    # drawn in another font (prod's outlines are not stage's font: the pixels differ)
+                    hit = _outlined_word(B, loc, A, f.baseline_at, claimed)
+                if hit is None:
+                    break
+                found.append(hit)
+            else:
+                text = f.detail.get("candidate_text", "")
+                f.check, f.severity, f.critical = "layout", ccfg.get("graphic_text_severity", "warning"), False
+                f.types = ["text as graphic"]
+                f.message = (f"Text shown as a graphic in prod, as live text in stage: “{snippet_text(text)}” "
+                             f"(prod p.{f.baseline_at.page + 1} ↔ stage p.{f.candidate[0].page + 1})")
+                f.baseline, f.baseline_at = [Loc(f.baseline_at.page, r) for r in found], None
+                f.detail = {**f.detail, "kind": "text-as-graphic", "credited": True}
+                c = u.content
+                if c:  # its words are in prod: not extra
+                    c["extra_words"] = max(0, c.get("extra_words", 0) - len(_tokens(text)))
+                    denom = c["baseline_words"] + c["extra_words"]
+                    c["match_pct"] = round(100.0 * max(c["matched_words"] - c.get("spacing_issues", 0)
+                                                       - c.get("script_issues", 0), 0) / denom, 2) if denom else 100.0
+
+
+def _outlined_word(B: Doc, loc: Loc, A: Doc, at: Loc, claimed: set):
+    """Prod rect of a word converted to outlines at the aligned spot: one filled dark vector path of
+    many curve / line segments, shaped like the stage word's ink (same aspect ratio, a text-sized
+    height), in the same column a line or two from the spot, with no live prod text on it. For a
+    word in another font, where the pixels of the two do not match."""
+    import numpy as np
+    from .checks.assets import _gray
+    g = _gray(B, loc.page, loc.bbox, 4.0)
+    if g.size == 0:
+        return None
+    ys, xs = np.where(g < 128)
+    if not len(xs):
+        return None
+    iw, ih = (xs.max() - xs.min() + 1) / 4, (ys.max() - ys.min() + 1) / 4
+    if ih < 3:
+        return None
+    pdf = pymupdf.open(A.path)
+    best = None
+    for d in pdf[at.page].get_drawings():
+        r = d["rect"]
+        fill = d.get("fill")
+        if (at.page, round(r.x0), round(r.y0)) in claimed or not fill or sum(fill) / 3 > 0.5:
+            continue
+        if len(d["items"]) < 12 or not any(it[0] == "c" for it in d["items"]):
+            continue  # a glyph outline is curves; a rule or box is not
+        if not (0.6 * ih <= r.height <= 2.0 * ih) or not 0.65 <= (r.width / r.height) / (iw / ih) <= 1.5:
+            continue
+        if r.x1 < at.bbox[0] - 40 or r.x0 > at.bbox[2] + 40:
+            continue  # another column
+        gap = max(at.bbox[1] - r.y1, r.y0 - at.bbox[3], 0)
+        if gap > 3 * max(at.bbox[3] - at.bbox[1], r.height):
+            continue
+        if any(w.page == at.page and _in(w, r) for w in A.words):
+            continue  # live text there: not an outlined word
+        if best is None or gap < best[0]:
+            best = (gap, r)
+    if best is None:
+        return None
+    r = best[1]
+    # the shape only says “a word is drawn here”: what it says is read (OCR, in the stage word's script)
+    # and must be the stage word - else the stage text is extra after all
+    text = " ".join(w.text for w in B.words if w.page == loc.page and _in(w, pymupdf.Rect(loc.bbox)))
+    if not _reads_as(A.path, at.page, (r.x0, r.y0, r.x1, r.y1), text):
+        return None
+    claimed.add((at.page, round(r.x0), round(r.y0)))
+    return (r.x0, r.y0, r.x1, r.y1)
+
+
+# Unicode script of a word -> tesseract language
+_SCRIPTS = [((0x0600, 0x06FF), "ara"), ((0x0750, 0x077F), "ara"), ((0xFB50, 0xFDFF), "ara"), ((0xFE70, 0xFEFF), "ara"),
+            ((0x0590, 0x05FF), "heb"), ((0x0E00, 0x0E7F), "tha"), ((0x0900, 0x097F), "hin"), ((0x0400, 0x04FF), "rus"),
+            ((0x0370, 0x03FF), "ell"), ((0xAC00, 0xD7AF), "kor"), ((0x3040, 0x30FF), "jpn"), ((0x4E00, 0x9FFF), "chi_sim+chi_tra")]
+
+
+def _reads_as(path: str, page: int, box: tuple, text: str) -> bool:
+    """Does the drawing in `box` read as `text`? OCR as one line in the word's own script; letters
+    and digits compared after Unicode normalisation (Arabic presentation forms “ﺍﻟﻌﺮﺑﻴﺔ” are
+    “العربية”), about one wrong character in five allowed. False when OCR is not available."""
+    import subprocess
+    import unicodedata
+    from . import ocr as _ocr
+    from .glyphs import _langs
+    if not _ocr.available():
+        return False
+    key = lambda t: "".join(c for c in unicodedata.normalize("NFKC", t or "") if c.isalnum()).lower()
+    want = key(text)
+    if not want:
+        return False
+    code = next((ord(c) for c in want if not c.isascii()), None)
+    lang = next((l for (lo, hi), l in _SCRIPTS if code is not None and lo <= code <= hi), "eng")
+    have = set(_langs())
+    lang = "+".join(x for x in lang.split("+") if x in have) or "eng"
+    pdf = pymupdf.open(path)
+    for pad, psm in ((2, "7"), (2, "8"), (6, "7")):
+        rect = pymupdf.Rect(box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
+        png = pdf[page].get_pixmap(clip=rect, dpi=300, colorspace=pymupdf.csGRAY).tobytes("png")
+        try:
+            got = key(subprocess.run(["tesseract", "stdin", "stdout", "-l", lang, "--psm", psm], input=png,
+                                     capture_output=True, timeout=60).stdout.decode("utf-8", "replace"))
+        except Exception:
+            continue
+        if got and _edits(want, got) <= len(want) // 5:
+            return True
+    return False
+
+
+def _edits(a: str, b: str) -> int:
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
 
 
 def _drawn(A: Doc, box, page: int, B: Doc, at: Loc, thr: float, edge_thr: float, hays: dict, lo: float = 0.8):
@@ -495,22 +788,241 @@ def _glyphs_match(A: Doc, a_page: int, box, B: Doc, page: int, near, edge_thr: f
     return best[2] if best and best[1] >= edge_thr else None
 
 
+def skip_picture_text(doc: Doc, cfg: dict) -> int:
+    """Text that belongs to a picture is artwork, not content: the words on a picture (an embedded image or a
+    vector illustration - callout letters “a b c d”, “Computer / gaming console”, port names) and short labels
+    set right at its edge (“Inside the VESA cover” at the end of a leader line) are taken out of every
+    comparison (content, fonts, labels) - prod's diagram font “c” is never compared with stage's table “c.”.
+    Returns the number of words taken out."""
+    from .checks.assets import icon_max
+    acfg = cfg.get("assets", {})
+    n = 0
+    by_line: dict[int, list] = defaultdict(list)
+    for k, w in enumerate(doc.words):
+        by_line[w.line].append(k)
+    block_words = Counter(doc.lines[w.line].block for w in doc.words if w.norm)
+    doc.picture_text = {}  # (page, picture box) -> word indices of its labels / callout numbers
+    pics: dict[int, list] = {}
+    for w in doc.words:
+        if w.page in pics:
+            continue
+        rs = [x for x in doc.images if x.page == w.page and not icon_max(doc, x, acfg)]
+        pics[w.page] = [x.bbox for x in rs] + [x.bbox for x in _vector_pictures(doc, w.page)] + \
+            [x.bbox for x in _line_drawings(doc, w.page)]
+        try:  # layout diagrams drawn as plain boxes with a code in each (“(1.1)” “(2.1)”): figures too
+            from .checks import tables as _t
+            pics[w.page] += _t.diagram_boxes(doc, w.page)
+        except Exception:
+            pass
+    # text in a table is content, even where the table's drawn number badges (❾ ❿) make its region look like
+    # a vector picture: a table row's short cells ("Your Apps", "Browse your installed apps.") are never artwork
+    from .checks import tables as _tables
+    tbls: dict[int, list] = {}
+
+    def in_table(w) -> bool:
+        if w.page not in tbls:
+            try:
+                figs = set(_tables.diagram_boxes(doc, w.page))  # a diagram drawn as a grid is a figure, not a table
+                tbls[w.page] = [t[1] for t in _tables._raw(doc, w.page) if tuple(t[1]) not in figs]
+            except Exception:
+                tbls[w.page] = []
+        cx, cy = (w.bbox[0] + w.bbox[2]) / 2, (w.bbox[1] + w.bbox[3]) / 2
+        return any(b[0] - 1 <= cx <= b[2] + 1 and b[1] - 1 <= cy <= b[3] + 1 for b in tbls[w.page])
+    for line, ks in by_line.items():
+        ws = [doc.words[k] for k in ks]
+        boxes = pics.get(ws[0].page) or []
+        if not boxes:
+            continue
+        x0, y0 = min(w.bbox[0] for w in ws), min(w.bbox[1] for w in ws)
+        x1, y1 = max(w.bbox[2] for w in ws), max(w.bbox[3] for w in ws)
+        cy = (y0 + y1) / 2
+        on = lambda b, w: b[0] - 2 <= (w.bbox[0] + w.bbox[2]) / 2 <= b[2] + 2 and b[1] - 2 <= (w.bbox[1] + w.bbox[3]) / 2 <= b[3] + 2
+        # a short label starting (or ending) right at a picture's edge, level with it - or tied to the picture by
+        # a leader line (a callout “1” in a box 28 pt left of a screenshot, its line running into the picture)
+        beside = len(ws) <= 6 and (any(b[1] - 4 <= cy <= b[3] + 4 and (-4 <= x0 - b[2] <= 8 or -4 <= b[0] - x1 <= 8)
+                                       for b in boxes) or _leader_to_picture(doc, ws[0].page, (x0, y0, x1, y1), boxes))
+        # a callout number set just above / below a picture, within its width (“1” over a monitor drawing, at the
+        # end of a short leader stub) - numbers only: a caption there (“(PD2720U)”) is text both sides have
+        if not beside and all(re.fullmatch(r"\(?(\d{1,2}|[A-Za-z])[.)]?", w.text) for w in ws):
+            cx = (x0 + x1) / 2
+            beside = any(b[0] - 4 <= cx <= b[2] + 4 and (0 <= b[1] - y1 <= 10 or 0 <= y0 - b[3] <= 10) for b in boxes)
+        if len(ws) > 6 or block_words.get(doc.lines[line].block, 0) > 15:
+            continue  # a sentence / paragraph (its last short line too): content, even where a drawing's box overlaps it
+        if any(w.role and w.role.startswith("h") for w in ws):
+            continue  # a heading beside a picture is the document's structure
+        if in_table(ws[0]):
+            continue
+        if _list_marker(doc, ws):
+            continue  # "1." beginning a list item whose text follows on its right: content, however close the picture
+        if _in_text_column(doc, line, by_line, block_words):
+            continue  # a bullet item, or a short line of the text column ("Remark:" under the list): content
+        for k, w in zip(ks, ws):
+            if w.norm and (beside or any(on(b, w) for b in boxes) or _floating_marker(doc, ws)):
+                # kept for the image report: the picture the label belongs to (the nearest one)
+                c = ((w.bbox[0] + w.bbox[2]) / 2, (w.bbox[1] + w.bbox[3]) / 2)
+                pic = min(boxes, key=lambda b: max(b[0] - c[0], 0, c[0] - b[2]) + max(b[1] - c[1], 0, c[1] - b[3]))
+                doc.picture_text.setdefault((w.page, tuple(round(v, 1) for v in pic)), []).append(k)
+                w.norm = ""
+                n += 1
+    return n
+
+
+_BULLETS = set("•●▪■◦‣·-–—*")
+_COLUMN: dict[tuple, list] = {}
+
+
+def _in_text_column(doc: Doc, line: int, by_line: dict, block_words) -> bool:
+    """A short line that is running text, not a picture's label, although a picture is level with it: a bullet item
+    (its bullet right before it on the row: "• M6 screw: for PL552/..."), or a line set in a column of body text -
+    directly under / above a paragraph line or a bullet item, at the same left edge ("Remark:" under the list it
+    belongs to). A label of a picture stands on its own beside the artwork."""
+    ks = by_line[line]
+    ws = [doc.words[k] for k in ks]
+    page = ws[0].page
+    key = (doc.path, len(doc.words), len(doc.lines), page)  # (not id(doc): an id is reused by a later document)
+    if key not in _COLUMN:
+        if len(_COLUMN) > 2000:
+            _COLUMN.clear()
+        rows = []
+        for li, idx in by_line.items():
+            lw = [doc.words[k] for k in idx]
+            if lw[0].page != page:
+                continue
+            x0, y0 = min(w.bbox[0] for w in lw), min(w.bbox[1] for w in lw)
+            x1, y1 = max(w.bbox[2] for w in lw), max(w.bbox[3] for w in lw)
+            glyph = len(lw) == 1 and lw[0].text.strip() in _BULLETS
+            starts = lw[0].text.strip() in _BULLETS and len(lw) > 1  # "• Inner loop: ..." read as one line
+            rows.append([li, x0, y0, x1, y1, len(lw), glyph, starts])
+        bullets = [r for r in rows if r[6]]
+        for r in rows:  # a bullet item: its bullet glyph on the row, just left of it - or leading its own line
+            r.append(r[7] or any(abs((b[2] + b[4]) / 2 - (r[2] + r[4]) / 2) <= 0.6 * (r[4] - r[2]) and 0 <= r[1] - b[3] <= 18
+                                 for b in bullets))
+        # running text: a long line, a line of a paragraph block, a bullet item - and, step by step, every short line
+        # directly under / above one of those at the same left edge ("Remark:" under the list, then the line under it)
+        text = {r[0] for r in rows if not r[6] and (r[5] > 6 or r[8] or block_words.get(doc.lines[r[0]].block, 0) > 15)}
+        for _ in range(6):
+            more = set()
+            for me in rows:
+                if me[0] in text or me[6]:
+                    continue
+                h = max(me[4] - me[2], 1)
+                if any(r[0] in text and -1 <= max(r[2] - me[4], me[2] - r[4]) <= 1.5 * h and abs(r[1] - me[1]) <= 14
+                       for r in rows):
+                    more.add(me[0])
+            if not more:
+                break
+            text |= more
+        _COLUMN[key] = (rows, text)
+    rows, text = _COLUMN[key]
+    me = next((r for r in rows if r[0] == line), None)
+    # (a long line needs no rescue here: only short lines are ever taken for labels)
+    return me is not None and not me[6] and len(ws) <= 6 and line in text
+
+
+_ENUM = re.compile(r"\(?(\d{1,3}|[a-zA-Z]|[ivxIVX]{1,4})[.)]")
+_BARE_MARKER = re.compile(r"\d{1,2}")
+
+
+def _floating_marker(doc: Doc, ws: list) -> bool:
+    """A bare callout number on a diagram ("1", "2" - no trailing punctuation, nothing else on its line, no
+    list item text picks it up to its right): the mirror image of a list marker, which always has item text
+    following it. Catches a callout sitting on a diagram drawn with straight/orthogonal lines only (a monitor
+    outline, a box): _vector_pictures only recognises curved or slanted-line illustrations as a picture, so a
+    plain rectangular line drawing is not in `boxes` and its callout numbers would otherwise read as content."""
+    if len(ws) != 1 or not _BARE_MARKER.fullmatch(ws[0].text.strip()):
+        return False
+    m = ws[0]
+    cy, h = (m.bbox[1] + m.bbox[3]) / 2, m.bbox[3] - m.bbox[1]
+    if any(w.page == m.page and w.line != m.line and any(c.isalpha() for c in w.text)
+           and 0 <= w.bbox[0] - m.bbox[2] <= 40 and abs((w.bbox[1] + w.bbox[3]) / 2 - cy) <= max(3.0, 0.6 * h)
+           for w in doc.words[max(0, doc.lines[m.line].first_word - 3):doc.lines[m.line].first_word + 8]):
+        return False
+    # the number cell of a table row ("2" | "LAN port" | "White" | "Flashing" | ...): its row's cells run on to its
+    # right, further than a list item's text (a merged cell sets the number between two lines of the row). A callout
+    # on a diagram has no worded text along its row.
+    pg = _page_words(doc, m.page)
+    return sum(1 for w in pg if w.line != m.line and w.bbox[0] > m.bbox[2] and sum(c.isalpha() for c in w.text) >= 2
+               and abs((w.bbox[1] + w.bbox[3]) / 2 - cy) <= 1.2 * max(h, 1)) < 2
+
+
+_PAGE_WORDS: dict[tuple, list] = {}
+
+
+def _page_words(doc: Doc, page: int) -> list:
+    key = (doc.path, len(doc.words), len(doc.lines), page)
+    if key not in _PAGE_WORDS:
+        if len(_PAGE_WORDS) > 2000:
+            _PAGE_WORDS.clear()
+        _PAGE_WORDS[key] = [w for w in doc.words if w.page == page]
+    return _PAGE_WORDS[key]
+
+
+def _list_marker(doc: Doc, ws: list) -> bool:
+    """The line is a list's enumerator ("1.", "2)", "a.", "(iv)") with its item's text starting just right of it at the
+    same height (a separate line in the PDF: "1." | "Present key with LED indicator"). A picture's callout number has
+    no such punctuation ("1", "2" at the end of a leader line) and no item text running on beside it."""
+    if len(ws) != 1 or not _ENUM.fullmatch(ws[0].text.strip()):
+        return False
+    m = ws[0]
+    cy, h = (m.bbox[1] + m.bbox[3]) / 2, m.bbox[3] - m.bbox[1]
+    return any(w.page == m.page and w.line != m.line and any(c.isalpha() for c in w.text)
+               and 0 <= w.bbox[0] - m.bbox[2] <= 40 and abs((w.bbox[1] + w.bbox[3]) / 2 - cy) <= max(3.0, 0.6 * h)
+               for w in doc.words[max(0, doc.lines[m.line].first_word - 3):doc.lines[m.line].first_word + 8])
+
+
+_LEADERS: dict[tuple, list] = {}
+
+
+def _leader_to_picture(doc: Doc, page: int, box: tuple, pics: list) -> bool:
+    """A straight thin line with one end at this text (within 12 pt) and the other end on a picture."""
+    key = (doc.path, page)
+    if key not in _LEADERS:
+        segs = []
+        try:
+            for d in pymupdf.open(doc.path)[page].get_drawings():
+                for it in d["items"]:
+                    if it[0] == "l" and abs(it[1] - it[2]) >= 6:
+                        segs.append((it[1], it[2]))
+        except Exception:
+            pass
+        _LEADERS[key] = segs
+    near = lambda p: box[0] - 12 <= p.x <= box[2] + 12 and box[1] - 12 <= p.y <= box[3] + 12
+    on = lambda p: any(b[0] - 2 <= p.x <= b[2] + 2 and b[1] - 2 <= p.y <= b[3] + 2 for b in pics)
+    return any((near(a) and on(b)) or (near(b) and on(a)) for a, b in _LEADERS[key])
+
+
 def _vector_pictures(doc: Doc, page: int, min_w: float = 60, min_h: float = 40) -> list:
     """Illustrations drawn as vectors on a page: clusters of drawings with curves (a projector, a
-    mountain), not tables, frames or note boxes (straight lines / rectangles, or full of text)."""
-    key = (doc.path, page)
+    mountain) or slanted lines (a booklet drawn in perspective), not tables, frames or note boxes
+    (horizontal / vertical lines and rectangles, or full of text)."""
+    key = (doc.path, page, min_w, min_h)
     if key not in _VECTOR_PICS:
         pdf = pymupdf.open(doc.path)
         out = []
         try:
+            from .checks import tables as _tables
             paths = pdf[page].get_drawings()
+            # data tables only (rows of text in 2+ cells): a diagram of lines and labels the detector reads as a
+            # table (“Screen Diagonal | W | H” on a projection drawing) is still a drawing
+            on_page = [k for k, w in enumerate(doc.words) if w.page == page]
+            tabs = [pymupdf.Rect(t.bbox) for t in (_tables.tables(doc, (on_page[0], on_page[-1] + 1)) if on_page else [])
+                    if _tables.is_data_table(doc, t)]
             for r in pdf[page].cluster_drawings(drawings=paths):
                 if r.width < min_w or r.height < min_h:
                     continue
+                if any((r & t).get_area() >= 0.5 * r.get_area() for t in tabs):
+                    continue  # a table (its rules, numbered circles ❾ in its “No.” column): text, not a drawing
                 inside = [d for d in paths if r.contains(d["rect"])]
                 curves = sum(1 for d in inside for it in d["items"] if is_curve(it))
+                # a line drawing in perspective (a stack of booklets) is slanted lines; table rules / frames are
+                # horizontal and vertical only
+                slanted = sum(1 for d in inside for it in d["items"] if it[0] == "l"
+                              and abs(it[1].x - it[2].x) > 0.5 and abs(it[1].y - it[2].y) > 0.5)
                 words = sum(1 for w in doc.words if w.page == page and _in(w, r))
-                if curves >= 8 and words <= 25:
+                # a small cluster of many strokes (a booklet icon, 37 x 29 pt, 64 lines) is a drawing: a table or
+                # frame that small has a handful of rules
+                many = max(r.width, r.height) <= 60 and sum(len(d["items"]) for d in inside) >= 30
+                if (curves >= 8 or slanted >= 12 or many) and words <= 25:
                     out.append(Image(page, tuple(r)))
         except Exception:
             pass
@@ -519,6 +1031,37 @@ def _vector_pictures(doc: Doc, page: int, min_w: float = 60, min_h: float = 40) 
 
 
 _VECTOR_PICS: dict[tuple, list] = {}
+_LINE_ART: dict[tuple, list] = {}
+
+
+def _line_drawings(doc: Doc, page: int, min_w: float = 60, min_h: float = 40) -> list:
+    """Drawings made of straight lines and boxes only (a monitor's front view: rectangles and a stand) - no
+    curves, so _vector_pictures does not count them. A group of 6+ strokes with (almost) no text inside is a
+    drawing, not a table or a note box (those hold text). Used for picture text only (callout numbers, labels),
+    not for comparing pictures."""
+    key = (doc.path, page)
+    if key not in _LINE_ART:
+        out = []
+        try:
+            pg = pymupdf.open(doc.path)[page]
+            paths = pg.get_drawings()
+            known = [pymupdf.Rect(x.bbox) for x in _vector_pictures(doc, page)]
+            for r in pg.cluster_drawings(drawings=paths):
+                if r.width < min_w or r.height < min_h or r.get_area() > 0.6 * pg.rect.get_area():
+                    continue
+                if any((r & k).get_area() >= 0.5 * r.get_area() for k in known):
+                    continue
+                strokes = sum(len(d["items"]) for d in paths if r.contains(d["rect"]))
+                # text in its interior (its edge may carry the stubs of leader lines, with numbers at their ends)
+                core = r + (6, 6, -6, -6)
+                words = sum(1 for w in doc.words if w.page == page and core.x0 <= (w.bbox[0] + w.bbox[2]) / 2 <= core.x1
+                            and core.y0 <= (w.bbox[1] + w.bbox[3]) / 2 <= core.y1)
+                if strokes >= 6 and words <= 3:
+                    out.append(Image(page, tuple(r)))
+        except Exception:
+            pass
+        _LINE_ART[key] = out
+    return _LINE_ART[key]
 
 
 def _image_labels(results, A: Doc, B: Doc, cfg: dict) -> None:
@@ -577,6 +1120,20 @@ def _image_labels(results, A: Doc, B: Doc, cfg: dict) -> None:
             return best[1]
         return None
 
+    # callout numbers of a picture (“1” “2” “3” “4” in boxes with leader lines over a screenshot) are the
+    # picture's artwork, not text: a stage picture without them is not missing data - not reported at all
+    callout = re.compile(r"^\(?[0-9A-Za-z]{1,2}[.)]?$")
+    for u, fs in results:
+        for f in list(fs):
+            if f.check != "content" or "missing text" not in (f.types or []) or not f.baseline:
+                continue
+            toks = (f.detail.get("baseline_text") or "").split()
+            if not toks or not all(callout.match(t) for t in toks):
+                continue
+            page = f.baseline[0].page
+            pics = [x for x in rasters if x.page == page] + _vector_pictures(A, page)
+            if pics and all(any(on(l, im, 60, 20) for im in pics) for l in f.baseline):
+                fs.remove(f)
     for u, fs in results:
         for f in fs:
             # missing prod text - or prod text the diff paired with unrelated stage text ("Alignment arrow" ->
@@ -596,12 +1153,29 @@ def _image_labels(results, A: Doc, B: Doc, cfg: dict) -> None:
             if marks and len(marks) < len(f.baseline):
                 f.baseline = [l for l in f.baseline if l not in marks]
             page = f.baseline[0].page
-            raster_here, drawn_here = [x for x in rasters if x.page == page], _vector_pictures(A, page)
-            if n == 1 and not any(all(on(l, im, 4, 4) for l in f.baseline) for im in raster_here + drawn_here):
+            # small drawings too: a package-contents remote control is 16 pt wide, a power adapter 39 pt tall
+            raster_here, drawn_here = [x for x in rasters if x.page == page], _vector_pictures(A, page, 14, 14)
+            # a figure's panel / callout number ("1", "2", "a)") beside one of its pictures is a label as well
+            # (a panel drawn with straight lines only - a monitor corner - counts as a picture here)
+            def panels(pg_no):
+                try:
+                    return [Image(pg_no, tuple(r)) for r in pymupdf.open(A.path)[pg_no].cluster_drawings()
+                            if r.width >= 40 and r.height >= 40]
+                except Exception:
+                    return []
+            marker = n == 1 and re.fullmatch(r"\(?[0-9]{1,2}[.)]?\)?|\(?[a-zA-Z][.)]\)?|\(?[a-z]\)?",
+                                             (f.detail.get("baseline_text") or "").strip())
+            if n == 1 and not any(all(on(l, im, 4, 4) for l in f.baseline) for im in raster_here + drawn_here) and \
+                    not (marker and any(all(on(l, im, 30, 30) for l in f.baseline)
+                                    for im in raster_here + drawn_here + panels(page))):
                 continue  # a lone missing word is a label only when it sits on the picture itself
-            short = all(len(t.split()) <= 6 for t in _label_lines(A, f.baseline))
+
+            # words, not separators: "Computer / gaming console / AV device" is a 5-word label
+            short = all(sum(any(c.isalnum() for c in w) for w in t.split()) <= 6 for t in _label_lines(A, f.baseline))
             # on the picture; a drawn illustration's short labels may also sit right beside it (a dimension)
             pic = next((im for im in raster_here + drawn_here if all(on(l, im, 4, 4) for l in f.baseline)), None) or \
+                (next((im for im in raster_here + drawn_here + panels(page) if all(on(l, im, 30, 30) for l in f.baseline)),
+                      None) if marker else None) or \
                 (next((im for im in drawn_here if all(on(l, im, 70, 20) for l in f.baseline)), None) if short else None)
             is_caption = pic is None and n <= 12 and (any(caption(l, im) for l in f.baseline for im in raster_here) or
                                                       (short and any(caption(l, im, 40) for l in f.baseline for im in drawn_here)))
@@ -612,7 +1186,9 @@ def _image_labels(results, A: Doc, B: Doc, cfg: dict) -> None:
                 # labels spread over several parts of one figure (a screen picture, a menu panel, a callout
                 # bubble drawn beside them): each line on one of the page's pictures -> the figure they make up
                 hosts = [next((im for im in raster_here + drawn_here if on(l, im, 4, 4)), None) or
-                         (next((im for im in drawn_here if on(l, im, 70, 20) or beside(l, im)), None) if short else None)
+                         (next((im for im in drawn_here if on(l, im, 70, 20) or beside(l, im)), None) if short else None) or
+                         # a short caption right under / over its drawing (“Power adapter” under the adapter)
+                         (next((im for im in raster_here + drawn_here if caption(l, im, 40)), None) if short else None)
                          for l in f.baseline]  # a callout number may sit just above / below its drawing
                 got = [h for h in hosts if h]
                 # nearly all on pictures: a stray list number read with the callouts ("… 10 3 2 1 7.") does
@@ -659,8 +1235,7 @@ def _image_labels(results, A: Doc, B: Doc, cfg: dict) -> None:
             # read back reliably - the real issue is the size, not that the labels vanished
             rel_a = (pic.bbox[2] - pic.bbox[0]) / max(A.right(page) - A.left(page), 1e-6)
             rel_b = (y.bbox[2] - y.bbox[0]) / max(B.right(y.page) - B.left(y.page), 1e-6)
-            size_tol = cfg["assets"].get("size_ratio_tolerance", 0.2)
-            smaller = rel_a > 0 and rel_b <= rel_a * (1 - size_tol)
+            smaller = rel_a > 0 and rel_b <= rel_a * cfg["assets"].get("smaller_report_ratio", 0.6)
             drawn = [_drawn(A, l.bbox, l.page, B, at, gthr, gedge, hays, lo=0.5) for l in f.baseline]
             f.detail = {**f.detail, "stage_picture": list(y.bbox), "stage_picture_page": y.page}
             # tiny print on a screenshot (an IP address, a device name at 2-4 pt) cannot be read back reliably:
@@ -681,6 +1256,7 @@ def _image_labels(results, A: Doc, B: Doc, cfg: dict) -> None:
                 f.message = (f"Picture labels drawn into the stage picture, not live text: {labels} "
                              f"(prod p.{page + 1} ↔ stage p.{y.page + 1})")
                 f.candidate, f.candidate_at = [Loc(y.page, r) for r in drawn], None
+                f.detail["credited"] = True
                 _count_present(u, n)
                 continue
             # some labels drawn into the stage picture, some not: name only the missing ones
@@ -821,7 +1397,69 @@ def _text_in_matched_artwork(results) -> None:
             f.message = (f"Text of the prod drawing is in the stage picture: “{text}” (prod draws it as vector art "
                          f"with live text, stage shows the same artwork as an image, p.{home.page + 1})")
             f.candidate, f.candidate_at = [home], None
+            f.detail["credited"] = True
             _count_present(u, len(_tokens(f.detail.get("baseline_text"))))
+
+
+def _drop_picture_text(results, A: Doc, B: Doc, cfg: dict) -> None:
+    """[genuine] report_image_labels = false: a text difference in a picture's own labels - on the picture,
+    right beside it or a short label just above / below it (“2 seconds” → “2 second” over the remote
+    control) - is not reported, whatever kind of difference it is (changed, missing, extra, spacing)."""
+    acfg = cfg["assets"]
+    pics: dict = {}
+
+    def pictures(doc: Doc, page: int) -> list:
+        if (id(doc), page) not in pics:
+            pics[(id(doc), page)] = [x for x in doc.images if x.page == page and not icon_max(doc, x, acfg)] \
+                + _vector_pictures(doc, page, min_w=20)  # a tall, narrow drawing too: the remote control
+        return pics[(id(doc), page)]
+
+    def short(doc: Doc, l) -> bool:
+        # the whole line the spot is on: “(!)” in “Press and hold the power button (!) on the projector …”
+        # is body text, even with the power-key icon beside it
+        cy = (l.bbox[1] + l.bbox[3]) / 2
+        ln = next((x for x in doc.lines if x.page == l.page and x.bbox[1] <= cy <= x.bbox[3]
+                   and x.bbox[0] <= l.bbox[2] and x.bbox[2] >= l.bbox[0]), None)
+        text = ln.text if ln else " ".join(w.text for w in doc.words if w.page == l.page and _in(w, pymupdf.Rect(l.bbox)))
+        return sum(any(c.isalnum() for c in w) for w in text.split()) <= 6
+
+    def label(doc: Doc, l) -> bool:
+        x0, y0, x1, y1 = l.bbox
+        for im in pictures(doc, l.page):
+            a0, b0, a1, b1 = im.bbox
+            if x0 >= a0 - 4 and x1 <= a1 + 4 and y0 >= b0 - 4 and y1 <= b1 + 4:
+                return True  # on the picture
+            if y0 >= b0 - 20 and y1 <= b1 + 20 and (-4 <= x0 - a1 <= 20 or -4 <= a0 - x1 <= 20):
+                return True  # right beside it (a callout at the end of a leader line)
+            # just above / below it, about as wide as the picture: a label, not a line of body text
+            # (“2 seconds” over the narrow remote-control drawing is a little wider than the drawing)
+            if x0 < a1 and x1 > a0 and x1 - x0 <= max(1.5 * (a1 - a0), a1 - a0 + 40) \
+                    and (-8 <= b0 - y1 <= 32 or -8 <= y0 - b1 <= 32):
+                return True
+        return False
+
+    def on_picture(f: Finding) -> bool:
+        sides = [(A, f.baseline), (B, f.candidate)]
+        return any(ls for _, ls in sides) and all(short(d, l) and label(d, l) for d, ls in sides for l in ls)
+
+    for u, findings in results:
+        labels = [f for f in findings if f.check == "content" and on_picture(f)]
+        if not labels:
+            continue
+        findings[:] = [f for f in findings if not any(f is x for x in labels)]
+        c = u.content
+        if not c:
+            continue
+        # the label's words do not count against the section's content match either
+        for f in labels:
+            na = len((f.detail.get("baseline_text") or "").split())
+            nb = len((f.detail.get("candidate_text") or "").split())
+            c["matched_words"] = min(c.get("matched_words", 0) + na, c.get("baseline_words", 0))
+            c["missing_words"] = max(0, c.get("missing_words", 0) - na)
+            c["extra_words"] = max(0, c.get("extra_words", 0) - nb)
+        denom = c.get("baseline_words", 0) + c.get("extra_words", 0)
+        good = c.get("matched_words", 0) - c.get("spacing_issues", 0) - c.get("script_issues", 0)
+        c["match_pct"] = round(100.0 * max(good, 0) / denom, 2) if denom else 100.0
 
 
 def _label_lines(A: Doc, locs_: list) -> list[str]:
@@ -872,6 +1510,8 @@ def _content(results, min_words: int, overlap: float) -> None:
             extras.remove((eu, ef, ebag))
             if sum((ebag - bag).values()) < min_words:  # the extra block is just this text
                 _of(results, eu).remove(ef)
+                # reported once, as "content in the wrong section" of prod's section: not extra text here too
+                credit_dropped(eu, ef)
             else:
                 ef.detail["moved_in"] = True  # the rest of it is extra; this part is not a duplicate
             f.message = (f"Content placed in the wrong section: “{snippet_text(f.detail.get('baseline_text'))}” "
@@ -892,6 +1532,42 @@ def _target_word(doc: Doc, ln: dict) -> int | None:
         return None
     y = ln["to"].y if ln.get("to") is not None else 0.0
     return Aligner.word_at(doc, (0, len(doc.words)), page, y - 2)
+
+
+_XREF_SKELETON = re.compile(r"\(?\b(see|refer|to|on|page|pages|and)\b|\d+|[\W_]+", re.I)
+
+
+def _xref_format(results, A: Doc, B: Doc) -> None:
+    """How a cross-reference is printed is the template's: prod writes "(See page 15)", stage writes
+    ("Audio-only mode" on page 13) - the target's title, in quotes or not. A text difference whose stage words
+    are the text of an internal link, where prod's side holds only the reference's skeleton ("See page 15") or
+    link text too, is that rendering - not a data mismatch (where the link leads is the links check's)."""
+    def words_at(doc, locs_):
+        out = []
+        for l in locs_ or []:
+            for w in doc.words:
+                if w.page == l.page and l.bbox[0] - 1 <= (w.bbox[0] + w.bbox[2]) / 2 <= l.bbox[2] + 1 \
+                        and l.bbox[1] - 1 <= (w.bbox[1] + w.bbox[3]) / 2 <= l.bbox[3] + 1:
+                    out.append(w)
+        return out
+    internal = lambda doc, w: (ln := _link_at(doc, w)) is not None and ln.get("kind") in _GOTO
+    for u, findings in results:
+        keep = []
+        for f in findings:
+            types = set(f.types or [])
+            if f.check != "content" or not types & {"changed text", "extra text"} or types - {"changed text", "extra text", "punctuation"}:
+                keep.append(f)
+                continue
+            b_words = [w for w in words_at(B, f.candidate) if any(c.isalnum() for c in w.text)]
+            a_text = f.detail.get("baseline_text") or ""
+            a_words = [w for w in words_at(A, f.baseline) if any(c.isalnum() for c in w.text)]
+            skeleton = not _XREF_SKELETON.sub("", a_text)
+            if b_words and all(internal(B, w) for w in b_words) and \
+                    (skeleton or (a_words and all(internal(A, w) for w in a_words))):
+                credit_dropped(u, f)
+                continue
+            keep.append(f)
+        findings[:] = keep
 
 
 def _link_at(doc: Doc, w) -> dict | None:
@@ -944,7 +1620,8 @@ def _links(u: Unit, units: list[Unit], mode: str) -> list[Finding]:
         ta, tb = _target_word(A, la), _target_word(B, lb)
         if ta is not None and tb is not None:
             ua, ub = _unit_of(units, "a", ta), _unit_of(units, "b", tb)
-            if ua is not None and ub is not None and ua is not ub and not _names_target(text, ub.title, ua.title):
+            if ua is not None and ub is not None and ua is not ub and not _names_target(text, ub.title, ua.title) \
+                    and not _lands_at(B, lb, ua.title):
                 out.append(Finding(
                     "integrity", "error",
                     f"Link points to the wrong section: “{text}” goes to “{ua.title}” in prod "
@@ -1038,6 +1715,18 @@ def _landing(doc: Doc, ln: dict) -> str:
         return _destination(doc, ln)
     except Exception:
         return ""
+
+
+def _lands_at(doc: Doc, ln: dict, heading: str, reach: float = 150) -> bool:
+    """The link lands right at `heading` on its page - a little above it (AEM points at the top of the page /
+    topic, the heading “Choosing a location” starts 44 pt lower: the landing point itself still belongs to the
+    parent section) or a little below it. The reader arrives at that heading: the right section."""
+    page, to = ln.get("page", -1), ln.get("to")
+    if not heading or to is None or not 0 <= page < len(doc.pages):
+        return False
+    pg = pymupdf.open(doc.path)[page]
+    needle = " ".join(heading.split()[:6])
+    return any(abs(r.y0 - to.y) <= reach for r in pg.search_for(needle))
 
 
 def _lands_under(doc: Doc, ln: dict, heading: str, reach: float = 150) -> bool:
@@ -1180,6 +1869,7 @@ _WHY = {
     "rows merged": ("Table rows merged", "Separate prod rows are one row in stage."),
     "table split": ("Table split", "One prod table is broken into several tables in stage."),
     "cells merged": ("Table cells merged", "Rows have fewer cells in stage than in prod."),
+    "cell differs": ("Table cell differs", "A table cell holds other data in stage than in prod (a value or check mark missing, added or changed)."),
     "broken link": ("Link broken", "The link in stage goes nowhere."),
     "missing link": ("Link not working", "The text is a link in prod but plain text in stage."),
     "link to wrong section": ("Link to wrong section", "The link jumps to a different section in stage."),
@@ -1190,6 +1880,7 @@ _WHY = {
     "moved text": ("Text on another line / in another order", "The same words are in stage, on another line or in another order."),
     "reordered": ("Text in another order", "The same words are in stage, in another order."),
     "label only": ("Callout label on one side only", "A note / caution label (e.g. “NOTE:”) is printed on one side only."),
+    "callout type differs": ("Callout type differs", "Stage labels the note as another type than prod's icon shows (e.g. IMPORTANT where prod has the warning icon)."),
     "repeated header": ("Repeated table header", "A table header is repeated at a page break on one side only."),
     "continued header": ("“(continued)” header", "A “(continued)” heading is repeated at a page break on one side only."),
     "raster vs vector": ("Artwork as picture vs drawing", "The same artwork is an embedded picture on one side and drawn as vectors on the other."),
@@ -1228,6 +1919,10 @@ _WHY = {
     "spec page number": ("Page number off the design spec", "A page number is missing, out of sequence or not centred."),
     "spec heading level": ("Heading level skipped", "A heading skips a level (H1 → H3): the design spec keeps H1 → H2 → H3."),
     "spec callout title": ("Callout title off the design spec", "A callout's title is not the fixed title of its type (IMPORTANT, NOTE, TIP, WARNING)."),
+    "icon missing": ("Icon missing in table", "A table row shows fewer icons in stage than in prod."),
+    "icon extra": ("Extra icon in table", "A table row shows more icons in stage than in prod."),
+    "icon order": ("Icons in another order", "The icons of a table row are in another order in stage."),
+    "icon above text": ("Icon not beside its text", "Stage sets the row's icon above its text in one cell; prod sets it in a column of its own, beside the text."),
     "callout style": ("Note style differs", "The same kind of note is drawn differently in stage than in prod "
                                             "(e.g. a bar on the left in prod, a filled box in stage)."),
     "spec callout background": ("Callout colour off the design spec", "A callout is not in its type's background colour, or is plain text instead of a callout."),
@@ -1243,7 +1938,7 @@ _WHY = {
     "row background": ("Table row background differs", "Rows that one side shades (group rows between the data rows) are plain on the other."),
     "spec text-align": ("Text not left-aligned", "Body text is centred or right-aligned; the design spec left-aligns all content."),
     "size / aspect": ("Image size differs", "The picture is shown at another width or aspect ratio in stage."),
-    "emphasis": ("Bold / italic differs", "The same words are bold (or italic) on one side and plain on the other: the emphasis the reader relies on changed."),
+    "emphasis": ("Font weight / italic differs", "The same words are set in another font weight (bold, medium, light ...) or italic on one side only: the emphasis the reader relies on changed."),
     "list level": ("List level differs", "A paragraph that sits under a list item's text in prod (part of that bullet or numbered item) starts under another item's text, or as body text, in stage: the list's marker / text columns are not kept."),
     "row alignment": ("Items not aligned in a row", "Text that sits side by side on one row in prod (list items in two columns, captions under a row of pictures) is at different heights in stage."),
     "label in picture": ("Image label on the stage picture", "The picture's label is there in stage, drawn into the image instead of as live text."),

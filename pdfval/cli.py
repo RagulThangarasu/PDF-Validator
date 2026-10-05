@@ -44,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--config", help="TOML overrides merged over config/default.toml")
     c.add_argument("--out", default="reports/latest", help="report directory")
     c.add_argument("--only", help="regex: validate only sections whose title matches")
+    c.add_argument("--name", help="product / publication name shown in the reports (default: the stage file name)")
     c.add_argument("--fail-on", choices=["error", "warning", "genuine", "never"], default="error",
                    help="exit non-zero when a finding of this severity exists")
     c.add_argument("--screenshots", choices=["all", "warnings", "errors", "none"], default="all",
@@ -133,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = engine.load_config(args.config)
     result = engine.compare(args.baseline, args.candidate, cfg, only=args.only)
+    result["meta"]["name"] = args.name or Path(args.candidate).stem
     index = writer.write_all(result, args.out, args.screenshots)
     sm = result["summary"]
     print(f"{sm['result'].upper()}: {sm['sections']} sections — {sm['fail']} fail, {sm['warn']} warn, {sm['pass']} pass")

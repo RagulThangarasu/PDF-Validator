@@ -19,6 +19,35 @@ VIEWER = Path(__file__).with_name("viewer.html")
 DEFERRED = ("report.pdf", "css-issues.pdf")
 
 
+def image_summary(result: dict) -> dict:
+    """{"issues": n, "result": "pass" | "fail"} of the image report: PASS = no image issue."""
+    from . import image_report
+    n = len(image_report.issues(result))
+    return {"issues": n, "result": "fail" if n else "pass"}
+
+
+def write_image_report(result: dict, out_dir: str | Path) -> Path | None:
+    """The image report (image-issues.pdf) - only when the publication has image issues (FAIL): a PASS needs no
+    report, and one left from an earlier run is removed. The verdict goes into the summary (consolidated report)."""
+    from . import image_report
+    out = Path(out_dir)
+    result.setdefault("summary", {})["images"] = sm = image_summary(result)
+    if sm["result"] == "pass":
+        (out / "image-issues.pdf").unlink(missing_ok=True)
+        return None
+    return image_report.build(result, out)
+
+
+def write_pdf_report(result: dict, out_dir: str | Path) -> Path | None:
+    """The PDF report (genuine-issues.pdf) - only when there is at least one genuine issue: a clean
+    pass needs no report, and one left from an earlier run is removed."""
+    out = Path(out_dir)
+    if not (result.get("summary") or {}).get("genuine", {}).get("total"):
+        (out / "genuine-issues.pdf").unlink(missing_ok=True)
+        return None
+    return pdf_report.build(result, out, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
+
+
 def write_all(result: dict, out_dir: str, shots: str = "all",
               progress: Callable[[float, str], None] | None = None, full: bool = True) -> Path:
     """shots: all | warnings | errors | reports | none — which findings get prod/stage screenshots
@@ -39,13 +68,13 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
     else:
         result["meta"]["deferred"] = list(DEFERRED)
     report(0.98, "Building PDF report (issues)")
-    pdf_report.build(result, out, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
+    write_pdf_report(result, out)
     write_genuine_csv(result, out / "genuine-issues.csv")
     if full:
         report(0.99, "Building CSS report")
         pdf_report.build(result, out, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
     report(0.995, "Building image report")
-    pdf_report.build(result, out, options=pdf_report.IMAGE_REPORT, filename="image-issues.pdf")
+    write_image_report(result, out)  # pictures only: missing numbers / labels / leader lines, overlay, pixelated
     if (result.get("site") or {}).get("rows"):
         from ..site_nav import write_csv
         write_csv(result["site"], out / "site-navigation.csv")

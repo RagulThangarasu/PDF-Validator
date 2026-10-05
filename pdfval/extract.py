@@ -148,14 +148,18 @@ def _rejoin(lines: list) -> list:
 _RTL = re.compile("[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]")
 
 
-def _column_order(lines: list, width: float, tables: list) -> list:
+def _column_order(lines: list, width: float, tables: list, rules=None) -> list:
     """Read a page set in two columns one column at a time. Text extraction goes by height, so
     it interleaves the columns ("9. Filmmaker", then "21. Picture mode" from the right column,
     then "Switches Picture Mode ..."), and the words no longer line up with a one-column stage.
     A gutter is a vertical line in the middle of the page (30-70 % of its width) that no text
     line crosses while a good amount of text sits on both sides of it, side by side. Lines that
     cross it (a full-width heading, a note) and tables split the page into bands; inside each
-    band the left column is read before the right one. Pages without such a gutter keep their order."""
+    band the left column is read before the right one. Pages without such a gutter keep their order.
+    rules(): the y of the page's horizontal rules across the gutter (a callable, read only when a gutter is
+    found). Such a rule ends a band: a table drawn with rules only between its rows ("Possible cause |
+    Remedy", no vertical lines) is read row by row - else its left column ran on into the heading under the
+    table ("…been correctly selected. Blurred image", then "key. Select the correct input …")."""
     if len(lines) < 8:
         return lines
     in_table = lambda b: any(t[0] - 1 <= (b[0] + b[2]) / 2 <= t[2] + 1 and t[1] - 1 <= (b[1] + b[3]) / 2 <= t[3] + 1
@@ -189,8 +193,13 @@ def _column_order(lines: list, width: float, tables: list) -> list:
     spans = lambda ln: in_table(ln[1]) or ln[1][0] < x < ln[1][2] or heading(ln)
     out, band = [], []
 
+    cuts = sorted(rules(x)) if rules else []
+
     def flush():
-        band.sort(key=lambda ln: (ln[1][0] >= x, ln[1][1], ln[1][0]))
+        # lines of one row by their middle, not their top: an icon-font word ("⇥ key.") sits a little higher
+        # than the text beside it and must not be read before "Select the correct input signal with the"
+        row = lambda ln: round(((ln[1][1] + ln[1][3]) / 2) / (0.6 * typical))
+        band.sort(key=lambda ln: (ln[1][0] >= x, row(ln), ln[1][0]))
         out.extend(band)
         band.clear()
     bottom = None
@@ -202,9 +211,30 @@ def _column_order(lines: list, width: float, tables: list) -> list:
             continue
         if bottom is not None and ln[1][1] - bottom > 2.5 * typical:  # nothing in either column across this gap
             flush()
+        elif bottom is not None and any(bottom - 1 <= c <= ln[1][1] + 1 for c in cuts):  # a rule across both columns
+            flush()
         band.append(ln)
         bottom = max(bottom if bottom is not None else ln[1][3], ln[1][3])
     flush()
+    return out
+
+
+_MARKER_ONLY = re.compile(r"^[•◦▪▫‣⁃●○■□–—\-·∙]$")
+
+
+def _markers_first(lines: list) -> list:
+    """A bullet stored as a line of its own, a hair lower than its item's text (“•” at y 142.6 beside
+    “The projector does not …” at y 141.6), is read before that text, not after it - else it lands mid-
+    sentence (“…mount components/ • equipment.”) and the sentence no longer matches the other side."""
+    out = list(lines)
+    for k in range(1, len(out)):
+        pno, b, text = out[k][0], out[k][1], out[k][2].strip()
+        p_pno, pb = out[k - 1][0], out[k - 1][1]
+        if not _MARKER_ONLY.match(text) or pno != p_pno or _MARKER_ONLY.match(out[k - 1][2].strip()):
+            continue
+        overlap = min(b[3], pb[3]) - max(b[1], pb[1])
+        if overlap > 0.5 * min(b[3] - b[1], pb[3] - pb[1]) and b[2] <= pb[0] + 2:
+            out[k - 1], out[k] = out[k], out[k - 1]
     return out
 
 
@@ -221,8 +251,13 @@ def _table_order(lines: list, found: list) -> list:
         for k, (_, tb, rows, grid) in enumerate(found):
             if tb[0] - 1 <= cx <= tb[2] + 1 and tb[1] - 1 <= cy <= tb[3] + 1:
                 r = next((n for n, (rb, _) in enumerate(rows) if rb[1] - 1 <= cy <= rb[3] + 1), None)
-                c = min(range(len(grid)), key=lambda g: 0 if grid[g][0] - 1 <= cx <= grid[g][1] + 1
-                        else min(abs(cx - grid[g][0]), abs(cx - grid[g][1]))) if grid else 0
+                # the cell a line starts in (its left edge), not the one its centre falls in: a cell spanning two
+                # grid columns (“Sets on/off …” over Function | sub-item) holds short lines (“NOTE”, “switch.”)
+                # whose centre sits in the first column and long ones whose centre sits in the second - by
+                # centre the short lines were read before the cell's first line
+                lx = x0 + 2
+                c = min(range(len(grid)), key=lambda g: 0 if grid[g][0] - 1 <= lx <= grid[g][1] + 1
+                        else min(abs(lx - grid[g][0]), abs(lx - grid[g][1]))) if grid else 0
                 return k, (r if r is not None else len(rows)), c
         return None
     placed = [where(ln) for ln in lines]
@@ -247,6 +282,20 @@ def _table_order(lines: list, found: list) -> list:
 _PAGE_NO = re.compile(r"^\W*(?:page\s*)?(?:\d{1,4}|[ivxlc]{1,7})(?:\s*(?:/|of)\s*\d{1,4})?\W*$", re.I)
 
 
+_GLUE = re.compile(r"(?<=;)(?=[\w(])"            # 3A;15V      -> 3A;  15V
+                   r"|(?<=[\w)\]])(?==)"            # panel)= OPS= -> panel)  =
+                   r"|(?<==)(?=[\w(])"               # =5V          -> =  5V
+                   r"|(?<=[A-Za-z],)(?=[A-Za-z])")   # details,see  -> details,  see  (not 1,000)
+
+
+def _glued_parts(t: str) -> list[str]:
+    """The words a token joins with punctuation and no space; [t] when it joins none (or is a URL / path)."""
+    if len(t) < 3 or "://" in t or t.startswith(("www.", "/")) or "@" in t:
+        return [t]
+    parts = [p for p in _GLUE.split(t) if p]
+    return parts if len(parts) > 1 else [t]
+
+
 def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
     """reference: the other document of the comparison, to read glyphs of fonts without a
     Unicode map by their shape (glyphs.py)."""
@@ -256,6 +305,7 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
     case = ccfg.get("case_sensitive", True)
     # ’ vs ' (and “ ” vs ") is a font / typesetting choice, not a content change: ignored by default;
     # normalize_typography also folds the dash variants (– — vs -)
+    split_glued = ccfg.get("split_glued_punctuation", True)
     typo = True if ccfg.get("normalize_typography", False) else "quotes" if ccfg.get("ignore_quote_style", True) else False
 
     pdf = pymupdf.open(path)
@@ -293,9 +343,32 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
             found = tmod.detect(page)
             tmod._RAW[(path, pno)] = found  # the table check reuses the detection
         if ecfg.get("column_reading_order", True):
-            raw_lines[first:] = _column_order(raw_lines[first:], page.rect.width, [f[1] for f in found or []])
+            def rules(x, page=page):
+                # a table's row rule is often drawn cell by cell (two segments meeting at the column line):
+                # segments on one y that touch make one rule
+                segs: dict = {}
+                for d in page.get_drawings():
+                    r = d["rect"]
+                    if r.height <= 2 and r.width >= 20:
+                        segs.setdefault(round(r.y0 * 2) / 2, []).append((r.x0, r.x1))
+                out = []
+                for y, xs in segs.items():
+                    xs.sort()
+                    lo, hi = xs[0]
+                    for a0, a1 in xs[1:]:
+                        if a0 <= hi + 2:
+                            hi = max(hi, a1)
+                        else:
+                            if lo < x - 20 and hi > x + 20:
+                                out.append(y)
+                            lo, hi = a0, a1
+                    if lo < x - 20 and hi > x + 20:
+                        out.append(y)
+                return out
+            raw_lines[first:] = _column_order(raw_lines[first:], page.rect.width, [f[1] for f in found or []], rules)
         if found is not None:
             raw_lines[first:] = _table_order(raw_lines[first:], found)
+        raw_lines[first:] = _markers_first(raw_lines[first:])
         for info in page.get_image_info():
             box = pymupdf.Rect(info["bbox"])
             r = box & clip
@@ -315,7 +388,25 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
             counts[k].add(pno)
         limit = max(3, ecfg.get("repeat_threshold", 0.3) * len(pages))
         hot = {k for k, v in counts.items() if len(v) >= limit}
+        # only in the page's top / bottom band: a running header / footer sits there. In the body of the page
+        # the same text at the same height on many pages is content - the cells of a timing table
+        # ("640x480 | 60 | V | V" on every page), a form repeated per model - and stripping it loses rows
+        strip_band = ecfg.get("strip_band", 0.15)
+        in_band = lambda pno, b: b[1] >= (1 - strip_band) * pages[pno].height or b[3] <= strip_band * pages[pno].height
+        def in_table(pno, b) -> bool:
+            """Inside a table of the page: a row at the top / bottom of a page is content, however often the
+            same row text ("720x576 | 50 | V | V") sits at that height in the document."""
+            try:
+                from .checks import tables as tmod
+                cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+                return any(t[1][0] - 1 <= cx <= t[1][2] + 1 and t[1][1] - 1 <= cy <= t[1][3] + 1
+                           for t in tmod._RAW.get((path, pno)) or [])
+            except Exception:
+                return False
+
         for i, (pno, bbox, text, _, _) in enumerate(raw_lines):
+            if not in_band(pno, bbox) or in_table(pno, bbox):
+                continue
             t, h = re.sub(r"\d+", "#", normalize.clean(text).lower()), round(bbox[1] / pages[pno].height * 100)
             # a step either side counts too: the front matter may print its page number a few points higher
             if any((t, h + d) in hot for d in (0, -1, 1)):
@@ -385,8 +476,23 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
         li = len(lines)
         lines.append(Line(pno, bbox, text, max(w[2].size for w in wl), len(words), (pno, bno)))
         for k, (t, box, st, gap, script) in enumerate(wl):
-            words.append(Word(t, normalize.token(t, case_sensitive=case, ignore=ignore_tokens, typography=typo),
-                              pno, tuple(box), st, li, line_start=(k == 0), space_after=gap, script=script if script.strip(".") else ""))
+            # a word glued to its neighbour by punctuation ("3A;15V", "panel)=", "OPS=") is compared as the
+            # words it joins, with no space between them: the other PDF's "3A; 15V" then lines up word for word
+            # and the missing space is one "word gap" difference, not text missing + text added
+            parts = _glued_parts(t) if split_glued else [t]
+            if len(parts) == 1:
+                words.append(Word(t, normalize.token(t, case_sensitive=case, ignore=ignore_tokens, typography=typo),
+                                  pno, tuple(box), st, li, line_start=(k == 0), space_after=gap,
+                                  script=script if script.strip(".") else ""))
+                continue
+            x, width = box[0], (box[2] - box[0]) / max(len(t), 1)
+            for n, part in enumerate(parts):
+                x1 = x + width * len(part)
+                words.append(Word(part, normalize.token(part, case_sensitive=case, ignore=ignore_tokens, typography=typo),
+                                  pno, (x, box[1], x1, box[3]), st, li, line_start=(k == 0 and n == 0),
+                                  space_after=gap if n == len(parts) - 1 else 0,
+                                  script=script if script.strip(".") else ""))
+                x = x1
 
     if ccfg.get("ignore_toc_page_numbers", True):
         # "Title ........ 17": the page number shifts whenever layout/page size differs.
@@ -411,6 +517,12 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
     doc = Doc(path, label, pages, words, lines, images,
               [(lvl, t, p) for lvl, t, p in pdf.get_toc(simple=True)],
               removed_lines=len(removed), furniture=furniture)
+    # where each bookmark lands on its page (y in page points; None when the PDF only names the page)
+    try:
+        doc.outline_to = [(e[3].get("to").y if e[3].get("kind") == pymupdf.LINK_GOTO and e[3].get("to") is not None
+                           and e[3]["to"].y > 0 else None) for e in pdf.get_toc(simple=False)]
+    except Exception:
+        doc.outline_to = []
     doc.decoded = decode.get("__stats__") if decode else None
     _measure(doc)
     return doc

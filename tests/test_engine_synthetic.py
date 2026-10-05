@@ -36,6 +36,7 @@ def make_pdf(path, *, heading_size=18, body_color=(0, 0, 0), body_text=BODY, ind
 def cfg():
     c = load_config()
     c["sections"]["front_matter"] = False
+    c["layout"]["check_bullet_position"] = True  # these tests cover the detector the default turns off
     return all_checks(c)  # these tests cover the CSS / layout detectors the default reports leave out
 
 
@@ -98,7 +99,10 @@ def test_punctuation_and_spacing_are_content(tmp_path, cfg):
     r = compare(a, b, cfg)
     ops = {p["detail"].get("op") for f in checks(r, "content") for p in parts(f)}
     assert "spacing" in ops and "replace" in ops
-    assert section_by(r, "Overview")["content"]["match_pct"] < 100
+    # the issues are listed (and still shown in "issues"), but the section's content match % counts only
+    # missing/extra text, missing/broken images and note style - punctuation and spacing do not move it
+    c = section_by(r, "Overview")["content"]
+    assert c["issues"] > 0 and c["status"] == "pass" and c["match_pct"] == 100 and c["counted_issues"] == 0
 
 
 def test_css_does_not_change_content_percentage(tmp_path, cfg):
@@ -339,7 +343,7 @@ def test_pdf_vs_web_page_toc_driven(tmp_path, cfg):
     assert any("case" in f["types"] and "reader" in f["message"].lower() for f in content)
     assert not any("Home Docs" in f["message"] or "Footer" in f["message"] for f in content)
     mounting = next(s for s in r["sections"] if s["title"] == "Mounting")
-    assert mounting["content"]["match_pct"] == 100.0  # moved section compared with its own counterpart
+    assert mounting["content"]["word_match_pct"] == 100.0  # moved section compared with its own counterpart
 
 
 def test_cells_merged_is_flagged(tmp_path, cfg):
@@ -379,6 +383,30 @@ def test_bullet_alignment_is_an_indent_issue(tmp_path, cfg):
     same = [f for f in checks(compare(a, _list_pdf(tmp_path / "c.pdf", 0, marker_after=True), cfg), "layout")
             if "bullet" in f["types"]]
     assert not same  # same alignment, bullet only stored elsewhere in reading order
+
+
+def _list_pdf_marker(path, marker):
+    """Same list as _list_pdf, with a chosen marker glyph instead of "•"."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "Overview", fontsize=18, fontname="hebo")
+    page.insert_text((72, 130), "Important", fontsize=11, fontname="hebo")
+    y = 146
+    for t in ("Keep the box for transport.", "Do not leave bags near children.", "Recycle the carton."):
+        page.insert_text((72, y), marker, fontsize=11, fontname="helv")
+        page.insert_text((72 + 6, y), t, fontsize=11, fontname="helv")
+        y += 14
+    doc.set_toc([[1, "Overview", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_bullet_glyph_swap_is_not_reported(tmp_path, cfg):
+    """"-" used as the bullet in one side, "•" in the other: a design choice, not a marker issue."""
+    a = _list_pdf_marker(tmp_path / "a.pdf", "-")
+    b = _list_pdf_marker(tmp_path / "b.pdf", "•")
+    found = [f for f in checks(compare(a, b, cfg), "layout") if "bullet marker" in f["types"]]
+    assert not found
 
 
 def _numbered_pdf(path, labels):
@@ -941,3 +969,57 @@ def test_text_the_reader_sees_in_the_stage_picture_is_not_reported(tmp_path, cfg
     r = compare(a, _badge_pdf(tmp_path / "b.pdf", True), cfg)
     assert not [f for s in r["sections"] for f in s["findings"]
                 if set(f["types"]) & {"text as graphic", "label in picture", "text in image", "missing text"}]
+
+
+def _paged_table_pdf(path, rows, break_after=None, drop=None, end_at=0.65):
+    """A bordered two-column table with a bold header row; break_after=n: the table continues on a new page
+    after n data rows and repeats its header there (as AEM's PDF output does). drop: a data row left out."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "Timing", fontsize=18, fontname="hebo")
+    x0, x1, xm = 72, 520, 240
+    # the first part ends at `end_at` of the page (a table broken before the page bottom)
+    y = 120 if break_after is None else int(end_at * 842) - 24 * (break_after + 1)
+
+    def row(pg, yy, a, b, bold=False):
+        pg.draw_rect(pymupdf.Rect(x0, yy, x1, yy + 24), color=(0, 0, 0), width=0.7)
+        pg.draw_line((xm, yy), (xm, yy + 24), color=(0, 0, 0), width=0.7)
+        f = "hebo" if bold else "helv"
+        pg.insert_text((x0 + 6, yy + 16), a, fontsize=10, fontname=f)
+        pg.insert_text((xm + 6, yy + 16), b, fontsize=10, fontname=f)
+    if break_after is not None:
+        page.insert_text((72, y - 30), "The table below lists every supported timing of the monitor.", fontsize=11)
+    row(page, y, "Resolution", "Frame frequency", bold=True)
+    y += 24
+    for k, (a, b) in enumerate(rows):
+        if (a, b) == drop:
+            continue
+        if break_after is not None and k == break_after:
+            page = doc.new_page(width=595, height=842)
+            y = 40
+            row(page, y, "Resolution", "Frame frequency", bold=True)  # the header, repeated
+            y += 24
+        row(page, y, a, b)
+        y += 24
+    page.insert_text((72, y + 40), "End of the timing list.", fontsize=11)
+    doc.set_toc([[1, "Timing", 1]])
+    doc.save(path)
+    return str(path)
+
+
+TIMINGS = [(f"{w}x{h}", f"{hz} Hz") for w, h in ((640, 480), (800, 600), (1024, 768), (1280, 720), (1920, 1080))
+           for hz in (60, 75)] + [("3840x2160 (4K UHD)", "144 Hz with DSC")]
+
+
+def test_table_continued_with_its_header_repeated_is_one_table(tmp_path, cfg):
+    """Prod: the table on one page. Stage: it runs onto the next page and repeats its header there - the
+    repeated header is pagination: no extra row, no table split, no row out of order."""
+    a = _paged_table_pdf(tmp_path / "a.pdf", TIMINGS)
+    b = _paged_table_pdf(tmp_path / "b.pdf", TIMINGS, break_after=6)
+    fs = [f for f in checks(compare(a, b, cfg), "tables")
+          if set(f["types"]) & {"extra row", "missing row", "table split", "row order", "tables merged", "rows merged"}]
+    assert not fs, [f["message"] for f in fs]
+    # a data row really missing after the page break is still reported
+    c = _paged_table_pdf(tmp_path / "c.pdf", TIMINGS, break_after=6, drop=("3840x2160 (4K UHD)", "144 Hz with DSC"))
+    miss = [f for f in checks(compare(a, c, cfg), "tables") if "missing row" in f["types"]]
+    assert miss and "3840x2160" in miss[0]["message"], [f["message"] for f in checks(compare(a, c, cfg), "tables")]

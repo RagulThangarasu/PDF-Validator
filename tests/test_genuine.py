@@ -284,3 +284,54 @@ def test_missing_section_marker_is_where_the_section_belongs(tmp_path, cfg):
     assert any(f["issue"] == "Section missing" for f in hits)
     for f in hits:
         assert f["candidate_at"]["page"] == maint and f["candidate_at"]["bbox"][1] < 120, f["message"]
+
+
+# duplicates judged by the content: the heading appears once, its points twice
+STEPS = ["Press the menu key to open the settings menu on the screen.",
+         "Use the arrow keys to select the item you want to change.",
+         "Press the OK key to confirm the new value of the item.",
+         "Press the back key to close the menu and save the settings."]
+
+
+def _with_steps(extra=None):
+    def add(secs):
+        secs[1]["paras"] = secs[1]["paras"] + ["• " + x for x in STEPS] + (extra or [])
+        return secs
+    return add
+
+
+def _dups(r, kind="Content duplicated"):
+    return [f for _, f in genuine(r) if f["issue"] == kind]
+
+
+def test_points_repeated_under_one_heading_are_duplicated_content(tmp_path, cfg):
+    a = make(tmp_path / "a.pdf", base(s=_with_steps()))
+    r = compare(a, make(tmp_path / "b.pdf", base(s=_with_steps(["• " + STEPS[1], "• " + STEPS[2]]))), cfg)
+    (f,) = _dups(r)
+    assert "2 times but once in prod" in f["message"] and "same section" in f["message"]
+    assert "Extra content" not in issues(r)
+
+
+def test_repeated_point_with_new_text_is_both(tmp_path, cfg):
+    new = "Restart the display to apply the new picture settings."
+    a = make(tmp_path / "a.pdf", base(s=_with_steps()))
+    r = compare(a, make(tmp_path / "b.pdf", base(s=_with_steps(["• " + STEPS[1], "• " + new]))), cfg)
+    (f,) = _dups(r)
+    assert "Use the arrow keys" in f["message"] and "extra text" in f["types"]
+    assert new not in f["detail"]["duplicated_text"]
+
+
+def test_new_text_only_is_not_a_duplicate(tmp_path, cfg):
+    a = make(tmp_path / "a.pdf", base(s=_with_steps()))
+    r = compare(a, make(tmp_path / "b.pdf", base(s=_with_steps(["• Restart the display to apply the new settings."]))), cfg)
+    assert not _dups(r)
+
+
+def test_section_of_repeated_content_under_a_new_heading_is_a_duplicate_section(tmp_path, cfg):
+    a = make(tmp_path / "a.pdf", base(s=_with_steps()))
+    secs = base(s=_with_steps())
+    secs.insert(2, {"title": "Quick menu", "paras": ["• " + x for x in STEPS]})
+    r = compare(a, make(tmp_path / "b.pdf", secs), cfg)
+    (f,) = _dups(r, "Section duplicated")
+    assert "Quick menu" in f["message"] and f["critical"]
+    assert not _dups(r)  # its text is that duplicate section, not reported again

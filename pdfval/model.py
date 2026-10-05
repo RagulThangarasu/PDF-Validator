@@ -84,6 +84,8 @@ class Doc:
     body_size: float = 0.0
     removed_lines: int = 0  # header/footer/ignored lines dropped
     raw_tables: dict | None = None  # page -> tables from a structured source (HTML DOM); None = detect in the PDF
+    picture_text: dict = field(default_factory=dict)  # (page, picture box) -> word indices of its labels
+    outline_to: list = field(default_factory=list)  # per outline entry: the y its bookmark lands on (or None)
     # running headers / footers taken out of the text comparison, kept to compare them on their own:
     # [{page, band ('header' | 'footer'), text, bbox, words: [(text, bbox, Style)]}]
     furniture: list = field(default_factory=list)

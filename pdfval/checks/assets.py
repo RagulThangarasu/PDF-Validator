@@ -24,7 +24,7 @@ import numpy as np
 from collections import defaultdict
 import pymupdf
 from PIL import Image as PILImage
-from PIL import ImageChops, ImageFilter
+from PIL import ImageChops, ImageDraw, ImageFilter
 
 from ..model import Doc, Finding, Image, Loc
 from . import Aligner, Unit
@@ -95,6 +95,13 @@ def _has_artwork(doc: Doc, page: int, rect) -> bool:
             elif it[0] == "re" and d.get("fill") and min(it[1].width, it[1].height) > 3 and r.contains(it[1].tl):
                 n += 1
     return n >= 4
+
+
+def size_reported(rel_x: float, rel_y: float, acfg: dict) -> bool:
+    """A size difference worth reporting: stage shows the picture at less than [assets] smaller_report_ratio (0.5)
+    of prod's size (prod 300 -> stage below 150; widths relative to each document's text width). A bigger picture,
+    or one only a little smaller, is fine."""
+    return rel_x > 0 and rel_y < rel_x * acfg.get("smaller_report_ratio", 0.5)
 
 
 def find_artwork(img_doc: Doc, im: Image, other: Doc, at, min_score: float, max_dist: float,
@@ -201,6 +208,43 @@ def _fast_len(n: int) -> int:
             m += 1
         _FAST[n] = m
     return _FAST[n]
+
+
+_FIG: dict[tuple, list] = {}
+
+
+def _in_figure(doc, im, pad: float = 6) -> bool:
+    """A small picture on or against a larger picture / drawing (a mouse cursor or a hand on a diagram): part of
+    that figure, which is compared as a whole - not an icon of its own."""
+    key = (doc.path, im.page)
+    if key not in _FIG:
+        try:
+            pg = (_DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path)))[im.page]
+            boxes = [tuple(i["bbox"]) for i in pg.get_image_info()] + [tuple(r) for r in pg.cluster_drawings()]
+        except Exception:
+            boxes = []
+        _FIG[key] = boxes
+    a = (im.bbox[2] - im.bbox[0]) * (im.bbox[3] - im.bbox[1])
+    for b in _FIG[key]:
+        if (b[2] - b[0]) * (b[3] - b[1]) < 4 * a:
+            continue
+        if b[0] - pad < im.bbox[2] and b[2] + pad > im.bbox[0] and b[1] - pad < im.bbox[3] and b[3] + pad > im.bbox[1]:
+            return True
+    return False
+
+
+def _margin_icon(doc, im) -> bool:
+    """An icon set in the margin beside a paragraph (a note / tip / safety icon heading its text): the callout
+    style of the template, which the other PDF draws its own way - not an icon of the content."""
+    h = im.bbox[3] - im.bbox[1]
+    cy = (im.bbox[1] + im.bbox[3]) / 2
+    for ln in doc.lines:
+        if ln.page != im.page:
+            continue
+        if abs((ln.bbox[1] + ln.bbox[3]) / 2 - cy) <= h / 2 + 8 and 0 <= ln.bbox[0] - im.bbox[2] <= 60 \
+                and ln.bbox[2] - ln.bbox[0] >= 100:
+            return True
+    return False
 
 
 def _plain_twin(u, y: Image, at: Loc, claimed: list, acfg: dict) -> tuple | None:
@@ -400,9 +444,47 @@ def _whole_figure(doc: Doc, rng: tuple[int, int], page: int, rect: tuple, pic_do
     return tuple(box) if grown else None
 
 
+def _layer_of(x: Image, placed: list) -> bool:
+    """x lies on top of other pictures of the same page that have their stage picture: a screenshot built
+    from tiles (the menu, a highlight bar, a cursor layered on it) is one picture in stage. True when at
+    least 80 % of x is covered by those pictures."""
+    r = pymupdf.Rect(x.bbox)
+    if r.is_empty:
+        return False
+    under = [pymupdf.Rect(p.bbox) & r for p in placed if p is not x and p.page == x.page]
+    if not under:
+        return False
+    # area covered (the tiles may overlap each other: sampled on a grid)
+    n, hit = 0, 0
+    for i in range(12):
+        for j in range(6):
+            pt = pymupdf.Point(r.x0 + (i + 0.5) * r.width / 12, r.y0 + (j + 0.5) * r.height / 6)
+            n += 1
+            hit += any(c.contains(pt) for c in under if not c.is_empty)
+    return hit >= 0.8 * n
+
+
 def section_images(doc: Doc, rng: tuple[int, int]) -> list[Image]:
     start, end = _pos(doc, rng[0]), _pos(doc, rng[1])
-    return [im for im in doc.images if start <= (im.page, im.bbox[1] + 1) < end]
+    return stack_slices([im for im in doc.images if start <= (im.page, im.bbox[1] + 1) < end])
+
+
+def stack_slices(images: list[Image], tol: float = 2.5) -> list[Image]:
+    """Pictures stacked edge to edge - the same left and right edges, each one starting where the one above
+    ends - are one picture cut into strips (an OSD menu exported as header / body / footer bitmaps): joined
+    into one, so they are compared as the picture the reader sees, not as strips no other picture matches."""
+    out: list[Image] = []
+    for im in sorted(images, key=lambda i: (i.page, i.bbox[0], i.bbox[1])):
+        last = out[-1] if out else None
+        if last is not None and last.page == im.page and not last.broken and not im.broken \
+                and abs(last.bbox[0] - im.bbox[0]) <= tol and abs(last.bbox[2] - im.bbox[2]) <= tol \
+                and -tol <= im.bbox[1] - last.bbox[3] <= tol:
+            out[-1] = Image(im.page, (min(last.bbox[0], im.bbox[0]), last.bbox[1], max(last.bbox[2], im.bbox[2]),
+                                      max(last.bbox[3], im.bbox[3])))
+        else:
+            out.append(im)
+    # back in reading order (page, top, left), as the callers expect
+    return sorted(out, key=lambda i: (i.page, i.bbox[1], i.bbox[0]))
 
 
 def _rel_width(doc: Doc, im: Image) -> float:
@@ -590,10 +672,22 @@ def _combined(u: Unit, ib, used: set, missing: list, changed: list, art_score: f
             continue
         if item not in missing and item not in changed:
             continue  # placed in the first pass
-        if item in changed and own_partner(item[0], item[1]) and not holds_other(item[1], item[0]):
-            if same_screen is not None:
-                same_screen.add((id(item[0]), id(item[1])))
-            continue
+        if item in changed and own_partner(item[0], item[1]):
+            if area(item[1]) >= 2.5 * area(item[0]):
+                # a small prod picture (the music notes) found inside a much larger stage picture of the same
+                # spot (phone + speaker + notes): stage combined the illustration into one image - not a re-crop
+                changed.remove(item)
+                used.add(idx[id(item[1])])
+                merged.add(idx[id(item[1])])
+                mid, half = (item[1].bbox[1] + item[1].bbox[3]) / 2, (item[1].bbox[3] - item[1].bbox[1]) / 2
+                hit = find_artwork(u.a, item[0], u.b, Loc(item[1].page, (item[1].bbox[0], mid, item[1].bbox[2], mid + 1)),
+                                   max(art_score, 0.85), 1.0, reach=max(220, half + 30))
+                out.append((item[0], item[1], hit))
+                continue
+            if not holds_other(item[1], item[0]):
+                if same_screen is not None:
+                    same_screen.add((id(item[0]), id(item[1])))
+                continue
         found = inside(item[0])
         if found:
             y = found[0]
@@ -754,6 +848,67 @@ def _ink_color(doc: Doc, im: Image) -> str | None:
 
 
 _MARKS: dict[tuple, tuple] = {}
+
+
+def _prod_marks_only(u: Unit, x: Image, y: Image, acfg: dict) -> bool:
+    """Prod's picture carries red highlight marks (boxes, arrows, red text) that stage's copy does not have."""
+    (ra, _, sa), (rb, _, _) = _red_marks(u.a, x), _red_marks(u.b, y)
+    return ra >= acfg.get("marks_min_pixels", 20) and rb < acfg.get("marks_ratio", 0.3) * ra \
+        and sa <= acfg.get("marks_max_share", 0.1)
+
+
+def _labels_only(u: Unit, x: Image, y: Image, acfg: dict) -> dict | None:
+    """The two pictures are the same artwork once the text on them is taken out: prod's picture with
+    its labels (“A. Tabletop  B. Pole mount  C. Wall/ceiling mount” drawn into the image) and stage's
+    without them, or labelled differently. The text on each picture (live text over it and OCR'd
+    words in it) is blanked, the rest trimmed to what is drawn and correlated; at least
+    same_picture_similarity: only the labels differ - returns each side's label words, else None."""
+    (ta, la), (tb, lb) = _without_text(u.a, x), _without_text(u.b, y)
+    if ta is None or tb is None or not (la or lb):
+        return None  # nothing drawn, or no text on either picture: the plain comparison stands
+    ca, cb = ta - ta.mean(), tb - tb.mean()
+    sim = float((ca * cb).sum() / (np.sqrt((ca * ca).sum() * (cb * cb).sum()) + 1e-9))
+    return {"prod": la, "stage": lb} if sim >= acfg.get("same_picture_similarity", 0.8) else None
+
+
+def _without_text(doc: Doc, im: Image, n: int = 64) -> tuple["np.ndarray | None", list[str]]:
+    """(n x n grayscale of the picture with its text blanked (live words over it, OCR words in it), trimmed
+    to what is left - None when nothing is left; the words blanked)."""
+    from .. import ocr
+    pdf = (_DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path)))
+    r = pymupdf.Rect(im.bbox)
+    z = 200 / max(r.width, 1)
+    pix = pdf[im.page].get_pixmap(clip=r, matrix=pymupdf.Matrix(z, z), colorspace=pymupdf.csGRAY, alpha=False)
+    g = PILImage.frombytes("L", (pix.width, pix.height), pix.samples)
+    bg = g.getpixel((1, 1))
+    live = [w for w in doc.words if w.page == im.page and r.contains(pymupdf.Point((w.bbox[0] + w.bbox[2]) / 2,
+                                                                                    (w.bbox[1] + w.bbox[3]) / 2))]
+    boxes, texts = [w.bbox for w in live], [w.text for w in live]
+    if ocr.available():
+        # words, not specks: OCR reads strokes of a line drawing as stray characters. A word of 2+ letters /
+        # digits, text-sized; a one-letter word (“A.” of “A. Tabletop”) only beside such a word on its line
+        read = [(t, b) for t, b in ocr.word_boxes(doc.path, im.page, tuple(im.bbox), dpi=300)
+                if any(c.isalnum() for c in t) and (b[3] - b[1]) <= 0.25 * r.height + 4]
+        words = [b for t, b in read if sum(c.isalnum() for c in t) >= 2]
+        beside = lambda b: any(min(b[3], w[3]) - max(b[1], w[1]) > 0.5 * (b[3] - b[1])
+                               and min(abs(w[0] - b[2]), abs(b[0] - w[2])) <= 2 * (b[3] - b[1]) for w in words)
+        got = [(t, b) for t, b in read if sum(c.isalnum() for c in t) >= 2 or beside(b)]
+        seen = set()
+        for t, b in sorted(got, key=lambda tb: (round(tb[1][1] / 4), tb[1][0])):  # reading order, each word once
+            k = (t, round(b[0]), round(b[1]))
+            if k not in seen:
+                seen.add(k)
+                boxes.append(b)
+                texts.append(t)
+    draw = ImageDraw.Draw(g)
+    for b in boxes:
+        draw.rectangle([(b[0] - r.x0 - 1.5) * z, (b[1] - r.y0 - 1.5) * z, (b[2] - r.x0 + 1.5) * z, (b[3] - r.y0 + 1.5) * z],
+                       fill=bg)
+    box = ImageChops.difference(g, PILImage.new("L", g.size, bg)).point(lambda v: 255 if v > 28 else 0).getbbox()
+    if not box:
+        return None, texts
+    g = g.crop(box)
+    return np.asarray(g.resize((n, n), PILImage.BILINEAR).filter(ImageFilter.GaussianBlur(1.2)), np.float64), texts
 
 
 def _red_marks(doc: Doc, im: Image, width: int = 400) -> tuple[int, tuple | None, float]:
@@ -927,14 +1082,20 @@ def check(u: Unit) -> list[Finding]:
     # prod pictures that stage shows as part of one bigger picture (several views of the product
     # combined into one image): found inside it, so neither missing nor a different picture
     same_screen: set = set()  # changed pairs that are the same picture, cropped or marked differently
+    combined_with = []
     for x, y, hit in _combined(u, ib, used, missing, changed, art_score, same_look, min_pic, same_screen):
+        combined_with.append((x, y))
         findings.append(Finding(
             "assets", vec_sev, f"Picture combined in stage: the prod picture is part of a larger stage picture "
                                f"(prod p.{x.page + 1} ↔ stage p.{y.page + 1}, match {hit[0]:.0%})",
             [Loc(x.page, x.bbox)], [Loc(y.page, hit[1])], {"kind": "combined"}, types=["image combined"]))
+    # prod pictures that have their stage picture (paired or found inside a bigger one)
+    placed = [x2 for x2, _, _ in pairs] + [x2 for x2, _ in combined_with] + [c[0] for c in changed]
     for x, ax, icon in missing:
-        if icon and icons == "ignore":
+        if icon and (icons == "ignore" or (acfg.get("margin_icons", "ignore") == "ignore" and _margin_icon(u.a, x)) or _in_figure(u.a, x)):
             continue
+        if _layer_of(x, placed):
+            continue  # a layer of a screenshot prod builds from several image tiles: stage's picture holds it
         at = al.loc_in_b(ax)
         vec = find_artwork(u.a, x, u.b, at, art_score, same_look, claimed_b,
                            mask=_outside(u.b, u.b_range, at.page) if at else None)
@@ -980,6 +1141,40 @@ def check(u: Unit) -> list[Finding]:
         # look at (a warning), not an error - only a picture that is not prod's picture at all is an error
         # (the pixel check, when it ran, overrides the hash guess: it already proved the two apart)
         similar = same or (vis <= acfg.get("similar_picture_distance", 0.5) and (id(x), id(y)) not in confirmed_diff)
+        if similar and _prod_marks_only(u, x, y, acfg):
+            continue  # the same picture, prod with red highlight marks / red text on it, stage without: no "image
+            #           differs" - the marks are the image report's "Image overlay" (or nothing, ignore_prod_red_marks)
+        lab = _labels_only(u, x, y, acfg) if not u.cfg.get("genuine", {}).get("report_image_labels", False) else None
+        if lab is not None:
+            # the same artwork, only its labels set on one side / differently: not an image difference. Labels
+            # prod's picture has and stage's lacks are reported in the image report only
+            gone = [t for t in lab["prod"] if t.lower() not in {s.lower() for s in lab["stage"]}]
+            if gone:
+                findings.append(Finding(
+                    "assets", acfg.get("similar_image_severity", "warning"),
+                    f"Image label missing in stage: “{' '.join(gone)}” on the prod picture is not on the stage picture "
+                    f"(the artwork is the same; prod p.{x.page + 1} ↔ stage p.{y.page + 1})",
+                    [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
+                    {"kind": "labels", "labels_missing": gone, "image_report_only": True}, types=["missing image label"]))
+            continue
+        # the same picture at another size: that is what the reader notices - reported as bigger / smaller in
+        # stage, not as "differs" (rendering it at another size is also what lowers the visual similarity)
+        rel_x, rel_y = _rel_width(u.a, x), _rel_width(u.b, y)
+        grow = rel_y / max(rel_x, 1e-6) - 1
+        if similar and max(rel_x, rel_y) >= icon_w and (abs(rel_x - rel_y) > acfg["width_tolerance"]
+                                                        or abs(grow) > acfg.get("size_ratio_tolerance", 0.2)):
+            if not size_reported(rel_x, rel_y, acfg):
+                continue  # the same picture, only bigger or a little smaller in stage: fine
+            wx, hx, wy, hy = x.bbox[2] - x.bbox[0], x.bbox[3] - x.bbox[1], y.bbox[2] - y.bbox[0], y.bbox[3] - y.bbox[1]
+            findings.append(Finding(
+                "assets", acfg.get("size_severity", "warning"),
+                f"Image {'bigger' if grow > 0 else 'smaller'} in stage by {abs(grow):.0%}: the same picture "
+                f"(prod p.{x.page + 1} ↔ stage p.{y.page + 1}): {wx:.0f}×{hx:.0f} pt → {wy:.0f}×{hy:.0f} pt, "
+                f"width {rel_x:.0%} → {rel_y:.0%} of content box",
+                [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
+                {"kind": "size", "baseline_width": round(rel_x, 3), "candidate_width": round(rel_y, 3),
+                 "visual_distance": round(vis, 3)}, types=["image smaller"]))
+            continue
         findings.append(Finding(
             "assets", acfg.get("similar_image_severity", "warning") if similar else acfg.get("changed_severity", "error"),
             (f"Image differs in stage: the same picture, but not identical - cropped differently or with other "
@@ -991,13 +1186,20 @@ def check(u: Unit) -> list[Finding]:
              f"Different image in stage: the picture at this spot is not the prod picture "
              f"(prod p.{x.page + 1} ↔ stage p.{y.page + 1}, visual similarity {1 - vis:.0%})"),
             [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
-            {"kind": "changed", "visual_distance": round(vis, 3), "same_picture": same}))
+            {"kind": "changed", "visual_distance": round(vis, 3), "same_picture": same},
+            # visually the same picture (re-captured, cropped, edited): its own type, apart from another picture
+            types=["image version"] if similar else ["image changed"]))
+        if same:
+            # the same picture, only cropped differently or with other marks (a label drawn into it, prod's
+            # highlight boxes): an info note, not an issue - kept out of the PDF and image reports
+            findings[-1].severity, findings[-1].types = "info", ["image recropped"]
+            findings[-1].detail["kind"] = "recropped"
     pending = []  # stage pictures with no artwork found in prod: a drawing of prod's own at the spot, or extra
     for n, y in enumerate(ib):
         if n in used:
             continue
         icon = _rel_width(u.b, y) < icon_w
-        if icon and icons == "ignore":
+        if icon and (icons == "ignore" or (acfg.get("margin_icons", "ignore") == "ignore" and _margin_icon(u.b, y)) or _in_figure(u.b, y)):
             continue
         at = al.loc_in_a(anc_b[n])
         vec = find_artwork(u.b, y, u.a, at, art_score, same_look, claimed_a,
@@ -1057,14 +1259,14 @@ def check(u: Unit) -> list[Finding]:
             x = Image(at.page, twin)
             rel_x, rel_y = _rel_width(u.a, x), _rel_width(u.b, y)
             grow = rel_y / max(rel_x, 1e-6) - 1
-            if abs(rel_x - rel_y) > acfg["width_tolerance"] or abs(grow) > acfg.get("size_ratio_tolerance", 0.2):
+            if size_reported(rel_x, rel_y, acfg):
                 wx, hx, wy, hy = twin[2] - twin[0], twin[3] - twin[1], y.bbox[2] - y.bbox[0], y.bbox[3] - y.bbox[1]
                 findings.append(Finding(
                     "assets", acfg.get("size_severity", "warning"),
                     f"Image size differs: the same picture drawn {abs(grow):.0%} {'larger' if grow > 0 else 'smaller'} in stage "
                     f"(prod p.{at.page + 1} ↔ stage p.{y.page + 1}): {wx:.0f}×{hx:.0f} pt → {wy:.0f}×{hy:.0f} pt, "
                     f"width {rel_x:.0%} → {rel_y:.0%} of content box",
-                    [Loc(at.page, twin)], [Loc(y.page, y.bbox)], {"kind": "size"}, types=["size / aspect"]))
+                    [Loc(at.page, twin)], [Loc(y.page, y.bbox)], {"kind": "size"}, types=["image smaller"]))
             continue
         findings.append(Finding(
             "assets", acfg.get("icons", "warning") if icon else acfg.get("count_severity", "error"),
@@ -1143,6 +1345,8 @@ def check(u: Unit) -> list[Finding]:
         for n_on, n_off, on_side, box, share in ((ra, rb, "prod", box_a, sa), (rb, ra, "stage", box_b, sb)):
             if n_on < min_px or n_off >= keep * n_on or share > max_share:
                 continue  # (a mark is a thin outline: a picture that is largely red is red by itself)
+            if on_side == "prod" and acfg.get("ignore_prod_red_marks", True):
+                continue  # prod's red highlight boxes / red text on a picture, left out in stage: not reported
             # the marked area on the side that has the marks, and the same area of the other side's picture
             src, dst = (x, y) if on_side == "prod" else (y, x)
             fx0, fy0 = (box[0] - src.bbox[0]) / (src.bbox[2] - src.bbox[0]), (box[1] - src.bbox[1]) / (src.bbox[3] - src.bbox[1])
@@ -1158,8 +1362,9 @@ def check(u: Unit) -> list[Finding]:
                 f"Image different in stage: red highlight marks {what} (prod p.{x.page + 1} ↔ stage p.{y.page + 1})"
                 + (f"\nProd: red marks drawn on the picture\nStage: the same picture without the red marks" if what == "missing"
                    else f"\nProd: the picture without red marks\nStage: red marks drawn on the same picture"),
-                [la], [lb], {"kind": "marks", "marks": what, "baseline_red_px": ra, "candidate_red_px": rb},
-                types=["image changed"], links=[(la, lb)]))
+                [la], [lb], {"kind": "marks", "marks": what, "baseline_red_px": ra, "candidate_red_px": rb,
+                             "image_report_only": True},
+                types=["image marks"], links=[(la, lb)]))  # the same picture with / without a red overlay
     blur_ratio = acfg.get("blurred_ratio", 0.35)
     for x, y, _ in pairs:
         ar_x, ar_y = _aspect(u.a, x), _aspect(u.b, y)
@@ -1181,15 +1386,24 @@ def check(u: Unit) -> list[Finding]:
             # skip center alignment changes if configured; only report left/right differences
             skip_center = (acfg.get("ignore_center_alignment", True) and 
                           ("centred" in al_x or "centred" in al_y))
-            if (max(rel_x, rel_y) >= icon_w and al_x != al_y and 
+            # only a real move counts: the picture's centre shifts by >= align_min_shift of the text width
+            # (fully left vs fully right); a wide picture labelled "full width" in one PDF and "right" in the
+            # other, or a few points of difference, is not an alignment issue
+            def centre(doc, im):
+                l, r = doc.left(im.page), doc.right(im.page)
+                return ((im.bbox[0] + im.bbox[2]) / 2 - l) / max(r - l, 1)
+            shift = abs(centre(u.a, x) - centre(u.b, y))
+            # [assets] alignment_sides_only: only a complete move from one side to the other (left <-> right)
+            side = lambda a: a.split()[0] if a.split() and a.split()[0] in ("left", "right") else None
+            sides_ok = not acfg.get("alignment_sides_only", True) or (side(al_x) and side(al_y) and side(al_x) != side(al_y))
+            if (max(rel_x, rel_y) >= icon_w and al_x != al_y and sides_ok and
                 not (al_x.startswith("indented") and al_y.startswith("indented")) and
-                not skip_center):
+                not skip_center and shift >= acfg.get("align_min_shift", 0.15)):
                 problems.append(f"alignment {al_x} → {al_y}")
         if abs(ar_x - ar_y) / ar_x > acfg["aspect_tolerance"]:
             problems.append(f"aspect {ar_x:.2f} → {ar_y:.2f}")
         grow = rel_y / max(rel_x, 1e-6) - 1
-        if max(rel_x, rel_y) >= icon_w and (abs(rel_x - rel_y) > acfg["width_tolerance"]
-                                            or abs(grow) > acfg.get("size_ratio_tolerance", 0.2)):
+        if max(rel_x, rel_y) >= icon_w and size_reported(rel_x, rel_y, acfg):
             wx, hx = x.bbox[2] - x.bbox[0], x.bbox[3] - x.bbox[1]
             wy, hy = y.bbox[2] - y.bbox[0], y.bbox[3] - y.bbox[1]
             problems.insert(0, f"{wx:.0f}×{hx:.0f} pt → {wy:.0f}×{hy:.0f} pt, "
@@ -1208,7 +1422,106 @@ def check(u: Unit) -> list[Finding]:
                 [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
                 {"baseline_aspect": round(ar_x, 3), "candidate_aspect": round(ar_y, 3),
                  "baseline_width": round(rel_x, 3), "candidate_width": round(rel_y, 3)},
-                types=["image distorted"] if distorted else (["image alignment"] if all(p.startswith("alignment") for p in problems) else []),
+                types=["image distorted"] if distorted else (["image alignment"] if all(p.startswith("alignment") for p in problems)
+                                                             # stage under half prod's size: the reader sees that
+                                                             else ["image smaller"] if " pt → " in problems[0] and grow < 0 else []),
             ))
+    if acfg.get("grid_repair", True):
+        findings = _grid_repair(u, findings, acfg)
     _annotate(u, findings)
     return findings
+
+
+_GRID_KINDS = ("missing", "extra", "changed", "raster-vs-vector")
+
+
+def _grid_repair(u: Unit, findings: list[Finding], acfg: dict) -> list[Finding]:
+    """A figure of several panels (a 2 x 2 grid of steps) has no text between its pictures, and the two PDFs
+    may build each panel differently (prod: a drawn monitor plus a small OSD bitmap; stage: one bitmap per
+    panel) - pairing along the text then crosses the panels: "missing" + "extra" + "different" pictures that
+    are all there. When a page pair has such a mix, its pictures are paired again by their place in the figure:
+    each side's pictures scaled to one frame, a prod picture with the stage picture at the same spot."""
+    groups: dict[tuple, list[Finding]] = {}
+    for f in findings:
+        k = (f.detail or {}).get("kind")
+        if f.check != "assets" or k not in _GRID_KINDS:
+            continue
+        pa = f.baseline[0].page if f.baseline else None
+        pb = f.candidate[0].page if f.candidate else None
+        if pa is None and f.baseline_at is not None:
+            pa = f.baseline_at.page
+        if pb is None and f.candidate_at is not None:
+            pb = f.candidate_at.page
+        if pa is None or pb is None:
+            continue
+        groups.setdefault((pa, pb), []).append(f)
+    out = list(findings)
+    for (pa, pb), fs in groups.items():
+        kinds = {f.detail.get("kind") for f in fs}
+        if len(fs) < 3 or not ({"missing", "extra"} & kinds):
+            continue  # an ordinary missing / extra picture: nothing crossed
+        P = list(dict.fromkeys(tuple(l.bbox) for f in fs for l in f.baseline if l.page == pa))
+        S = list(dict.fromkeys(tuple(l.bbox) for f in fs for l in f.candidate if l.page == pb))
+        if len(P) < 2 or len(S) < 2:
+            continue
+        frame = lambda bs: (min(b[0] for b in bs), min(b[1] for b in bs), max(b[2] for b in bs), max(b[3] for b in bs))
+        fa, fb = frame(P), frame(S)
+        to_b = lambda x, y: (fb[0] + (x - fa[0]) / max(fa[2] - fa[0], 1) * (fb[2] - fb[0]),
+                             fb[1] + (y - fa[1]) / max(fa[3] - fa[1], 1) * (fb[3] - fb[1]))
+        to_a = lambda x, y: (fa[0] + (x - fb[0]) / max(fb[2] - fb[0], 1) * (fa[2] - fa[0]),
+                             fa[1] + (y - fb[1]) / max(fb[3] - fb[1], 1) * (fa[3] - fa[1]))
+        inside = lambda pt, b, pad=4: b[0] - pad <= pt[0] <= b[2] + pad and b[1] - pad <= pt[1] <= b[3] + pad
+        mapping = {}
+        for b in P:
+            c = to_b((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+            hit = next((s for s in S if inside(c, s)), None)
+            if hit is None:
+                break
+            mapping[b] = hit
+        if len(mapping) < len(P):
+            continue  # the figures are not laid out alike: leave the text pairing
+        new = []
+        for b, sb in mapping.items():
+            x, y = Image(pa, b), Image(pb, sb)
+            vis = visual_distance(u.a, x, u.b, y)
+            part = (b[2] - b[0]) * (b[3] - b[1]) / max((sb[2] - sb[0]) * (sb[3] - sb[1]), 1)
+            vector = any(f.detail.get("kind") == "raster-vs-vector" and f.baseline and tuple(f.baseline[0].bbox) == b for f in fs)
+            if vector:
+                msg = (f"Same panel, but drawn as vector/text in prod and an embedded image in stage "
+                       f"(prod p.{pa + 1} ↔ stage p.{pb + 1})")
+                new.append(Finding("assets", acfg.get("raster_vs_vector_severity", "info"), msg, [Loc(pa, b)], [Loc(pb, sb)],
+                                   {"kind": "raster-vs-vector"}))
+                continue
+            what = ("the prod picture is one part of the stage picture of this panel (stage draws the panel as one "
+                    "image)" if part < 0.6 else "another version of the picture of this panel")
+            new.append(Finding(
+                "assets", acfg.get("similar_image_severity", "warning"),
+                f"Image differs in stage: {what} (prod p.{pa + 1} ↔ stage p.{pb + 1}, figure panel matched by "
+                f"position, visual similarity {1 - vis:.0%})",
+                [Loc(pa, b)], [Loc(pb, sb)], {"kind": "changed", "visual_distance": round(vis, 3), "grid": True}))
+        # stage panels no prod picture maps to: a prod drawing at that spot is the same panel drawn as vectors
+        used_s = set(mapping.values())
+        try:
+            clusters = [tuple(r) for r in pymupdf.open(u.a.path)[pa].cluster_drawings() if r.width >= 30 and r.height >= 30]
+        except Exception:
+            clusters = []
+        for sb in S:
+            if sb in used_s:
+                continue
+            c = to_a((sb[0] + sb[2]) / 2, (sb[1] + sb[3]) / 2)
+            # the smallest drawing at that spot (a page-wide cluster of rules is not the panel)
+            drawn = min((r for r in clusters if inside(c, r, 8)
+                         and (r[2] - r[0]) * (r[3] - r[1]) <= 3 * (sb[2] - sb[0]) * (sb[3] - sb[1]) * (fa[2] - fa[0]) / max(fb[2] - fb[0], 1)),
+                        key=lambda r: (r[2] - r[0]) * (r[3] - r[1]), default=None)
+            if drawn is not None:
+                new.append(Finding("assets", acfg.get("raster_vs_vector_severity", "info"),
+                                   f"Same panel, but drawn as vector/text in prod and an embedded image in stage "
+                                   f"(prod p.{pa + 1} ↔ stage p.{pb + 1})", [Loc(pa, drawn)], [Loc(pb, sb)],
+                                   {"kind": "raster-vs-vector"}))
+            else:
+                old = next((f for f in fs if f.detail.get("kind") == "extra" and f.candidate and tuple(f.candidate[0].bbox) == sb), None)
+                if old is not None:
+                    new.append(old)
+        drop = {id(f) for f in fs}
+        out = [f for f in out if id(f) not in drop] + new
+    return out
