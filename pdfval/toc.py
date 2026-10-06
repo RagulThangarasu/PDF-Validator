@@ -89,10 +89,11 @@ def _printed(doc: Doc, pages: list[int]) -> Toc:
     toc.lines = lines
     raw: list[tuple[str, int | None, int, tuple, float]] = []
     pending = None  # a wrapped title line waiting for its leader line
+    full = _full_width_entries(doc, lines)
     for i in lines:
         ln = doc.lines[i]
         text = normalize.clean(ln.text)
-        m = _ENTRY.match(text)
+        m = _ENTRY.match(text) or full.get(i)
         if m:
             title = m["title"].strip(" .")
             box, x0 = ln.bbox, ln.bbox[0]
@@ -108,6 +109,7 @@ def _printed(doc: Doc, pages: list[int]) -> Toc:
             toc.heading = text  # "Table of contents"
         elif text:
             pending = (ln,)
+    raw = _unshift_pages(raw)
     # levels from indentation: cluster left edges within 4 pt, leftmost = level 1
     edges: list[float] = []
     for x in sorted({round(r[4], 1) for r in raw}):
@@ -130,6 +132,70 @@ def _printed(doc: Doc, pages: list[int]) -> Toc:
     level = lambda x: 1 + max(k for k, e in enumerate(edges) if x >= e - 4) if edges else 1
     toc.entries = [TocEntry(t, normalize.title(t), level(x0), pg, tp, tuple(b), x0) for t, pg, tp, b, x0 in raw]
     return toc
+
+
+_NO_LEADER = re.compile(r"^(?P<title>.+?\S)\s+(?P<page>\d{1,4})$")
+
+
+def _full_width_entries(doc: Doc, lines: list[int]) -> dict:
+    """Entries with no dot leaders: a title so long that it fills its line up to the page number
+    (“Connecting multiple monitors (Thunderbolt™ daisy chaining) (selected models only) 49”). Such a line is an
+    entry of its own - not the first line of the next entry's wrapped title - when it ends in a number, reaches
+    the page-number column (the right edge of the page's dotted entries) and its number fits between the page
+    numbers of the dotted entries before and after it. {line index: match with title / page}."""
+    dotted = {}
+    for i in lines:
+        m = _ENTRY.match(normalize.clean(doc.lines[i].text))
+        if m and m["page"].isdigit():
+            dotted[i] = int(m["page"])
+    out = {}
+    for i in lines:
+        if i in dotted:
+            continue
+        ln = doc.lines[i]
+        m = _NO_LEADER.match(normalize.clean(ln.text))
+        rights = [doc.lines[k].bbox[2] for k in dotted if doc.lines[k].page == ln.page]
+        if not m or len(rights) < 2 or len(m["title"].split()) < 2:
+            continue
+        right = sorted(rights)[len(rights) // 2]  # the page-number column
+        before = max((k for k in dotted if k < i), default=None)
+        after = min((k for k in dotted if k > i), default=None)
+        n = int(m["page"])
+        if ln.bbox[2] >= right - 8 and (before is None or dotted[before] <= n) and (after is None or n <= dotted[after]) \
+                and (before is not None or after is not None):
+            out[i] = m
+    return out
+
+
+def _unshift_pages(raw: list[tuple]) -> list[tuple]:
+    """A TOC over several pages whose pages are set at different left margins (inner / outer margins of facing
+    pages: page 2 starts 6.6 pt further right) has every indent twice - chapters at 50 and 56.6, sub-entries at
+    78 and 85 - and would get four levels where it has two. A page whose indents all coincide with the first
+    page's once moved by the difference of their leftmost entries is that page shifted: its entries are moved
+    back. A page that only holds deeper entries (a chapter's sub-entries running on) does not coincide: untouched."""
+    pages = sorted({r[2] for r in raw})
+    if len(pages) < 2:
+        return raw
+
+    def edges(tp: int) -> list[float]:
+        out: list[float] = []
+        for x in sorted({round(r[4], 1) for r in raw if r[2] == tp}):
+            if not out or x - out[-1] > 4:
+                out.append(x)
+        return out
+    ref = edges(pages[0])
+    step = min((b - a for a, b in zip(ref, ref[1:])), default=None)
+    shift = {}
+    for tp in pages[1:]:
+        own = edges(tp)
+        d = own[0] - ref[0]
+        if abs(d) < 0.5 or (step is not None and abs(d) >= 0.6 * step):
+            continue  # not shifted - or its leftmost entries are a deeper level, not the first page's chapters
+        if all(any(abs(e - d - r) <= 2 for r in ref) for e in own):
+            shift[tp] = d
+    if not shift:
+        return raw
+    return [(t, pg, tp, b, x0 - shift.get(tp, 0.0)) for t, pg, tp, b, x0 in raw]
 
 
 def resolve_pages(toc: Toc, anchors: list[Anchor]) -> None:

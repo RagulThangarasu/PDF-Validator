@@ -90,6 +90,36 @@ def _to_pictures(pc: "_PageCache", page: int, boxes: list) -> list:
     return out
 
 
+# (words other languages do not share: “in”, “is”, “of”, “for”, “on” are Dutch, Italian, Norwegian, French words too)
+_EN_WORDS = frozenset("the and with this that your you are from when will which have should".split())
+_ENGLISH: dict = {}
+
+
+def _english(pc: "_PageCache", page: int) -> bool:
+    """Is the page's text English? By its own words, page by page - a manual can hold a section per language.
+    English: Latin letters, and the everyday English words (the, and, of, to ...) make up a fair share of them.
+    A page with hardly any text counts as English unless it is in another script."""
+    key = (id(pc), page)
+    if key not in _ENGLISH:
+        try:
+            words = [w[4].lower().strip(".,;:!?()\"'“”") for w in pc.doc[page].get_text("words")]
+        except Exception:
+            words = []
+        words = [w for w in words if w.isalpha()]
+        latin = sum(1 for w in words if all(ord(ch) < 0x250 for ch in w))
+        if words and latin < 0.7 * len(words):
+            _ENGLISH[key] = False
+        elif len(words) < 40:
+            # little text (the last lines of a section): not English when not one English word is among them
+            _ENGLISH[key] = len(words) < 8 or any(w in _EN_WORDS for w in words)
+        else:
+            _ENGLISH[key] = sum(1 for w in words if w in _EN_WORDS) >= 0.02 * len(words)
+    return _ENGLISH[key]
+
+
+_UNDERLINE_OVER = 4  # more text lines than this marked in one view: underlined, not boxed
+
+
 def _crop(pc: _PageCache, page: int, boxes: list, color, note: str | None, window: tuple[float, float],
           next_boxes: list | None = None) -> Image.Image:
     """The page from window[0] to window[1] (pt), full width, with the finding's boxes drawn on it
@@ -107,6 +137,12 @@ def _crop(pc: _PageCache, page: int, boxes: list, color, note: str | None, windo
     marks = [(b, (b[1] - 2 - y0) * z) for b in boxes]
     if cont is not None:
         marks += [(b, cont + (b[1] - 2) * z) for b in (next_boxes or [])]
+    # many lines of text marked in one view (a whole paragraph in another weight): boxes on every line bury the
+    # text under their outlines - the lines are underlined instead, the text stays as printed. A few places
+    # (a word, a line or two) keep their box: easier to spot on a full page.
+    # ... and always on a page that is not English: accents and non-Latin letters fill the line's height, so a box
+    # drawn round them cuts through the text
+    dense = sum(1 for b, _ in marks if b[3] - b[1] <= 30) > _UNDERLINE_OVER or not _english(pc, page)
     for b, top in marks:
         r = [(b[0] - 2) * z, top, (b[2] + 2) * z, top + (b[3] - b[1] + 4) * z]
         if r[3] < 0 or r[1] > img.height or (cont is not None and b in boxes and r[1] >= cont - 26):
@@ -114,6 +150,10 @@ def _crop(pc: _PageCache, page: int, boxes: list, color, note: str | None, windo
             continue
         # a text line is tinted; a picture or block (taller than a few lines) is only outlined, so its
         # colours and detail are shown exactly as in the PDF
+        if dense and b[3] - b[1] <= 30:
+            y = top + (b[3] - b[1] + 3) * z
+            d.line([(b[0] * z, y), (b[2] * z, y)], fill=color + (255,), width=3)
+            continue
         tint = color + (38,) if b[3] - b[1] <= 30 else None
         d.rectangle(r, fill=tint, outline=color + (255,), width=3)
     img = Image.alpha_composite(img, over)
@@ -424,7 +464,8 @@ def _caption(img: Image.Image, side: str, title: str, text: str, color) -> Image
     """A strip above the screenshot that says what the issue is: the side, the issue name in the
     issue's colour, then the issue text (up to 3 lines). Above the picture, so it hides nothing."""
     width, pad = img.width, 10
-    font = _cjk_font() if any(ord(ch) >= 0x2190 for ch in title + text) else _FONT  # arrows, CJK: fallback font
+    # arrows and every script but plain Latin: a font that has those letters
+    font = _cjk_font(title + text) if any(ord(ch) >= 0x250 for ch in title + text) else _FONT
     if font is _FONT:
         text = text.replace("—", "-").replace("×", "x")  # the default font has no em dash / times sign
     cjk = font is not _FONT and any(ord(ch) >= 0x2E80 for ch in text)  # no spaces between CJK words: wrap anywhere
@@ -461,18 +502,36 @@ def _caption(img: Image.Image, side: str, title: str, text: str, color) -> Image
     return out
 
 
-_CJK: list = []
+_WIDE: list = []
+_WIDE_FILES = ("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", "/Library/Fonts/Arial Unicode.ttf",
+               "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+               "C:/Windows/Fonts/arial.ttf")
 
 
-def _cjk_font():
-    """Droid Sans Fallback (bundled with PyMuPDF): Chinese / Japanese / Korean text in captions."""
-    if not _CJK:
+def _cjk_font(text: str = ""):
+    """A font that has the caption's letters: the default one is Latin only, so Russian, Greek, Arabic, Thai,
+    Chinese ... came out as empty boxes. Tried in turn - a system font with every script, FiraGO (Cyrillic,
+    Greek, Arabic, Hebrew, Thai) and Droid Sans Fallback (Chinese / Japanese / Korean), both bundled with
+    PyMuPDF - and the one covering most of the text is used."""
+    if not _WIDE:
         import io
-        try:
-            _CJK.append(ImageFont.truetype(io.BytesIO(pymupdf.Font("cjk").buffer), 17))
-        except Exception:
-            _CJK.append(_FONT)
-    return _CJK[0]
+        import os
+        for f in _WIDE_FILES:
+            if os.path.exists(f):
+                try:
+                    _WIDE.append((pymupdf.Font(fontfile=f), ImageFont.truetype(f, 17)))
+                except Exception:
+                    pass
+        for name in ("figo", "cjk"):
+            try:
+                pf = pymupdf.Font(name)
+                _WIDE.append((pf, ImageFont.truetype(io.BytesIO(pf.buffer), 17)))
+            except Exception:
+                pass
+        _WIDE.append((None, _FONT))
+    chars = {ch for ch in text if not ch.isspace() and ord(ch) > 0x7F}
+    best = max(_WIDE, key=lambda pf: sum(1 for ch in chars if pf[0] is not None and pf[0].has_glyph(ord(ch))))
+    return best[1]
 
 
 def _linked_view(links: list, line: dict) -> dict | None:

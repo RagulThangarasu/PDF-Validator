@@ -53,7 +53,8 @@ def check(u: Unit) -> list[Finding]:
         # layout is judged on stage against the spec; the list markers themselves (a bullet or number
         # missing, another numbering style / format, out of sequence) are content and still compared;
         # where the bullets sit (marker position, gap to the text, hanging indent) too, unless turned off
-        return _bullets(u, positions=lcfg.get("compare_bullets_with_prod", True))
+        from . import caption_rows
+        return _bullets(u, positions=lcfg.get("compare_bullets_with_prod", True)) + caption_rows.check(u)
     tol_i, tol_a, tol_lh = lcfg["indent_tolerance"], lcfg["align_tolerance"], lcfg["line_height_tolerance_em"]
     A, B = u.a, u.b
     starts = [(i, j) for i, j in u.pairs if A.words[i].line_start and B.words[j].line_start]
@@ -101,6 +102,8 @@ def check(u: Unit) -> list[Finding]:
                 {"property": "space-above", "baseline": round(ga, 2), "candidate": round(gb, 2)},
                 links=paired_locs(A, B, [(u.a_anchor.word, u.b_anchor.word)]),
             ))
+    from . import caption_rows
+    findings += caption_rows.check(u)
     return findings
 
 

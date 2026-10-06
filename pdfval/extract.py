@@ -219,7 +219,9 @@ def _column_order(lines: list, width: float, tables: list, rules=None) -> list:
     return out
 
 
-_MARKER_ONLY = re.compile(r"^[•◦▪▫‣⁃●○■□–—\-·∙]$")
+# (a list number too: “3.” stored after “Power button”, a hair above it, read “Power button 3. Control keys 4.” -
+# every number one item late, and the last one left over as extra text)
+_MARKER_ONLY = re.compile(r"^(?:[•◦▪▫‣⁃●○■□–—\-·∙]|\(?(?:\d{1,3}|[A-Za-z])[.)])$")
 
 
 def _markers_first(lines: list) -> list:
@@ -229,12 +231,24 @@ def _markers_first(lines: list) -> list:
     out = list(lines)
     for k in range(1, len(out)):
         pno, b, text = out[k][0], out[k][1], out[k][2].strip()
-        p_pno, pb = out[k - 1][0], out[k - 1][1]
-        if not _MARKER_ONLY.match(text) or pno != p_pno or _MARKER_ONLY.match(out[k - 1][2].strip()):
+        if not _MARKER_ONLY.match(text):
             continue
-        overlap = min(b[3], pb[3]) - max(b[1], pb[1])
-        if overlap > 0.5 * min(b[3] - b[1], pb[3] - pb[1]) and b[2] <= pb[0] + 2:
-            out[k - 1], out[k] = out[k], out[k - 1]
+        # the item's first line: among the few lines read just before the marker, the one level with it that
+        # starts right of where the marker starts (an item of several lines is read whole before its number;
+        # a two-digit number may reach a little into its text: “13.” ending 3pt past where the text begins)
+        for back in range(1, 6):
+            if k - back < 0:
+                break
+            p_pno, pb, ptext = out[k - back][0], out[k - back][1], out[k - back][2].strip()
+            if pno != p_pno or _MARKER_ONLY.match(ptext):
+                break
+            overlap = min(b[3], pb[3]) - max(b[1], pb[1])
+            if overlap > 0.5 * min(b[3] - b[1], pb[3] - pb[1]):
+                if b[0] < pb[0] and b[2] <= pb[0] + max(2, 0.35 * (b[2] - b[0])):
+                    out.insert(k - back, out.pop(k))
+                break
+            if pb[3] <= b[1] or (back > 1 and out[k - back][4] != out[k - 1][4]):
+                break  # a line above the marker / of another block: not this item
     return out
 
 
@@ -427,8 +441,12 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
             except Exception:
                 return False
 
+        # a list marker on a line of its own ("•", "–", "3.", "b)") is never a running header: a list that runs
+        # over many pages starts each of them with one at the same height, and stripping it turned up as a
+        # bullet / list number "missing" (a page number is a bare number, without the full stop / bracket)
+        marker = re.compile(r"^(?:[^\w\s]{1,2}|\(?(?:\d{1,3}|[A-Za-z])[.)])$")
         for i, (pno, bbox, text, _, _) in enumerate(raw_lines):
-            if not in_band(pno, bbox) or in_table(pno, bbox):
+            if not in_band(pno, bbox) or in_table(pno, bbox) or marker.match(text.strip()):
                 continue
             t, h = re.sub(r"\d+", "#", normalize.clean(text).lower()), round(bbox[1] / pages[pno].height * 100)
             # a step either side counts too: the front matter may print its page number a few points higher

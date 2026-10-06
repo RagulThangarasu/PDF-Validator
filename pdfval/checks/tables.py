@@ -499,6 +499,24 @@ def _continuation(a: TTable, b: TTable, doc: Doc) -> bool:
     return b.page == a.page + 1 and a.bbox[3] > 0.7 * doc.pages[a.page].height and b.bbox[1] < 0.3 * doc.pages[b.page].height
 
 
+def _own_header(doc: Doc, a: TTable, b: TTable) -> bool:
+    """b starts with a header row of its own - not a's header repeated on a continuation page: its first row
+    is set like a's header row (the same background bar, another one than b's data rows) but says something
+    else (“LED indicator on the Receiver | Status Description” after the table “LED indicator on the Button |
+    Status Description”). b is then the next table, though it starts at the top of the next page."""
+    if not a.rows or len(b.rows) < 2:
+        return False
+    ha, hb = a.rows[0], b.rows[0]
+    if _alike(ha.bag, hb.bag) >= 0.9:
+        return False  # the same header again: a continuation page
+    try:
+        bg_a, bg_b, bg_data = _background(doc, ha.page, ha.box), _background(doc, hb.page, hb.box), \
+            _background(doc, b.rows[1].page, b.rows[1].box)
+    except Exception:
+        return False
+    return bool(bg_a) and bg_a == bg_b and bg_b != bg_data
+
+
 def _one_table(all_tables: list[TTable], parts: list[TTable], doc: Doc) -> bool:
     """The parts are one table running over page breaks. Parts on consecutive pages: each continues the
     one before it. Parts further apart (a table over p.43, p.44 and p.45 whose p.44 part is not among them -
@@ -507,6 +525,8 @@ def _one_table(all_tables: list[TTable], parts: list[TTable], doc: Doc) -> bool:
     if len(parts) < 2:
         return True
     for a, b in zip(parts, parts[1:]):
+        if _own_header(doc, a, b):
+            return False  # the next page starts another table, under a header of its own
         if _continuation(a, b, doc) or _continues(a, b, doc):
             continue
         if b.page <= a.page + 1:
@@ -557,7 +577,7 @@ def joined(ts: list[TTable], doc: Doc) -> tuple[list[TTable], list[TRow]]:
             while k < len(t.rows) - 1 and k < len(head) and _alike(t.rows[k].bag, head[k].bag) >= 0.9:
                 k += 1
             ws = [doc.words[i] for i in t.rows[0].idx if doc.words[i].norm]
-            if not k and ws and sum(w.style.weight >= 500 for w in ws) / len(ws) >= 0.9:
+            if not k and ws and (sum(w.style.weight >= 500 for w in ws) / len(ws) >= 0.9 or _own_header(doc, whole, t)):
                 # it starts with a header row of its own (“PD3226G/ PD2730S Settings” under “PD2706QN Settings”):
                 # the next table, not this one continued
                 out.append(TTable(t.key, t.page, t.bbox, [replace(r) for r in t.rows]))

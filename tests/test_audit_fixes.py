@@ -174,7 +174,7 @@ def test_captions_side_by_side_not_level_in_stage(tmp_path, cfg):
     r = compare(a, _caption_row_pdf(tmp_path / "b.pdf", 19), cfg)
     rows = [f for f in found(r) if "row alignment" in f["types"]
             or any("row alignment" in p["types"] for p in f["detail"].get("parts", []))]
-    assert rows and "“GR10 Mobile Dock” 19 pt lower" in rows[0]["message"] and not rows[0]["genuine"]  # layout: not in the PDF report, [f["message"] for f in found(r)]
+    assert rows and "“GR10 Mobile Dock” 19 pt lower" in rows[0]["message"] and rows[0]["genuine"]  # in the PDF report
     # level in stage, or stacked into one column (a reflow): no row finding
     for b in (_caption_row_pdf(tmp_path / "c.pdf", 0), _caption_row_pdf(tmp_path / "d.pdf", 0, stack=True)):
         assert not [f for f in found(compare(a, b, cfg)) if "row alignment" in f["types"]]
@@ -743,3 +743,44 @@ def test_line_between_two_cells_missing_in_stage_is_reported(tmp_path, cfg):
     assert "Color Management" in fs[0]["message"] and "Wide Color Gamut" in fs[0]["message"]
     same = [f for f in found(compare(str(tmp_path / "a.pdf"), str(tmp_path / "c.pdf"), cfg), "tables") if f["types"] == ["cell border"]]
     assert not same, same
+
+
+def _accessories_pdf(path, level: bool):
+    """Three pictures of different heights side by side, a caption under each."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 60), "Shipping contents", fontsize=16, fontname="hebo")
+    p.insert_text((72, 84), "Verify that you have all of the items shown below.", fontsize=10)
+    for x, h, name in ((80, 70, "Projector"), (240, 90, "Remote control"), (400, 40, "Power cord")):
+        top = 110 + (90 - h) / 2 if level else 110
+        p.draw_rect(pymupdf.Rect(x, top, x + 90, top + h), width=0.8)
+        p.draw_oval(pymupdf.Rect(x + 20, top + 8, x + 70, top + h - 8), width=0.8)
+        p.insert_text((x + 10, 225 if level else top + h + 16), name, fontsize=10)
+    doc.save(path)
+
+
+def test_captions_of_a_picture_row_not_level_in_stage(tmp_path, cfg):
+    """Prod sets the captions of a row of pictures on one line; in stage each hangs under its own picture, so the
+    caption of the low picture sits far above the others: reported. Same layout on both sides: nothing."""
+    _accessories_pdf(tmp_path / "a.pdf", True)
+    _accessories_pdf(tmp_path / "b.pdf", False)
+    fs = [f for f in found(compare(str(tmp_path / "a.pdf"), str(tmp_path / "b.pdf"), cfg)) if f["types"] == ["caption row"]]
+    assert len(fs) == 1 and "Power cord" in fs[0]["message"] and "higher" in fs[0]["message"], fs
+    assert not [f for f in found(compare(str(tmp_path / "a.pdf"), str(tmp_path / "a.pdf"), cfg)) if f["types"] == ["caption row"]]
+
+
+def test_bullet_at_the_top_of_many_pages_is_not_a_running_header(tmp_path, cfg):
+    """A list running over many pages starts each page with a bullet at the same height. That bullet is the
+    item's, not a running header: it stays in the text (stripped, it was reported as a bullet missing)."""
+    from pdfval import extract
+    doc = pymupdf.open()
+    names = ["Power", "Water", "Heat", "Dust", "Cables", "Batteries", "Mounting", "Cleaning"]
+    for n in range(8):
+        p = doc.new_page()
+        p.insert_text((40, 37), chr(0x2022), fontsize=10)  # set as its own line, as the stage PDF does
+        p.insert_text((80, 40), names[n] + " is the subject of this safety item.", fontsize=10)
+        p.insert_text((40, 300), names[n] + " again, further down the page.", fontsize=10)
+    doc.save(tmp_path / "m.pdf")
+    D = extract.load(str(tmp_path / "m.pdf"), "baseline", cfg)
+    # (the built-in font prints the bullet as a middle dot)
+    assert sum(1 for w in D.words if len(w.text) == 1 and not w.text.isalnum()) == 8, [w.text for w in D.words][:12]

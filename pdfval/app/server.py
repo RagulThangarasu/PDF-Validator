@@ -363,7 +363,11 @@ class Jobs:
                                  progress=lambda f, m: self.update(jid, progress=round(0.45 + 0.55 * f, 3), message=m),
                                  full=not batch)
                 self._learn_product(result)
-                self.update(jid, status="done", progress=1.0, message="Done", summary=result["summary"],
+                tm = result["meta"].get("timing") or {}
+                took = (f" - web capture {tm.get('total_s', 0):.0f} s for {tm.get('web_pages', 0)} page(s) (open "
+                        f"{tm.get('open_s', 0):.0f}, load {tm.get('load_s', 0):.0f}, read {tm.get('read_s', 0):.0f}, site "
+                        f"checks {tm.get('site_s', 0):.0f}), comparison {tm.get('compare_s', 0):.0f} s") if tm else ""
+                self.update(jid, status="done", progress=1.0, message="Done" + took, summary=result["summary"],
                             finished=datetime.now().isoformat(timespec="seconds"))
             except Exception as e:  # surface the failure in the UI
                 traceback.print_exc()
@@ -602,6 +606,8 @@ def make_handler(jobs: Jobs, root: Path):
                         path.unlink(missing_ok=True)
                 if p == "/api/pairs":
                     return self._json(PAIRS.suggest())
+                if p == "/api/prod-for":  # the prod PDF of a stage web guide, from its URL
+                    return self._json(PAIRS.prod_for_url(parse_qs(u.query).get("url", [""])[0]))
                 if p == "/api/library":
                     return self._json(LIBRARY.status())
                 if p == "/api/files":
@@ -898,6 +904,54 @@ class Pairs:
             s["prod"], s["via"] = (main[hit]["path"] if hit else ""), via
             s["model"] = (row or {}).get("model", "")
         return {"stage": stage, "prod": prod, "stage_dir": str(self.dir)}
+
+
+    def prod_for_url(self, url: str) -> dict:
+        """The prod PDF of a stage web guide, from its URL - the same pairing as a stage PDF's: the guide's
+        product (…/projector/w2720i/en/page.html -> w2720i, en) looked up in the migration Excel (the map's model
+        row -> its prod archive), else by name in the prod library. {} fields empty when nothing matches."""
+        from urllib.parse import urlsplit, unquote
+        from .. import metadata
+        segs = [unquote(x) for x in urlsplit(url).path.split("/") if x]
+        if segs and "." in segs[-1]:
+            segs[-1] = segs[-1].rsplit(".", 1)[0]
+        is_lang = lambda x: bool(re.fullmatch(r"[a-z]{2}([-_][a-zA-Z]{2,4})?", x))
+        k = next((n for n, x in enumerate(segs) if n > 0 and is_lang(x)), None)
+        lang = segs[k] if k is not None else ""
+        # the product is the folder the language sits in; else every folder of the path, deepest first
+        skip = {"content", "guide", "guides", "dam", "en", "html"}
+        names = ([segs[k - 1]] if k else []) + [x for x in reversed(segs[:-1] if k is None else segs[:k - 1])
+                                                if x.lower() not in skip and not is_lang(x)]
+        prod = LIBRARY.status()["files"]
+        main: dict[str, dict] = {}
+        for f in prod:
+            if f["product"] not in main or ("marked" in main[f["product"]]["name"].lower() and "marked" not in f["name"].lower()
+                                            and not f["sub"].lower().count("images")):
+                main[f["product"]] = f
+        norm = {key: metadata._norm(key) for key in main}
+        try:
+            rows = metadata.load_sheet(metadata.default_sheet())
+        except Exception:
+            rows = []
+        want = re.compile(rf"(^|[_\-\s]){re.escape(lang[:2])}([_\-\s]|$)", re.I) if lang else None
+        for name in names:
+            row = metadata.match(name, name, rows) if rows else None
+            keys = [x for x in ((row or {}).get("file"), (row or {}).get("model"), name) if x]
+            for n_k, key in enumerate(keys):
+                nk = metadata._norm(key)
+                exact = [p for p, n in norm.items() if n and n == nk]
+                loose = [p for p, n in norm.items() if p not in exact and nk and len(nk) >= 3
+                         and (n.startswith(nk) or nk.startswith(n) and len(n) >= 4)]
+                hits = exact + loose
+                if hits:
+                    # the guide's language first (W2720i_FR_… for …/w2720i/fr/…), among every folder of the product;
+                    # else the exact name, else the nearest
+                    hit = next((p for p in hits if want and want.search(p)), hits[0])
+                    f = main[hit]
+                    return {"prod": f["path"], "name": f["name"], "size": f["size"], "library_product": hit,
+                            "via": "Excel" if row and n_k < 2 else "name", "product": name, "lang": lang,
+                            "model": (row or {}).get("model", "")}
+        return {"prod": "", "product": names[0] if names else "", "lang": lang}
 
 
 PAIRS = Pairs(PROJECT / "aem-map-pdfs", PROJECT / "stage-pdf")

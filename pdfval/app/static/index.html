@@ -583,7 +583,35 @@ async function viewNew(qs) {
   const isStage = f => /(^|\/)stag/i.test(f.folder), isProd = f => /(^|\/)prod/i.test(f.folder);
   renderSlot('baseline', files.filter(f => !isStage(f)));
   if (MODE === 'pdf') renderSlot('candidate', files.filter(f => !isProd(f)));
-  else $('#url').oninput = updateGo;
+  else {
+    // the prod PDF of the guide, found from its URL (product / language -> the prod library, as PDF ⇄ PDF pairs do):
+    // filled in while no prod PDF is picked by hand; "Change" in the prod card takes over
+    let seq = 0, timer = null;
+    const autoProd = async () => {
+      const url = $('#url')?.value.trim() || '';
+      if (!/^https?:\/\/\S+$/.test(url) || (pick.baseline && !pick.baseline.auto)) return;
+      const n = ++seq;
+      let r = null;
+      try { r = await api('/api/prod-for?url=' + encodeURIComponent(url)); } catch (e) { return; }
+      if (n !== seq || !$('#url') || (pick.baseline && !pick.baseline.auto)) return;
+      const note = $('#auto-prod-note') || (() => { const d = document.createElement('div'); d.id = 'auto-prod-note'; d.className = 'small';
+        d.style.marginTop = '8px'; $('#card-baseline').appendChild(d); return d; })();
+      if (r && r.prod) {
+        pick.baseline = { path: r.prod, name: r.name, size: r.size, auto: true };
+        renderSlot('baseline', files.filter(f => !isStage(f)));
+        note.className = 'small';
+        note.innerHTML = `<b style="color:#15803d">✓ Prod PDF found automatically</b> for <b>${esc(r.product)}</b>${r.lang ? ' (' + esc(r.lang) + ')' : ''}`
+          + ` — via ${r.via === 'Excel' ? 'the migration Excel' + (r.model ? ' (model ' + esc(r.model) + ')' : '') : 'its name in the prod library'}. “Change” picks another.`;
+      } else {
+        if (pick.baseline?.auto) { pick.baseline = null; renderSlot('baseline', files.filter(f => !isStage(f))); }
+        note.className = 'small muted';
+        note.textContent = r && r.product ? `No prod PDF found for “${r.product}” in the prod library — pick it above.` : '';
+      }
+      updateGo();
+    };
+    $('#url').oninput = () => { updateGo(); clearTimeout(timer); timer = setTimeout(autoProd, 450); };
+    autoProd();
+  }
   $('#go').onclick = start;
   if ($('#pairs-panel')) pairsPanel($('#pairs-panel'), true);
   $('#aem-check').onclick = () => aemLogin(true);

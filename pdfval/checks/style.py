@@ -60,7 +60,7 @@ def check(u: Unit) -> list[Finding]:
         findings.append(Finding(
             "style", sev,
             f"[{role}] " + ", ".join(f"{p}: {x} → {y}" for p, x, y in d)
-            + f" ({len(pairs)} words, e.g. “{snippet(u.a, a_idx, 8)}”)",
+            + f" ({len(pairs)} words, e.g. “{snippet(u.a, a_idx[:8])}{chr(32) + chr(8230) if len(a_idx) > 8 else str()}”)",
             locs(u.a, a_idx, rcfg["max_locs"]), locs(u.b, b_idx, rcfg["max_locs"]),
             {"role": role, "props": [{"property": p, "baseline": x, "candidate": y} for p, x, y in d],
              "words": len(pairs), "baseline_style": wa.style.css(), "candidate_style": wb.style.css()},
@@ -188,7 +188,7 @@ def _emphasis(u: Unit, scfg: dict, rcfg: dict) -> list[Finding]:
             # plain <-> bold said in words first (what the reader sees), then the exact weights
             (f"[{role}] {what}: {plain(wa_, ia)} in prod → {plain(wb_, ib)} in stage ({name(wa_, ia)} → {name(wb_, ib)}; "
              if (wa_ >= 600) != (wb_ >= 600) else f"[{role}] {what}: {name(wa_, ia)} in prod → {name(wb_, ib)} in stage (")
-            + f"{sa0.family} → {sb0.family}{seen}) ({len(pairs)} words, e.g. “{snippet(u.a, a_idx, 8)}”)",
+            + f"{sa0.family} → {sb0.family}{seen}) ({len(pairs)} words, e.g. “{snippet(u.a, a_idx[:8])}{chr(32) + chr(8230) if len(a_idx) > 8 else str()}”)",
             locs(u.a, a_idx, rcfg["max_locs"]), locs(u.b, b_idx, rcfg["max_locs"]),
             {"role": role, "props": props, "words": len(pairs), "kind": "emphasis",
              "baseline_weight": wa_, "candidate_weight": wb_,

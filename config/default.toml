@@ -232,6 +232,10 @@ report_types = ["missing image", "broken image", "image changed", "image blacked
                 "image vertical alignment",   # an icon centred on its paragraph in prod, at its first line in stage
                 "callout numbers missing", "image label missing", "leader lines missing"]   # picture text: image report only
 alignment_sides_only = true   # image alignment: only a complete move left <-> right (not centred / full width / indented)
+pixelated_vs_vector = false   # "image pixelated" where prod draws the artwork as vectors and stage embeds a bitmap
+                              # under pixelated_ppi: not reported (nothing of prod's to compare the resolution with).
+                              # Pixelated = both are bitmaps, stage under pixelated_ppi and prod >= pixelated_ratio x
+                              # sharper; a picture as coarse in prod as in stage is fine
 ignore_prod_red_marks = false # prod's red highlight marks / red text on a picture that stage's copy does not have:
                               # false = shown in the image report only, as "Image overlay" (never "image differs"
                               # and never in the PDF report); true = not reported at all
@@ -316,9 +320,11 @@ types = [
   # style, not a defect: see [ignore] types)
   "icon missing", "icon extra", "icon order", "icon above text",   # icons in table rows (missing, swapped, placed above the text)   # a NOTE: label vs an icon only is house style (info, full report only)
   "callout type differs",   # stage labels a note as another type than prod's icon shows (WARNING icon, IMPORTANT label)
+  "row alignment",   # side-by-side items of a prod row at different heights in stage
   # tables: header (missing / not centred as in prod), rows and cells merged or split
   "missing header", "table header alignment", "rows merged", "row split", "cells merged", "cells split",
   "missing row", "missing table", "tables merged", "cell differs",
+  "caption row",                            # captions of one row of pictures: level in prod, not in stage
   "cell border",                            # a line between two cells of the prod table that stage does not draw
 ]
 data_missing_words = 1        # "missing text" is genuine when >= N of its words are absent from stage (1 = any)
@@ -342,7 +348,9 @@ types = [
   # CSS / layout: only spacing and indentation are validated (indent, bullet alignment, list level, spacing);
   # fonts, sizes, colours, line heights, alignment and the design-spec styling are not
   "font-size", "font-family", "font-weight", "font-style", "color", "line-height", "text-align", "space-above",
-  "line-wrap", "row alignment",
+  "line-wrap",
+  # (not "row alignment": items side by side on one row in prod - “1. Front Table” | “2. Rear Table” - that are
+  # at different heights in stage are reported)
   "spec font-size", "spec font-family", "spec font-weight", "spec color", "spec line-height", "spec text-decoration",
   "spec text-align", "spec bullet", "spec list numbering", "spec callout title", "spec callout background",
   "spec callout content", "spec callout icon", "spec cover", "spec page margin", "spec page size", "spec pagination",

@@ -89,7 +89,10 @@ IMAGE_REPORT = {"include": {**GENUINE["include"], "genuine": False, "coverage": 
 # a label of the picture missing in stage - with or without the label settings of the other reports
 IMAGE_ISSUE_TYPES = {"missing image", "broken image", "image changed", "image blacked out", "image pixelated",
                      "image distorted", "duplicate image", "image alignment", "image in wrong section", "image combined",
-                     "missing image label", "image smaller", "image bigger", "image mirrored"}
+                     "missing image label", "image smaller", "image bigger", "image mirrored",
+                     # a picture's own text and marks, compared picture by picture (picture_labels.py, assets.py):
+                     # callout numbers, labels, leader lines and the red highlight overlay missing / added in stage
+                     "callout numbers missing", "image label missing", "leader lines missing", "image marks"}
 
 
 # what the image report shows: picture size (incl. much smaller in stage), alignment, a picture over its box
@@ -623,6 +626,15 @@ def coverage_html(result: dict) -> str:
     return "".join(html) + "</table>"
 
 
+def _prod_stage_html(f: dict) -> str:
+    """The issue for a table cell: what prod has / what stage has; else its one-line description."""
+    from ..genuine import prod_stage
+    ps = prod_stage(f)
+    if not ps:
+        return escape(f["description"]).replace(chr(10), "<br/>")
+    return (f"<b style='color:#2563eb'>Prod:</b> {escape(ps[0])}<br/><b style='color:#0f766e'>Stage:</b> {escape(ps[1])}")
+
+
 def genuine_html(gen: list[tuple]) -> str:
     """Overview of the genuine issues: count per issue, then one row per issue with its description."""
     from ..genuine import where
@@ -640,7 +652,7 @@ def genuine_html(gen: list[tuple]) -> str:
                    f"<td><b style='color:{f.get('color') or '#1d2330'}'>{escape(f['issue'])}</b>"
                    f"<br/><span class='muted'>{escape(f.get('why', ''))}</span></td>"
                    f"<td>{pa or '—'}</td><td>{pc or '—'}</td><td>{_guid_cell(f.get('aem'))}</td>"
-                   f"<td>{escape(f['description']).replace(chr(10), '<br/>')}</td></tr>")
+                   f"<td>{_prod_stage_html(f)}</td></tr>")
     return "".join(out) + "</table>"
 
 
@@ -801,6 +813,12 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
             rows_txt.append(("Issue", head, "#1d2330") if len(parts) == 1 else (f"Difference {k}", head, "#b42318"))
             rows_txt += [(ln.split(": ", 1)[0], ln.split(": ", 1)[1], "#7c3aed" if ln.startswith("Figma") else "#2563eb" if ln.startswith("Prod") else "#0f766e")
                          for ln in rest if ln.startswith(("Figma: ", "Prod: ", "Stage: "))]
+        # the issue as what prod has and what stage has - nothing else (its name and pages are in the line above);
+        # an issue that cannot be put that way keeps its one-line description
+        from ..genuine import prod_stage
+        ps = prod_stage(f)
+        if ps:
+            rows_txt = [("Prod", ps[0], "#2563eb"), ("Stage", ps[1], "#0f766e")]
         msg_lines = []  # (label or None, text, label colour)
         for label, value, colour in rows_txt:
             wrapped = c.wrap(re.sub(r"\.{4,}", " ", f"{label}: {value}"), 9)

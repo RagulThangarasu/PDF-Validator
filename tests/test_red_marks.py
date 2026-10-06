@@ -57,7 +57,7 @@ def test_red_marks_in_prod_only_is_a_different_image(tmp_path, cfg):
     assert "\nProd: red marks drawn on the picture\nStage: the same picture without the red marks" in f["message"]
     # an image overlay: in the image report only (never the PDF report / verdict)
     from pdfval.report import image_report
-    assert f["detail"].get("image_report_only") and any(name == "Image overlay" for _, _, name in image_report.issues(r))
+    assert f["detail"].get("image_report_only") and any(name == "Red overlay missing" for _, _, name in image_report.issues(r))
     x0, y0, x1, y1 = f["baseline"][0]["bbox"]  # the highlight surrounds the red outline
     assert x0 <= 185 <= x1 and y0 <= 245 <= y1 and x0 <= 415 <= x1 and y0 <= 355 <= y1
     assert f["color"] != "#dc2626"  # not a red highlight over red marks

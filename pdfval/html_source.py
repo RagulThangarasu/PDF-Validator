@@ -167,14 +167,41 @@ _SIGN_IN_MS = 30_000  # a sign-in that has not left the login form by then has f
 _IDLE_MS = 8_000  # at most this long for background requests to calm down after a page has loaded
 
 
-def _settle(page, extra_ms: int = 0) -> None:
-    """The page has loaded; give late requests (lazy content) a short, bounded time. Waiting for
-    the network to go fully idle never ends on pages that poll (AEM author, analytics, chat)."""
+# Resolves when the page is ready to read: every image has loaded (or failed), the fonts are in and the DOM
+# has not changed for `quiet` ms - or after `cap` ms, whichever comes first. Returns the ms it took.
+_READY_JS = r"""
+([quiet, cap]) => new Promise(resolve => {
+  const t0 = performance.now();
+  let last = t0;
+  const mo = new MutationObserver(() => { last = performance.now(); });
+  mo.observe(document.documentElement, {subtree: true, childList: true, attributes: true, characterData: true});
+  const imgs = () => [...document.images].every(i => i.complete);
+  const tick = () => {
+    const now = performance.now();
+    const fonts = !document.fonts || document.fonts.status === 'loaded';
+    if ((imgs() && fonts && now - last >= quiet) || now - t0 >= cap) { mo.disconnect(); resolve(Math.round(now - t0)); }
+    else setTimeout(tick, 50);
+  };
+  tick();
+})
+"""
+
+
+def _ready(page, quiet_ms: int = 300, cap_ms: int = _IDLE_MS) -> None:
+    """Wait until the page is ready to read (_READY_JS), at most cap_ms: a page that is done in half a second is
+    read after half a second - not after a fixed pause, nor after a "network idle" that a polling page never
+    reaches."""
     try:
-        page.wait_for_load_state("load", timeout=_IDLE_MS)
-        page.wait_for_load_state("networkidle", timeout=_IDLE_MS)
-    except Exception:
+        page.evaluate(_READY_JS, [quiet_ms, cap_ms])
+    except Exception:  # the page navigated while waiting
         pass
+
+
+def _settle(page, extra_ms: int = 0) -> None:
+    """The page's HTML is in: wait for it to be ready to read - its images and fonts loaded, its DOM quiet -
+    for a bounded time. Not for the "load" event or a fully idle network: neither ever comes on pages that
+    poll (AEM author, analytics, chat), and each cost its whole timeout on every page."""
+    _ready(page)
     if extra_ms:
         page.wait_for_timeout(min(extra_ms, 5_000))
 
@@ -185,6 +212,22 @@ def _goto(page, url: str, timeout: int):
     resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout)
     _settle(page)
     return resp
+
+
+def _launch_hint(e: Exception) -> str:
+    """Why the browser for the web capture did not start, in one line, with what to do about it."""
+    msg = str(e)
+    if "bootstrap_check_in" in msg or "MachPortRendezvous" in msg:
+        # macOS: the process cannot register with its login session any more - the UI server outlived the
+        # shell / session that started it (or runs sandboxed), and every browser it starts inherits that
+        return ("The browser for the web capture could not start: this UI server has lost its macOS login session "
+                "(it outlived the terminal that started it, or runs in a sandbox). Restart the UI server from a "
+                "Terminal window (./start.sh) and run again.")
+    if "Executable doesn't exist" in msg or "playwright install" in msg:
+        return ("The browser for the web capture is not installed: run `.venv/bin/python -m playwright install "
+                "chromium` in the pdf_validator folder, then run again.")
+    first = next((ln.strip() for ln in msg.splitlines() if ln.strip()), type(e).__name__)
+    return f"The browser for the web capture could not start: {first[:300]}"
 
 
 def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEFAULT_EXCLUDE,
@@ -214,14 +257,22 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
     # "always": servers like AEM redirect to a login page instead of answering 401
     creds = {"username": user, "password": password, "send": "always"} if user else None
     timeout = 90_000
+    import time as _time
+    t_start = _time.monotonic()
+    timing = {"open_s": 0.0, "load_s": 0.0, "read_s": 0.0, "site_s": 0.0, "build_s": 0.0}
     captured, skipped = [], []
     chromes, visited, site_raw = [], {}, None
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        try:
+            browser = p.chromium.launch()
+        except Exception as e:
+            raise RuntimeError(_launch_hint(e)) from None
         try:
             page = browser.new_page(viewport={"width": width, "height": 1000}, device_scale_factor=1, http_credentials=creds)
             report(0.02, f"Opening {url}")
+            t0 = _time.monotonic()
             _open(page, url, user, password, timeout, wait_ms, report)
+            timing["open_s"] = _time.monotonic() - t0
             queue, seen = [url], {_page_key(url)}
             titles: dict[str, str] = {}  # page key -> its left-navigation entry
             nav_led, ordered = False, not crawl
@@ -233,7 +284,9 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                 frac = 0.05 + 0.8 * k / max(len(queue), 1)
                 if _page_key(page.url) != _page_key(u):
                     report(frac, f"Page {k + 1}/{len(queue)}: {titles.get(_page_key(u)) or u}")
+                    t0 = _time.monotonic()
                     resp = _goto(page, u, timeout)
+                    timing["load_s"] += _time.monotonic() - t0
                     if resp is not None and resp.status >= 500:  # gateway hiccups are often transient: once more
                         page.wait_for_timeout(2_000)
                         resp = _goto(page, u, timeout)
@@ -266,7 +319,9 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                     seen.update(_page_key(l) for l, _ in new)
                     titles.update({_page_key(l): t for l, t in new if t})
                     queue[k + 1:k + 1] = [l for l, _ in new]  # a page's sub-pages follow it (reading order)
+                t0 = _time.monotonic()
                 data, slices = _read_page(page, root, exclude, wait_ms, slice_h, report, frac)
+                timing["read_s"] += _time.monotonic() - t0
                 if site is not None:
                     ch = site_nav.read_chrome(page, site, root)
                     chromes.append(ch)
@@ -283,8 +338,10 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                 k += 1
             if site is not None and chromes:
                 report(0.86, "Checking the site navigation")
+                t0 = _time.monotonic()
                 site_raw = {"pages": chromes, **site_nav.probe(page, chromes, visited, out, lambda m: report(0.87, m)),
                             "dir": str(out)}
+                timing["site_s"] = _time.monotonic() - t0
         finally:
             browser.close()
     if not captured:
@@ -292,6 +349,7 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                            + " - check the URL, the content root selector and that the page loads without a login")
 
     report(0.9, "Building the document")
+    t_build = _time.monotonic()
     data, cuts, slices = _stack(captured, titled=crawl)
     W = int(data["width"])
     pdf = pymupdf.open()
@@ -318,6 +376,11 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
             "nav_toc": nav_toc,
             "crawl_by": "left navigation (PDF L1 TOC)" if nav_led else "guide links" if crawl else "",
             "skipped": skipped}
+    # where the capture's time went (seconds): signing in / first page, opening the other pages, reading them
+    # (scroll, structure, screenshots), the site-navigation link checks, building the document
+    timing["build_s"] = _time.monotonic() - t_build
+    info["timing"] = {**{k: round(v, 1) for k, v in timing.items()}, "total_s": round(_time.monotonic() - t_start, 1),
+                      "web_pages": len(captured)}
     if site_raw:
         for ch in site_raw["pages"]:
             ch.pop("ids", None)  # only needed for the link checks, large
@@ -409,7 +472,7 @@ def _read_page(page, root: str, exclude: str, wait_ms: int, slice_h: int, report
     """Structure + slice screenshots of the loaded page."""
     report(frac, f"Scrolling through “{page.title()}”")
     page.evaluate(_SCROLL_JS, 800)
-    page.wait_for_timeout(wait_ms)
+    _ready(page, 250, max(wait_ms, 500))  # what scrolling loaded (lazy images): until it is in, at most wait_ms
     report(frac, f"Reading “{page.title()}”")
     data = page.evaluate(_EXTRACT_JS, [root, exclude])
     W, H = int(data["width"]), int(math.ceil(data["height"]))

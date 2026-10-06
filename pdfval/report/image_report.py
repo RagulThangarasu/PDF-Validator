@@ -4,10 +4,12 @@ Captured (nothing else):
   * callout numbers missing   - “1” “2” “a” of a prod picture that stage's picture does not have
   * image labels missing      - short text set on / right above, below, left or right of the picture
   * leader lines missing      - the lines from a label to the picture
-  * image overlay             - highlight marks drawn over a picture on one side only
+  * red overlay missing/added - red highlight marks drawn over a picture on one side only
   * image pixelated           - stage prints the picture from far fewer pixels
-Per issue: the section, its AEM topic, the issue name, and the prod and the stage picture side by side, rendered
-at their own resolution (an embedded bitmap at its native pixels, a vector drawing sharp) - no other text."""
+  * artwork missing           - a prod picture that stage does not show (or that does not load / is blacked out)
+Per issue: the section, its AEM topic, the issue name, what prod has and what stage has in one line each, and the
+prod and the stage picture side by side, rendered at their own resolution (an embedded bitmap at its native
+pixels, a vector drawing sharp). A missing picture's stage side is the stage page around the place it belongs."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -20,12 +22,18 @@ KINDS = {  # issue name per finding (by type / kind)
     "missing image label": "Image labels missing",
     "leader lines missing": "Leader lines missing",
     "image pixelated": "Image pixelated",
+    # the picture itself: not there in stage, not loading, or blacked out
+    "missing image": "Artwork missing",
+    "broken image": "Artwork not loading",
+    "image blacked out": "Artwork blacked out",
 }
+_NO_ARTWORK = ("Artwork missing", "Artwork not loading")  # no stage picture to pair: the stage spot is shown
 
 
 def _kind(f: dict) -> str | None:
-    if (f.get("detail") or {}).get("kind") == "marks":
-        return "Image overlay"
+    d = f.get("detail") or {}
+    if d.get("kind") == "marks":  # the red highlight overlay (boxes / arrows drawn over the picture) on one side only
+        return "Red overlay missing" if d.get("marks") == "missing" else "Red overlay added"
     names = [KINDS[t] for t in (f.get("types") or []) if t in KINDS]
     return " · ".join(dict.fromkeys(names)) or None
 
@@ -41,6 +49,14 @@ def issues(result: dict) -> list[tuple[dict, dict, str]]:
     for s in result["sections"]:
         for f in (s.get("image_findings") or []) + s["findings"]:
             name = _kind(f)
+            if name and name.split(" · ")[0] in _NO_ARTWORK and f.get("baseline") and not f.get("candidate"):
+                # a picture stage does not show: its stage side is the place it belongs (where the text around it
+                # is in stage) - a band of the stage page around that spot
+                at = f.get("candidate_at")
+                if not at:
+                    continue
+                f = {**f, "candidate": [{"page": at["page"], "bbox": [0, max(at["bbox"][1] - 150, 0), 1e5, at["bbox"][3] + 150]}],
+                     "_spot_only": True}
             if not name or not f.get("baseline") or not f.get("candidate"):
                 continue
             b = f["baseline"][0]
@@ -48,6 +64,8 @@ def issues(result: dict) -> list[tuple[dict, dict, str]]:
             if A is not None:
                 # only what sits on / right at a real picture; and one entry per prod picture
                 pic = _whole_picture(A[b["page"]], [l for l in f["baseline"] if l["page"] == b["page"]])
+                if pic is None and f.get("_spot_only"):
+                    pic = pymupdf.Rect(b["bbox"])  # the missing picture itself, however small (an icon)
                 if pic is None:
                     continue
                 # the section's own heading above a picture is not the picture's label
@@ -437,6 +455,13 @@ def build(result: dict, out_dir: str | Path, filename: str = "image-issues.pdf")
     cover.insert_text((M, M + 104), f"{len(rows)} image issue(s)" + (f"  ·  {sm['critical']['total']} critical" if sm["critical"]["total"] else ""),
                       fontsize=12, fontname="hebo", color=(0.2, 0.25, 0.35) if rows else pct_color)
     spots = stage_spots(A, B, rows)
+    # (a missing picture has no stage figure to look for: its own spot stands)
+    spots = [(f["candidate"][0]["page"], f["candidate"]) if f.get("_spot_only") else sp for (_, f, _), sp in zip(rows, spots)]
+    from ..genuine import prod_stage
+    try:
+        uni = pymupdf.Font("notos")
+    except Exception:
+        uni = pymupdf.Font("helv")
     for (s, f, name), (spage, slocs) in zip(rows, spots):
         p = doc.new_page(width=W, height=H)
         topic = (f.get("aem") or {}).get("topic") or ""
@@ -449,13 +474,42 @@ def build(result: dict, out_dir: str | Path, filename: str = "image-issues.pdf")
         if (f.get("aem") or {}).get("url"):
             p.insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(M, M + 18, M + font.text_length(sub, 9), M + 31),
                            "uri": f["aem"]["url"]})
-        top, half = M + 44, (W - 3 * M) / 2
+        # what differs, in two short lines: what prod's picture has, what stage's has (or lacks)
+        ps = prod_stage(f)
+        top = M + 44
+        if ps:
+            for label, text, colour in (("Prod:", ps[0], (0.15, 0.39, 0.92)), ("Stage:", ps[1], (0.06, 0.46, 0.43))):
+                text = text if len(text) <= 150 else text[:149].rstrip() + "…"
+                p.insert_text((M, top), label, fontsize=9, fontname="hebo", color=colour)
+                tw = pymupdf.TextWriter(p.rect)  # a Unicode font: the labels' own quotes and scripts
+                tw.append((M + 34, top), text, font=uni, fontsize=9)
+                tw.write_text(p, color=(0.11, 0.14, 0.19))
+                top += 13
+            top += 4
+        half = (W - 3 * M) / 2
         for k, (src, locs, label) in enumerate(((A, f["baseline"], "Prod"), (B, slocs, "Stage"))):
             loc = locs[0]
             x0 = M + k * (half + M)
             p.insert_text((x0, top + 10), label, fontsize=10, fontname="hebo", color=(0.2, 0.25, 0.35))
             box = pymupdf.Rect(x0, top + 18, x0 + half, H - M)
-            pix = _picture(src, loc["page"], [l for l in locs if l["page"] == loc["page"]])
+            if f.get("_spot_only") and (k == 1 or _whole_picture(src[loc["page"]], [loc]) is None):
+                # the stage page around the spot, as it is; a small prod picture (an icon) with the text around it
+                pg = src[loc["page"]]
+                clip = (pymupdf.Rect(loc["bbox"]) if k == 1 else pymupdf.Rect(loc["bbox"]) + (-140, -70, 140, 70)) & pg.rect
+                pix = pg.get_pixmap(matrix=pymupdf.Matrix(1.6, 1.6), clip=clip, alpha=False)
+                if k == 0:  # the picture that is missing, marked
+                    mark = pymupdf.IRect(*[int((v - o) * 1.6) for v, o in zip(loc["bbox"], (clip.x0, clip.y0, clip.x0, clip.y0))])
+                    for t in range(3):
+                        for x in range(max(mark.x0 - t, 0), min(mark.x1 + t, pix.width - 1)):
+                            for yy in (mark.y0 - t, mark.y1 + t):
+                                if 0 <= yy < pix.height:
+                                    pix.set_pixel(x, yy, (220, 38, 38))
+                        for yy in range(max(mark.y0 - t, 0), min(mark.y1 + t, pix.height - 1)):
+                            for x in (mark.x0 - t, mark.x1 + t):
+                                if 0 <= x < pix.width:
+                                    pix.set_pixel(x, yy, (220, 38, 38))
+            else:
+                pix = _picture(src, loc["page"], [l for l in locs if l["page"] == loc["page"]])
             # fitted into its half page; the bitmap keeps all its pixels (zoom in the viewer to see them)
             sc = min(box.width / pix.width, box.height / pix.height)
             r = pymupdf.Rect(box.x0, box.y0, box.x0 + pix.width * sc, box.y0 + pix.height * sc)

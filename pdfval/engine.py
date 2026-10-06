@@ -89,6 +89,8 @@ def _reset_caches() -> None:
     ocr.reset()
     from . import genuine as _gen
     _gen._LINE_ART.clear()
+    from .checks import caption_rows
+    caption_rows._THINGS.clear()
 
 
 def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str | None = None,
@@ -487,7 +489,10 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     if keep_pics is not None:  # [assets] report_types: the only picture issues reported
         keep_pics = set(keep_pics)
         for _, fs, _ in ran:
-            fs[:] = [f for f in fs if f.check != "assets" or set(f.types or []) & keep_pics]
+            # (an issue kept for the image report only - a picture's numbers, labels, red overlay - is not subject
+            # to this list: it never reaches the other reports)
+            fs[:] = [f for f in fs if f.check != "assets" or set(f.types or []) & keep_pics
+                     or f.detail.get("image_report_only")]
     # bold / italic on the same words is a content difference (reported with the text, not as CSS)
     for _, fs, _ in ran:
         for f in fs:
@@ -513,7 +518,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     for u, findings, truncated in ran:
         # issues for the image report only (a picture's label missing in stage): kept apart - they do not count
         # in the section's verdict, the other reports or the viewer
-        image_only = [f for f in findings if f.detail.get("image_report_only")]
+        image_only = _one_per_picture([f for f in findings if f.detail.get("image_report_only")])
         findings[:] = [f for f in findings if not f.detail.get("image_report_only")]
         per_check = {c: _check_summary([f for f in findings if f.check == c]) for c in all_checks}
         for c, n in truncated.items():
@@ -1083,9 +1088,13 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
     for k, v in cfg.get("html", {}).items():  # [html] overrides in the config file
         if isinstance(v, dict) and isinstance(cfg.get(k), dict):
             _merge(cfg[k], v)
+    import time as _time
+    t0 = _time.monotonic()
     result = compare(baseline, doc.path, cfg, candidate_doc=doc,
                      candidate_meta={"mode": "html", "url": url, "page_title": info["title"], "capture": info},
                      progress=lambda f, m: report(0.3 + 0.7 * f, m))
+    # where the run's time went: the capture's phases (html_source) and the comparison itself
+    result["meta"]["timing"] = {**(info.get("timing") or {}), "compare_s": round(_time.monotonic() - t0, 1)}
     if site:  # left navigation, download PDF, next/previous, on this page, product subtitle
         from . import site_nav
         try:
@@ -1171,6 +1180,24 @@ def _apply_ignore(ran, A: Doc, B: Doc, cfg: dict) -> None:
                 f.types = rest
             keep.append(f)
         findings[:] = keep
+
+
+def _one_per_picture(found: list[Finding]) -> list[Finding]:
+    """A picture's missing labels are found by more than one step (the picture-by-picture comparison, the text
+    diff, the label-blind image comparison): one issue per prod picture - the picture-by-picture one, which names
+    each number / label and has checked stage's picture for it; the others for the same picture are dropped."""
+    precise = [f for f in found if f.detail.get("kind") == "picture labels" and f.baseline]
+
+    def same_picture(f: Finding) -> bool:
+        for g in precise:
+            for a in f.baseline:
+                for b in g.baseline:
+                    if a.page == b.page and min(a.bbox[2], b.bbox[2]) > max(a.bbox[0], b.bbox[0]) \
+                            and min(a.bbox[3], b.bbox[3]) > max(a.bbox[1], b.bbox[1]):
+                        return True
+        return False
+    return [f for f in found if f.detail.get("kind") == "picture labels"
+            or not ("missing image label" in (f.types or []) and same_picture(f))]
 
 
 def _drop_cover_pages(ran, A: Doc, B: Doc, anA: list, anB: list) -> None:

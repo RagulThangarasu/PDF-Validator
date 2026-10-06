@@ -39,3 +39,48 @@ def test_two_tables_on_one_page_are_two_tables(monkeypatch):
 def test_consecutive_pages_running_on_are_one_table(monkeypatch):
     monkeypatch.setattr(tables, "_raw", _raw({}))
     assert tables._one_table([], [_t(42, 79, 762), _t(43, 57, 754)], DOC)
+
+
+# --- a table at the top of the next page under a header of its own is the next table, not a continuation
+from collections import Counter
+
+
+def _table(page, y0, y1, header, fills):
+    rows = [tables.TRow((page, 0), page, (45, y0 + 20 * k, 547, y0 + 20 * (k + 1)), [], [], Counter(text.lower().split()))
+            for k, text in enumerate([header, "static blue the device is presenting", "off the device is powered off"])]
+    t = tables.TTable((page, 0), page, (45, y0, 547, y1), rows)
+    for r, fill in zip(rows, fills):
+        _FILLS[(page, r.box)] = fill
+    return t
+
+
+_FILLS: dict = {}
+BAR, PLAIN = "#9f9fa0", "#ffffff"
+
+
+def _bg(doc, page, box):
+    return _FILLS.get((page, box))
+
+
+def test_another_header_at_the_top_of_the_next_page_is_another_table(monkeypatch):
+    monkeypatch.setattr(tables, "_background", _bg)
+    monkeypatch.setattr(tables, "_raw", _raw({}))
+    a = _table(9, 411, 606, "LED indicator on the Button Status Description", (BAR, PLAIN, PLAIN))
+    b = _table(10, 57, 214, "LED indicator on the Receiver Status Description", (BAR, PLAIN, PLAIN))
+    assert tables._own_header(DOC, a, b) and not tables._one_table([a, b], [a, b], DOC)
+
+
+def test_the_same_header_repeated_is_a_continuation(monkeypatch):
+    monkeypatch.setattr(tables, "_background", _bg)
+    monkeypatch.setattr(tables, "_raw", _raw({}))
+    a = _table(9, 411, 606, "LED indicator on the Button Status Description", (BAR, PLAIN, PLAIN))
+    b = _table(10, 57, 214, "LED indicator on the Button Status Description", (BAR, PLAIN, PLAIN))
+    assert not tables._own_header(DOC, a, b) and tables._one_table([a, b], [a, b], DOC)
+
+
+def test_a_data_row_at_the_top_of_the_next_page_is_a_continuation(monkeypatch):
+    monkeypatch.setattr(tables, "_background", _bg)
+    monkeypatch.setattr(tables, "_raw", _raw({}))
+    a = _table(9, 411, 606, "LED indicator on the Button Status Description", (BAR, PLAIN, PLAIN))
+    b = _table(10, 57, 214, "Flashing red The device is unable to connect", (PLAIN, PLAIN, PLAIN))
+    assert not tables._own_header(DOC, a, b) and tables._one_table([a, b], [a, b], DOC)

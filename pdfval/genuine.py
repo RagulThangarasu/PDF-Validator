@@ -1872,6 +1872,7 @@ _WHY = {
     "missing header": ("Table header missing", "The table in stage has no header row, so its columns are unlabelled."),
     "tables merged": ("Tables merged", "Separate prod tables are one table in stage."),
     "rows merged": ("Table rows merged", "Separate prod rows are one row in stage."),
+    "caption row": ("Picture captions not aligned", "Captions of one row of pictures stand level in prod, not in stage."),
     "cell border": ("Table cell border missing", "A line between two cells of the prod table is not drawn in stage."),
     "table split": ("Table split", "One prod table is broken into several tables in stage."),
     "cells merged": ("Table cells merged", "Rows have fewer cells in stage than in prod."),
@@ -2032,6 +2033,59 @@ def _picture(im: dict | None) -> str:
     if im.get("align"):
         parts.append(im["align"])
     return ", ".join(parts)
+
+
+# Issues whose message says in one sentence what prod has and what stage has: the two halves, for the report's
+# Prod / Stage lines. (pattern on the message, prod text, stage text - \1.. are the pattern's groups)
+_PROD_STAGE = [
+    (r"Picture text missing in stage: (.+?) \(prod p\.\d+", r"On the picture: \1", r"Not on the stage picture: \1"),
+    (r"red highlight marks missing", "Red highlight marks drawn on the picture", "The same picture without the red marks"),
+    (r"red highlight marks added", "The picture without red marks", "Red highlight marks drawn on the same picture"),
+    (r"Image labels? missing in stage: (.+?) on the prod picture", r"\1 on the picture", r"Not on the stage picture: \1"),
+    (r"Not aligned in stage(?: \(\d+ places\))?: (.+?) are side by side on one row in prod \(p\.\d+\); in stage \(p\.\d+\) ([^;]+)",
+     r"\1 side by side on one row", r"\2"),
+    (r"Picture captions not level in stage: (.+?) stand in one row in prod; in stage (.+?)(?: of| \(|$)",
+     r"\1 in one row", r"\2"),
+    (r"Link lands on a different place(?: \(\d+ places\))?: (“.+?”) goes to (“.+?”) in prod(?: \(p\.\d+\))? but to (“.+?”) in stage",
+     r"\1 goes to \2", r"\1 goes to \3"),
+    (r"Link points to the wrong section: (“.+?”) goes to (“.+?”) in prod but to (“.+?”) in stage",
+     r"\1 goes to \2", r"\1 goes to \3"),
+    (r"Tables merged in stage: (\d+) prod tables are one table in stage", r"\1 separate tables", "One table"),
+    (r"Table split in stage: prod table .*? is (\d+) tables in stage", "One table", r"\1 tables"),
+    (r"Table header not centred in stage \(\d+ cells?\): (.+?)(?: —|$)", "Header text centred in its column", r"\1"),
+    (r"Bold label joined with its text in stage: (“.+?”) is on its own line in prod with (“.+?”) on the next line",
+     r"\1 on its own line, \2 on the next line", r"\1 and \2 run into one line"),
+    (r"Page reference “on page 0” in stage", "A page number in the cross-reference", "“on page 0”"),
+    (r"Extra icon in a table row in stage: .*?\(e\.g\. (“.+?”)\)", r"Row \1 without that icon", r"Row \1 with an extra icon"),
+    (r"Icon missing in a table row in stage: .*?\(e\.g\. (“.+?”)\)", r"Row \1 with its icon", r"Row \1 without the icon"),
+    (r"Table cell border missing in stage: \d+ line\(s\).*? - (between .+?)(?:;|$)", r"A border line \1", "No border line there"),
+    (r"Image (bigger|smaller) in stage by (\d+%).*?: ([\d.]+×[\d.]+ pt) → ([\d.]+×[\d.]+ pt)", r"The picture at \3", r"The same picture at \4 (\2 \1)"),
+    (r"Image size differs.*?the same picture drawn (\d+%) (smaller|larger) in stage.*?: ([\d.]+×[\d.]+ pt) → ([\d.]+×[\d.]+ pt)",
+     r"The picture at \3", r"The same picture at \4 (\1 \2)"),
+    (r"Callout type differs: stage labels the note (“.+?”), prod's note has the (\w+) icon \(a (.+?)\)", r"A \3 note (\2 icon)", r"Labelled \1"),
+    (r"Content duplicated in stage: (“.+?”) is in stage (.+?) but (.+?) in prod", r"\1 \3", r"\1 \2"),
+    (r"Table cell differs in stage \(\d+ cell\(s\)\): (row .+?): (.+?) → ([^;]+)", r"\1: \2", r"\1: \3"),
+]
+
+
+def prod_stage(f: dict) -> tuple[str, str] | None:
+    """The issue as two statements - what prod has, what stage has - and nothing else (no explanation, no page
+    numbers: the report's heading has them). None when the issue cannot be put that way: the report then shows
+    its one-line description."""
+    m = (f.get("message") or "").split("  ·  ")[0].split("\n")[0]
+    for pat, prod, stage in _PROD_STAGE:
+        hit = re.search(pat, m)
+        if hit:
+            return hit.expand(prod).strip(), hit.expand(stage).strip()
+    try:
+        e, a = expected_actual(f)
+    except Exception:
+        return None
+    tail = lambda t: re.sub(r"\s*\((?:prod|stage) p\.\d+(?:[–-]\d+)?\)(?=:|\s*$)", "", (t or "").strip())
+    e, a = tail(e), tail(a)
+    if not e or not a or e.lower().startswith("as in prod") or len(a) > 400 and a.startswith(m[:40]):
+        return None
+    return e, a
 
 
 def expected_actual(f: dict) -> tuple[str, str]:

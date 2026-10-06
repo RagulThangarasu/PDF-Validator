@@ -1228,7 +1228,9 @@ def check(u: Unit) -> list[Finding]:
             dc = _drawn_counterpart(u.b, y, u.a, at.page, claimed_a, same_look, rng=u.a_range)
             if dc:  # the drawing sits on its own page: report it there
                 vec, at = (dc[0], dc[1]), Loc(dc[2], dc[1])
-        if vec and (pb := _ppi(y)) and pb < acfg.get("pixelated_ppi", 110):
+        # ([assets] pixelated_vs_vector, off by default: a vector drawing has no resolution to compare with - only a
+        # stage bitmap far coarser than prod's own bitmap is "pixelated", see below)
+        if vec and acfg.get("pixelated_vs_vector", False) and (pb := _ppi(y)) and pb < acfg.get("pixelated_ppi", 110):
             # prod draws it as vectors (sharp at any size), stage embeds a low-resolution bitmap of it
             findings.append(Finding(
                 "assets", acfg.get("pixelated_severity", "error"),
