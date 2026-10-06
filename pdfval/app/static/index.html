@@ -410,7 +410,7 @@ async function pairsPanel(root, embedded) {
   draw();
 }
 
-// ---------------- metadata: Document Title / Page Title of every product map in AEM vs the migration sheet
+// ---------------- metadata: Document Title / Page Title / Meta Description of every product map in AEM vs the migration sheet
 async function viewMetadata() {
   const st = await api('/api/metadata');
   const r = st.result, sm = r?.summary;
@@ -419,7 +419,7 @@ async function viewMetadata() {
   const cls = { pass: 'pass', fail: 'fail', missing: 'fail', error: 'fail', case: 'warn', not_in_aem: 'queued' };
   app.innerHTML = `<h1>Map metadata</h1>
     <p class="muted">Checks every product map in AEM: <b>Document Title</b> (dc:title) = “{Product line} {Model name} user manual” and
-      <b>Page Title</b> (dc:pageTitle) = “{Product line} {Model name}”, with the product line and model name from the sheet's Model-list.</p>
+      <b>Page Title</b> (dc:pageTitle) = “{Product line} {Model name}” and <b>Meta Description</b> (dc:description) = “Learn how to set up {Product line} {Model name} and its settings, and optimize performance.”, with the product line and model name from the sheet's Model-list.</p>
     <div class="card"><div class="row" style="gap:10px;flex-wrap:wrap;align-items:end">
       <div><label class="f">Metadata sheet</label><select id="md-sheet">${st.sheets.map(f => `<option>${esc(f.name)}</option>`).join('') || '<option value="">— none —</option>'}</select></div>
       <div><label class="f">&nbsp;</label><button class="btn sm" id="md-up">Upload .xlsx…</button><input type="file" id="md-file" accept=".xlsx" hidden></div>
@@ -436,10 +436,11 @@ async function viewMetadata() {
       ${[...r.excel_rows].sort((a, b) => rank[a.status] - rank[b.status] || a.row - b.row).map(x => `<tr><td>${x.row}</td>
         <td><b>${esc(x.model)}</b><div class="small muted">${esc(x.category)}</div></td>
         <td><span class="badge b-${cls[x.status]}">${label[x.status]}</span></td>
-        <td class="small">${esc(x.exp_doc)}<br>${esc(x.exp_page)}</td>
+        <td class="small">${esc(x.exp_doc)}<br>${esc(x.exp_page)}<br>${esc(x.exp_desc || '')}</td>
         <td class="small">${x.maps.map(m => `<a href="${esc(m.url)}" target="_blank" rel="noopener">${esc(m.product)}</a><br>
           <span style="color:${m.doc_status === 'pass' ? 'inherit' : m.doc_status === 'case' ? 'var(--warn)' : 'var(--fail)'}">${esc(m.doc) || '<i>(empty)</i>'}</span><br>
-          <span style="color:${m.page_status === 'pass' ? 'inherit' : m.page_status === 'case' ? 'var(--warn)' : 'var(--fail)'}">${esc(m.page) || '<i>(empty)</i>'}</span>`).join('<hr>') || '—'}</td></tr>`).join('')}
+          <span style="color:${m.page_status === 'pass' ? 'inherit' : m.page_status === 'case' ? 'var(--warn)' : 'var(--fail)'}">${esc(m.page) || '<i>(empty)</i>'}</span><br>
+          <span style="color:${m.desc_status === 'pass' ? 'inherit' : m.desc_status === 'case' ? 'var(--warn)' : 'var(--fail)'}">${esc(m.desc) || '<i>(empty)</i>'}</span>`).join('<hr>') || '—'}</td></tr>`).join('')}
       </tbody></table></div>` : r ? '<p class="muted">Run the check again to see the results by Excel row.</p>' : ''}`;
   $('#md-up').onclick = () => $('#md-file').click();
   $('#md-file').onchange = async () => {
@@ -968,6 +969,8 @@ async function viewRun(id, qs) {
         <a class="btn primary" href="${base}index.html" target="_blank" rel="noopener">Side-by-side viewer ↗</a>
         ${s.genuine ? `<a class="btn ${s.genuine.total ? 'danger' : ''}" href="${base}genuine-issues.pdf?download=${encodeURIComponent('pdf-report-' + id + '.pdf')}"
             title="Every issue, each with a description and prod/stage screenshots">⬇ PDF report (${s.genuine.total})</a>
+        <a class="btn" href="${base}genuine-issues.docx?download=${encodeURIComponent('pdf-report-' + id + '.docx')}"
+            title="The same issues as a Word document: issues only, with prod/stage screenshots">⬇ PDF report (Word / Docs)</a>
         <a class="btn" href="${base}genuine-issues.csv?download=${encodeURIComponent('pdf-report-' + id + '.csv')}"
             title="The same issues as a table (opens in Excel)">⬇ PDF report (CSV / Excel)</a>` : ''}
         ${(() => { const n = d.sections.reduce((k, x) => k + x.findings.filter(f => f.category === 'css' && !f.genuine).length, 0);

@@ -72,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
     md.add_argument("--lang", default="en", help="language folder of the maps in AEM")
     md.add_argument("--config", help="TOML overrides merged over config/default.toml")
 
+    cl = sub.add_parser("classes", help="list the classes (outputclass) used in every topic of a map in AEM")
+    cl.add_argument("map", help="the map's path in AEM (…/Maps/<map>.ditamap) or its XML-editor URL")
+    cl.add_argument("--out", default="reports/classes", help="folder for the CSV lists")
+    cl.add_argument("--config", help="TOML overrides merged over config/default.toml")
+
     dp = sub.add_parser("aem-pdfs", help="download the PDF of every product map in AEM, one folder per product")
     dp.add_argument("--out", default="aem-map-pdfs", help="download folder")
     dp.add_argument("--lang", help="only this language folder (default: all languages)")
@@ -84,6 +89,22 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("--config", help="TOML overrides merged over config/default.toml")
 
     args = ap.parse_args(argv)
+    if args.cmd == "classes":
+        import os
+        from . import aem, aem_classes
+        from .app.server import _keychain_get
+        acfg = aem.merge_settings(engine.load_config(args.config).get("aem", {}), _saved_aem_settings())
+        acfg["password"] = os.environ.get("PDFVAL_AEM_PASSWORD") or _keychain_get(acfg.get("user", ""))
+        res = aem_classes.crawl(acfg, args.map)
+        path = aem_classes.write(res, args.out)
+        print(f"{res['map']}\n{res['topics_read']} of {res['topics_in_map']} topics read"
+              + (f" ({len(res['topics_missing'])} not found)" if res["topics_missing"] else "")
+              + (f" ({len(res['topics_failed'])} could not be read)" if res["topics_failed"] else "") + f" · {len(res['classes'])} classes\n")
+        print(f"{'class':<34}{'uses':>7}{'topics':>8}  on elements")
+        for c in res["classes"]:
+            print(f"{c['class']:<34}{c['uses']:>7}{c['topics']:>8}  {c['elements']}")
+        print(f"\nlists: {path}  (+ -combinations.csv, -elements.csv)\nWord:  {str(path)[:-4]}.docx")
+        return 0
     if args.cmd == "aem-pdfs":
         import os
         from . import aem, aem_pdfs
@@ -143,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"genuine issues: {gen['total']}" + (" (" + ", ".join(f"{v} × {k}" for k, v in gen["by_issue"].items()) + ")"
                                                if gen["total"] else ""))
     print(f"report:   {index}")
-    print(f"genuine:  {Path(args.out) / 'genuine-issues.pdf'}  ·  {Path(args.out) / 'genuine-issues.csv'}")
+    print(f"genuine:  {Path(args.out) / 'genuine-issues.pdf'}  ·  {Path(args.out) / 'genuine-issues.docx'}  ·  {Path(args.out) / 'genuine-issues.csv'}")
     if args.open:
         serve(args.out)
         _block()

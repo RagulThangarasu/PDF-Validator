@@ -1,0 +1,61 @@
+﻿ID,Area,Test case,Preconditions,Steps,Expected result,To confirm
+PUB-01,Manual publish - PDF,Manual publish creates the PDF in Assets,English map exists under /content/dam/benq-aem-guides/en/<Brand>/<Category>/<product>/Maps,"1. Open the map in AEM Guides (Map console) > Output tab > select the PDF preset for the brand (BenQ With Image / BenQ EDU With Image / Zowie / INFTY).
+2. Click Generate.
+3. Wait until the output shows Finished.
+4. Go to Assets > Files > /content/dam/fmdita-outputs (PDF) - the map's properties also record the latest PDF path.",A new PDF file for this map exists in Assets. Its created date/time is after the Generate click. It opens and is not 0 KB.,
+PUB-02,Manual publish - PDF,Manual publish replaces/adds the file on a second run,PUB-01 done once,"1. Note the PDF's created/modified time in Assets.
+2. Generate the same preset again.
+3. Check the asset again.",The asset is updated (newer modified time) or a new version is added. No duplicate or broken file is left behind.,Confirm expected behaviour: overwrite or new file
+PUB-03,Manual publish - AEM Sites,Manual publish creates the AEM Sites pages,English map exists,"1. Open the map in AEM Guides (Map console) > Output tab > select the AEM Sites preset.
+2. Click Generate.
+3. Wait until Finished.
+4. Go to Sites > /content/guide/<lang>/... for this product.",The site pages for the map are created/updated under /content/guide. Page names have no -0 / -1 suffix. The page opens.,
+PUB-04,Manual publish - both,PDF and AEM Sites selected together,English map exists,"1. Open the map in AEM Guides (Map console) > Output tab.
+2. Tick BOTH the PDF preset and the AEM Sites preset.
+3. Generate.
+4. Check Assets (PDF) and Sites (pages).",Both outputs are created: the PDF file in Assets and the pages in Sites.,
+PUB-05,Auto publish,Auto publish creates the PDF in Assets,Auto publish is enabled for the product/map,"1. Do the action that triggers auto publish (e.g. approve / save the topic or map).
+2. Do NOT click Generate.
+3. Wait.
+4. Go to Assets > Files > /content/dam/fmdita-outputs (PDF) - the map's properties also record the latest PDF path.",A new PDF for the map is created in Assets without a manual Generate. Created time is after the trigger.,Confirm what triggers auto publish
+PUB-06,Auto publish,Auto publish creates/updates the AEM Sites pages,Auto publish is enabled,"1. Trigger auto publish.
+2. Go to Sites > /content/guide/<lang>/... for this product.",Site pages are created/updated without a manual Generate.,"Confirm whether auto publish covers Sites, PDF or both"
+PUB-07,Auto publish,No auto publish when the trigger does not happen,Auto publish is enabled,"1. Edit a topic but do not complete the trigger action.
+2. Check Assets and Sites.",No new PDF and no page update are created.,
+PUB-08,Asset check,Generated file is in the right place with the right name,A publish (manual or auto) finished,"1. Go to Assets > Files > /content/dam/fmdita-outputs (PDF) - the map's properties also record the latest PDF path.
+2. Open the file's Properties.",File name matches the map/product. Properties show the source map path. The file is a valid PDF with the expected page count (> 0).,
+PUB-09,Asset check,Failed publish does not leave a file,A map with a broken reference (or cancel the generation),"1. Generate.
+2. Wait for Failed.
+3. Check Assets.",No new/partial file is created. The map console shows the failure.,
+LANG-01,Multiple languages,Publish 5 language maps - all 5 files created,"Translated maps exist for 5 languages (e.g. en, de, fr, es, ar)","1. For each of the 5 language maps: Open the map in AEM Guides (Map console) > Output tab > select the preset > Generate (trigger all 5 one after another).
+2. Wait until all 5 are Finished.
+3. Go to Assets.","5 files exist in Assets, one per language. Each is created after its trigger. None is missing or 0 KB.",
+LANG-02,Multiple languages,Each language file holds that language's content,LANG-01 done,1. Open each of the 5 files.,"Each PDF is in its own language (not English text in the German file, etc.). Titles/TOC are translated.",
+LANG-03,Multiple languages,"One language fails, the others still publish","5 language maps, one with a broken reference","1. Trigger all 5.
+2. Wait.
+3. Check Assets.",The 4 good languages create their files. The failed one creates none and is reported as failed.,Confirm how a failure is shown in the email
+MAIL-01,Email,Single publish sends one email,Publisher's email is set in AEM; mailbox reachable,"1. Publish one map.
+2. Check the mailbox.",One email is received. It names the file/map that was published and its link/path.,
+MAIL-02,Email,5 publishes -> ONE email listing all 5 files,5 maps/languages ready,"1. Trigger all 5 publishes.
+2. Wait until all 5 are finished.
+3. Check the mailbox.",Exactly ONE email is received (not 5). It lists all 5 files. Each entry matches a file that exists in Assets.,
+MAIL-03,Email,Email is sent only after ALL triggered publishes finish,5 maps ready,"1. Trigger all 5.
+2. Check the mailbox while only some are finished.
+3. Check again after the last one finishes.",No email while publishes are still running. The single email arrives after the 5th finishes.,
+MAIL-04,Email,List in the email is complete and correct,MAIL-02 done,1. Compare the list in the email with the files in Assets.,"Same count (5 of 5), same names/languages, no duplicates, no file from an earlier run.",
+MAIL-05,Email,Auto publish also sends the email,Auto publish enabled,"1. Trigger auto publish for several maps.
+2. Check the mailbox.","One email with all auto-published files, same format as manual publish.",Confirm auto publish sends email
+MAIL-06,Email,Email when one of the 5 fails,"5 maps, one that fails","1. Trigger all 5.
+2. Check the email.",One email. The 4 successful files are listed; the failed one is shown as failed (or left out) as designed.,Confirm expected content for failures
+AR-01,Arabic,Arabic PDF: Arabic template selected in the properties,Arabic map exists under /content/dam/benq-aem-guides/ar-.../,"1. Open the Arabic map's PROPERTIES and select the Arabic template.
+2. Open the map in AEM Guides (Map console) > Output tab > select the PDF preset '<brand preset> Arabic' (e.g. BenQ With Image Arabic).
+3. Generate.
+4. Check Assets.","The PDF is created in Assets. Text is right-to-left, Arabic font, tables and lists mirrored.",Confirm the exact property field name where the Arabic template is selected
+AR-02,Arabic,Arabic AEM Sites: Arabic template selected in the properties,Arabic map exists,"1. Open the Arabic map's PROPERTIES and select the Arabic template.
+2. Open the map in AEM Guides (Map console) > Output tab > select the AEM Sites preset.
+3. Generate.
+4. Go to Sites > /content/guide/ar-.../",Site pages are created with the Arabic (right-to-left) template.,Confirm whether Sites uses the same property or a separate Sites template field
+AR-03,Arabic,Arabic WITHOUT the Arabic template (negative),"Arabic map, default (non-Arabic) template left in the properties","1. Do not select the Arabic template.
+2. Generate PDF and AEM Sites.",Output is wrong (left-to-right layout) - this shows the template selection is required. Record the result.,
+AR-04,Arabic,Arabic included in a multi-language publish,5 languages including Arabic; Arabic template selected in the Arabic map's properties,"1. Trigger all 5.
+2. Check Assets and the email.",Arabic file is created with the Arabic template; the other 4 use the normal template. The one email lists all 5 including Arabic.,

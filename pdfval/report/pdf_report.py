@@ -19,6 +19,8 @@ from PIL import Image
 from ..genuine import concise
 
 SEV_COLOR = {"error": "#d92d20", "warning": "#b45309", "info": "#64748b"}
+# the severity as the reports print it: the word "error" is not used anywhere in a report
+SEV_LABEL = {"error": "HIGH", "warning": "WARNING", "info": "INFO"}
 STATUS_COLOR = {"fail": "#d92d20", "warn": "#b45309", "pass": "#16a34a"}
 CHECK_COLOR = {"toc": "#9333ea", "structure": "#2563eb", "content": "#dc2626", "tables": "#0284c7", "assets": "#0d9488",
                "integrity": "#b91c1c", "style": "#7c3aed", "layout": "#ea580c"}
@@ -59,16 +61,21 @@ def _pct_status(c: dict) -> str:
     return "pass" if c["match_pct"] >= c["pass_pct"] else "warn" if c["match_pct"] >= c["warn_pct"] else "fail"
 
 
-INCLUDE_ALL = {"summary": True, "genuine": True, "critical": True, "coverage": True, "truncated": True,
-               "sections": True, "toc": True, "stylemap": True, "issues": True, "screenshots": True}
+INCLUDE_ALL = {"summary": True, "genuine": True, "critical": True, "coverage": False, "truncated": True,
+               "sections": True, "toc": True, "toc_compare": True, "stylemap": True, "issues": True, "screenshots": True}
 
 # picture issues the PDF report itself shows (with prod / stage screenshots): size and resolution
-PDF_IMAGE_TYPES = {"image smaller", "image bigger", "size / aspect", "image pixelated", "image vertical alignment"}
+PDF_IMAGE_TYPES = {"image smaller", "image bigger", "size / aspect", "image pixelated", "image vertical alignment",
+                   # every other issue of the picture itself (the image report shows a picture's own text and marks:
+                   # numbers, labels, leader lines, red overlay, artwork missing): reported here, or it is in no report
+                   "image changed", "duplicate image", "image distorted", "image alignment", "image in wrong section",
+                   "image mirrored", "extra image", "image order", "placement", "image outside box", "image blurred",
+                   "icon differs", "icon pixelated", "icon missing inline"}  # an icon in a sentence: another one, coarse, or gone
 
 # the genuine-issues report: the metrics at the top, then every genuine issue with its screenshots -
 # no overview tables (the issue pages say what each issue is)
 GENUINE = {"include": {"summary": True, "categories": False, "genuine": "counts", "css": False, "toc_compare": True,
-                       "critical": False, "coverage": True, "truncated": True, "sections": False,
+                       "critical": False, "coverage": False, "truncated": True, "sections": False,
                        "toc": False, "stylemap": False, "issues": True, "screenshots": True},
            # image issues are in image-issues.pdf only - except a picture's size (smaller / bigger in stage) and a
            # pixelated picture: the image report shows picture text and overlays, so these are reported here
@@ -209,6 +216,7 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
         f"<tr><th>Critical / breaking</th><td><b style='color:{'#b42318' if sm['critical']['total'] else '#16a34a'}'>"
         f"{sm['critical']['total']}</b> " + (" · ".join(f"{v} × {escape(k)}" for k, v in sm["critical"]["by_kind"].items())
                                              or "— no missing sections, rows, images, files, links or glyphs") + "</td></tr>",
+        _missing_sections_row(result),
         (f"<tr><th>CSS / layout</th><td>{sm['css']['issues']} issues (style {sm['css']['style']}, layout {sm['css']['layout']}) "
          "— reported separately, not part of the content %</td></tr>" if inc.get("css", True) else ""),
         "<tr><th>All findings</th><td>" + " · ".join(f"<b style='color:{CHECK_COLOR.get(k, '#475569')}'>{k}</b> {v}"
@@ -309,7 +317,7 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
             a, b = r["baseline"], r["candidate"]
             cell = lambda e: (f"<td style='padding-left:{4 + 12 * (e['level'] - 1)}px'>{escape(e['title'])}</td><td>{e['level']}</td>"
                               f"<td>{e['page'] if e['page'] is not None else ''}{' !' if e['page_ok'] is False else ''}</td>") if e else "<td>—</td><td></td><td></td>"
-            html.append(f"<tr><td>{r['pos']['baseline'] or '—'}</td>{cell(a)}<td><b style='color:{tone[r['status']]}'>{r['status']}</b></td>"
+            html.append(f"<tr><td>{r['pos']['baseline'] or '—'}</td>{cell(a)}<td><b style='color:{tone[r['status']]}'>{TOC_LABEL.get(r['status'], r['status'])}</b></td>"
                         f"<td>{r['pos']['candidate'] or '—'}</td>{cell(b)}</tr>")
         html.append("</table>")
     if result["style_map"] and inc["stylemap"]:
@@ -396,6 +404,8 @@ def _jpeg_bytes(src: Path, width: int = 1400) -> tuple[bytes, float] | None:
 TOC_COLOR = {"match": "#16a34a", "level differs": "#b45309", "title differs": "#b45309", "order differs": "#d92d20",
              "missing in stage": "#d92d20", "extra in stage": "#2563eb"}
 WRONG_PAGE = "#9333ea"
+# the TOC status as the reader sees it: an entry in another place in the sequence is 'sequence wrong'
+TOC_LABEL = {"order differs": "sequence wrong"}
 
 
 def _toc_section(c: "_Canvas", t: dict, web: bool, out: Path) -> None:
@@ -416,7 +426,7 @@ def _toc_section(c: "_Canvas", t: dict, web: bool, out: Path) -> None:
     c.runs([("TOC heading  ", "#6a7282", True), (f"“{head_b}” {'=' if same_head else '≠'} “{head_c}”", "#1d2330" if same_head else "#d92d20", True),
             ("     Levels  ", "#6a7282", True), (f"{t['levels']['baseline']} prod · {t['levels']['candidate']} {other}", "#1d2330", True)], 9)
     counts = [(k, sm.get(k, 0)) for k in ("match", "level differs", "title differs", "order differs", "missing in stage", "extra in stage")]
-    c.runs([x for k, n in counts for x in ((f"■ ", TOC_COLOR[k], True), (f"{k.replace('stage', other)} {n}    ", "#1d2330", False))]
+    c.runs([x for k, n in counts for x in ((f"■ ", TOC_COLOR[k], True), (f"{TOC_LABEL.get(k, k).replace('stage', other)} {n}    ", "#1d2330", False))]
            + [("■ ", WRONG_PAGE, True), (f"wrong page no. {sm.get('wrong page', 0)}", "#1d2330", False)], 8)
     c.y += 6
 
@@ -466,29 +476,48 @@ def _toc_section(c: "_Canvas", t: dict, web: bool, out: Path) -> None:
     # --- the entries: prod | status | stage
     if not c.room(60):
         c.new_page()
-    c.runs([("Entries", "#1d2330", True), ("   prod entry  ·  status  ·  " + other + " entry (level, title, page)", "#6a7282", False)], 10)
-    w_side, w_mid = c.width * 0.42, c.width * 0.16
-    cell = lambda e: f"L{e['level']}  {e['title']}  ·  p.{e.get('page') if e.get('page') is not None else '—'}" if e else "—"
-    for n, row in enumerate(t["rows"], 1):
-        st = row["status"] + ("  ·  " + ", ".join(row["flags"]) if row.get("flags") else "")
+    c.runs([("TOC validation", "#1d2330", True), ("   prod TOC  ·  stage TOC  ·  status", "#6a7282", False)], 10)
+    # no table: three plain columns - the prod TOC, the stage TOC (each entry indented by its level) and the status
+    side_w = c.width * 0.40
+    xs = [c.M, c.M + side_w + 8, c.M + 2 * side_w + 16]
+    st_w = c.M + c.width - xs[2]
+    for x, label, col in ((xs[0], "Prod TOC", "#2563eb"), (xs[1], "Stage TOC", "#0f766e"), (xs[2], "Status", "#475569")):
+        _text(c, x, c.y, label, col, True)
+    c.y += 14
+    for row in t["rows"]:
+        st = TOC_LABEL.get(row["status"], row["status"]) + ("  ·  " + ", ".join(row["flags"]) if row.get("flags") else "")
         colour = TOC_COLOR.get(row["status"], "#6a7282")
-        cells = [(c.M, f"{n}. " + cell(row.get("baseline")), "#1d2330", False, w_side),
-                 (c.M + w_side + 6, st.replace("stage", other), colour, True, w_mid),
-                 (c.M + w_side + w_mid + 12, cell(row.get("candidate")), "#1d2330", False, w_side)]
-        # every cell in full: a long entry wraps onto more lines, the row grows to fit
-        wrapped = [c.wrap(text, 8, c.bold if bold else c.regular, width) for _, text, _, bold, width in cells]
-        h = 11 * max(len(w) for w in wrapped) + 2
+        cols = []
+        for e in (row.get("baseline"), row.get("candidate")):
+            if e:
+                ind = 12 * (min(max(int(e["level"]), 1), 3) - 1)
+                cols.append((ind, c.wrap(f"{e['title']} (p.{e.get('page') if e.get('page') is not None else '—'})", 8, c.regular, side_w - ind)))
+            else:
+                cols.append((0, ["—"]))
+        status = c.wrap(st, 8, c.bold, st_w)
+        h = 11 * max(len(cols[0][1]), len(cols[1][1]), len(status)) + 1
         if not c.room(h + 2):
             c.new_page()
         y = c.y
-        if row["status"] != "match":
-            c.page.draw_rect(pymupdf.Rect(c.M - 2, y - 1, c.M + c.width + 2, y + h - 1), color=None,
-                             fill=_rgb(colour), fill_opacity=0.07)
-        for (x, _, col, bold, _), lines in zip(cells, wrapped):
-            for k, line in enumerate(lines):
-                _text(c, x, y + 11 * k, line, col, bold)
-        c.y = y + h + 1
+        for x, (ind, lines) in zip(xs, cols):
+            for j, line in enumerate(lines):
+                _text(c, x + ind, y + 11 * j, line, "#1d2330" if line != "—" else "#9aa3af", False)
+        for j, line in enumerate(status):
+            _text(c, xs[2], y + 11 * j, line, colour, True)
+        c.y = y + h
     c.y += 6
+
+
+def _missing_sections_row(result: dict) -> str:
+    """The first page names every section of prod that stage does not have: its title and prod page."""
+    gone = [f for s in result.get("sections", []) for f in s.get("findings", []) if "missing section" in (f.get("types") or [])]
+    if not gone:
+        return "<tr><th>Sections missing</th><td><b style='color:#16a34a'>0</b> — every prod section is in stage</td></tr>"
+    name = lambda f: (f.get("detail") or {}).get("heading") or f.get("message", "")
+    page = lambda f: f"prod p.{f['baseline'][0]['page'] + 1}" if f.get("baseline") else "prod"
+    items = " · ".join(f"“{escape(name(f))}” ({page(f)})" for f in gone)
+    return (f"<tr><th>Sections missing</th><td><b style='color:#b42318'>{len(gone)}</b> "
+            f"<span style='color:#b42318'>missing in stage:</span> {items}</td></tr>")
 
 
 def _text(c: "_Canvas", x: float, y: float, text: str, color: str, bold: bool) -> None:
@@ -840,7 +869,7 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
         pa = f"p.{f['baseline'][0]['page'] + 1}" if f["baseline"] else "—"
         pc = f"p.{f['candidate'][0]['page'] + 1}" if f["candidate"] else "—"
         c.runs(([("CRITICAL  ", "#b42318", True)] if f.get("critical") else [])
-               + [(f["severity"].upper(), SEV_COLOR[f["severity"]], True), ("  ·  ", "#6a7282", False),
+               + [(SEV_LABEL.get(f["severity"], f["severity"].upper()), SEV_COLOR[f["severity"]], True), ("  ·  ", "#6a7282", False),
                 (f.get("issue") if f.get("genuine") else f"{CAT_LABEL.get(f.get('category'), f['check'])} · {', '.join(f.get('types', []))}",
                  f.get("color") or CAT_COLOR.get(f.get("category"), "#333333"), True),
                 (f"  ·  #{f['id']}  ·  prod {pa} ↔ stage {pc}", "#6a7282", False)], 8)

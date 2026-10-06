@@ -63,7 +63,81 @@ def _in_table(doc, li) -> bool:
     return False
 
 
+def stacked_to_columns(u: Unit) -> list[Finding]:
+    """The layout of a list broke into columns: text that prod stacks - an item's label with its description
+    on the line below (“• Automatic adjustment (recommended)” over “Enable the V. O. function to …”) - sits
+    side by side in stage, the label in one column and the description in the next. One finding per
+    section, naming the pairs.
+
+    A pair counts when both prod lines are outside tables, the second starts right under the first, and
+    their stage lines are two different lines, level with each other, in separate columns."""
+    lcfg = u.cfg["layout"]
+    if not lcfg.get("check_stacked_to_columns", True):
+        return []
+    A, B = u.a, u.b
+    votes: dict[int, Counter] = defaultdict(Counter)
+    for i, j in u.pairs:
+        votes[A.words[i].line][B.words[j].line] += 1
+    # a prod line -> the stage line where its first matched word went (a line that wraps differently in
+    # stage still starts where its text starts)
+    first: dict[int, int] = {}
+    for i, j in sorted(u.pairs):
+        first.setdefault(A.words[i].line, B.words[j].line)
+    lines = sorted(votes)
+    pairs = []
+    for la, lb in zip(lines, lines[1:]):
+        a1, a2 = A.lines[la], A.lines[lb]
+        size = max(a1.size, 1)
+        if a1.page != a2.page or not 0 < a2.bbox[1] - a1.bbox[1] <= 2.2 * 1.3 * size:
+            continue  # not the next line down
+        if _side_by_side(a1.bbox, a2.bbox, 2) or _in_table(A, la) or _in_table(A, lb):
+            continue  # already in columns in prod, or table rows (the table checks compare those)
+        s1, s2 = first[la], first[lb]
+        if s1 == s2 or votes[la][s1] < 1 or votes[lb][s2] < 2:
+            continue  # one stage line (the text only wraps elsewhere), or too little matched to place it
+        b1, b2 = B.lines[s1], B.lines[s2]
+        s_size = max(b1.size, 1)
+        if b1.page != b2.page or abs(b1.bbox[1] - b2.bbox[1]) > 0.6 * s_size or b2.bbox[0] < b1.bbox[2] - 2:
+            continue  # stacked in stage too, or not to the right of the label
+        if b1.block == b2.block and b2.bbox[0] - b1.bbox[2] < 2 * s_size:
+            continue  # one stage line cut in two by a wide space
+        if len(a1.text.split()) > lcfg.get("row_max_words", 8):
+            continue  # the upper line is a label / list item, not a paragraph line
+        # a column of its own in stage: the text beside the label goes on underneath at the same left edge
+        # (“Slide to adjust brightness” / “as desired.”), or the label does (“Manual” / “adjustment”). The
+        # end of a wrapped line set apart on the same row (“… USB 3.2” | “Gen 2 ports”) has neither.
+        under = lambda li: any(l.page == B.lines[li].page and l is not B.lines[li]
+                               and 0 < l.bbox[1] - B.lines[li].bbox[1] <= 2.2 * 1.3 * s_size
+                               and abs(l.bbox[0] - B.lines[li].bbox[0]) <= 2 for l in B.lines[li + 1:li + 6])
+        if not (b2.bbox[0] - b1.bbox[0] > 2 * s_size and (under(s2) or under(s1)) and
+                not any(l.page == b1.page and abs(l.bbox[1] - b2.bbox[1]) > 0.6 * s_size and 0 < l.bbox[1] - b2.bbox[1] <= 2.2 * 1.3 * s_size
+                        and l.bbox[0] < b2.bbox[0] - 2 and l.bbox[2] > b2.bbox[0] + 2 for l in B.lines[s2 + 1:s2 + 6])):
+            continue
+        pairs.append((la, lb, s1, s2))
+    if len(pairs) < lcfg.get("stacked_to_columns_min", 2):
+        return []  # one such pair may be a caption beside a picture; a list broken into columns has several
+    text = lambda doc, li: doc.lines[li].text.strip()
+    ex = "; ".join(f"“{text(A, la)}” above “{text(A, lb)[:40]}”" for la, lb, _, _ in pairs[:3])
+    more = f" (and {len(pairs) - 3} more)" if len(pairs) > 3 else ""
+    locs_a = [Loc(A.lines[x].page, A.lines[x].bbox) for la, lb, _, _ in pairs for x in (la, lb)]
+    locs_b = [Loc(B.lines[x].page, B.lines[x].bbox) for _, _, s1, s2 in pairs for x in (s1, s2)]
+    return [Finding(
+        "layout", lcfg.get("severity", {}).get("stacked to columns", "error"),
+        f"Layout broken in stage: text stacked in prod (p.{A.lines[pairs[0][0]].page + 1}) is side by side in columns "
+        f"in stage (p.{B.lines[pairs[0][2]].page + 1}) - {len(pairs)} place(s): {ex}{more}",
+        locs_a, locs_b,
+        {"kind": "stacked to columns", "property": "layout", "places": len(pairs),
+         "baseline_text": "stacked: " + "; ".join(f"“{text(A, la)}” above its text" for la, *_ in pairs[:4]),
+         "candidate_text": "in columns: " + "; ".join(f"“{text(B, s1)}” beside “{text(B, s2)[:30]}”" for _, _, s1, s2 in pairs[:4])},
+        types=["stacked to columns"],
+        links=[(Loc(A.lines[la].page, A.lines[la].bbox), Loc(B.lines[s1].page, B.lines[s1].bbox)) for la, _, s1, _ in pairs])]
+
+
 def check(u: Unit) -> list[Finding]:
+    return _row_alignment(u) + stacked_to_columns(u)
+
+
+def _row_alignment(u: Unit) -> list[Finding]:
     lcfg = u.cfg["layout"]
     if not lcfg.get("check_rows", True):
         return []

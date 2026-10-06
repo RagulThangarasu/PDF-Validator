@@ -462,7 +462,7 @@ def test_image_outside_its_note_box(tmp_path, cfg):
     a = _note_pdf(tmp_path / "a.pdf", True)
     out = [f for f in checks(compare(a, _note_pdf(tmp_path / "b.pdf", False), cfg), "assets")
            if "image outside box" in f["types"]]
-    assert out and "Note: keep the ventilation" in out[0]["message"] and not out[0]["genuine"]  # layout: full report only
+    assert out and "Note: keep the ventilation" in out[0]["message"] and out[0]["genuine"]  # every picture issue is reported
     same = [f for f in checks(compare(a, _note_pdf(tmp_path / "c.pdf", True), cfg), "assets")
             if "image outside box" in f["types"]]
     assert not same

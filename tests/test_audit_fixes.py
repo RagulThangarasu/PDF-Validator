@@ -603,7 +603,7 @@ def test_image_report_has_the_missing_callout_numbers(tmp_path, cfg):
     assert any("Callout numbers missing" in name for _, _, name in rows), [f["message"] for s in r["sections"]
                                                                            for f in s.get("image_findings") or []]
     out = image_report.build(r, tmp_path)
-    assert pymupdf.open(out).page_count == len(rows)
+    assert pymupdf.open(out).page_count == len(rows) + 1  # the cover page, then one page per issue
 
 
 def _button_receiver_pdf(path, stage: bool):

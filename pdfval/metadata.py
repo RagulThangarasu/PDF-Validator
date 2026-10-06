@@ -86,6 +86,7 @@ def load_sheet(path: str | Path) -> list[dict]:
 def _norm(s: str) -> str:
     s = s.lower().replace("&", " and ")
     s = re.sub(r"[_-]((en|um|ug|em)[_-]?)?v\d+(\.\d+)*.*$", "", s)  # SW272_EN_V5 -> sw272 (not GV32 -> g)
+    s = re.sub(r"[_\-]+", " ", s)  # Stylus_UM_EN -> "stylus um en": "_" is a word character, \b would not split there
     s = re.sub(r"\b(and|series|um|en|table)\b", " ", s)
     return re.sub(r"[^a-z0-9]", "", s)
 
@@ -114,6 +115,13 @@ def match(folder: str, map_name: str, rows: list[dict], title: str = "") -> dict
     for field in ("model", "file", "models"):
         for r in rows:
             if _norm(r[field]) in keys:
+                return r
+    # the map's own Document Title is the row's expected title ("IFP accessory BenQ Board Pens user manual"
+    # in the folder "stylus"): the map of that row, whatever its folder is called
+    if title.strip():
+        t = re.sub(r"\s+", " ", title).strip().lower()
+        for r in rows:
+            if t == (r.get("exp_doc") or "").lower():
                 return r
     # a model in the row's Models involved, or a row whose model name starts with the folder's model
     # ("MA270S safety" for folder ma270s): when several rows qualify, the one whose model name the
@@ -150,6 +158,14 @@ class Aem:
         hits = self.get("/bin/querybuilder.json", path=root, type="dam:Asset", nodename="*.ditamap",
                         **{"p.limit": "-1", "p.hits": "selective", "p.properties": "jcr:path"})["hits"]
         return sorted(h["jcr:path"] for h in hits)
+
+    def languages(self) -> list[str]:
+        """The language folders under the search root (en, zh-cn, ar-me, ...)."""
+        try:
+            kids = self.get(f"{self.root.rstrip('/')}.1.json")
+        except (HTTPError, URLError, OSError, ValueError):
+            return []
+        return sorted(k for k, v in kids.items() if isinstance(v, dict) and re.fullmatch(r"[a-z]{2}(-[a-z]{2,4})?", k))
 
     def metadata(self, map_path: str) -> dict:
         try:
@@ -209,16 +225,16 @@ def validate(cfg: dict, sheet: str | Path | None = None, lang: str = "en", progr
     paths = aem.maps(lang)
     done = [0]
 
-    def one(p: str) -> dict:
+    def one(p: str, lang: str = lang, rows: list[dict] = rows, force: dict | None = None) -> dict:
         md = aem.metadata(p)
         done[0] += 1
         if progress:
-            progress(0.05 + 0.9 * done[0] / max(1, len(paths)), f"Reading map metadata {done[0]}/{len(paths)}")
+            progress(0.05 + 0.9 * min(1, done[0] / max(1, len(paths))), f"Reading map metadata {done[0]}/{len(paths)}")
         parts = p.split("/")
         mi = parts.index("Maps") if "Maps" in parts else len(parts) - 1
         folder = parts[mi - 1]
         rel = "/".join(parts[parts.index(lang) + 1:mi] if lang in parts else parts[:mi])
-        row = match(folder, re.sub(r"\.ditamap$", "", parts[-1], flags=re.I), rows, str(md.get("dc:title") or ""))
+        row = force or match(folder, re.sub(r"\.ditamap$", "", parts[-1], flags=re.I), rows, str(md.get("dc:title") or ""))
         item = {"map": parts[-1], "path": p, "product": rel, "folder": folder,
                 "doc": str(md.get("dc:title") or ""), "page": str(md.get("dc:pageTitle") or ""),
                 "desc": str(md.get("dc:description") or ""), "version": str(md.get("dc:version") or ""),
@@ -247,31 +263,45 @@ def validate(cfg: dict, sheet: str | Path | None = None, lang: str = "en", progr
             dup = [m for m in re.split(r"\s*[,;/]\s*", row["models"] or "") if m.strip()]
             if len(dup) > len(sheet_models):
                 item["notes"].append(f"sheet 'Models involved' lists a model twice: {row['models']!r}")
-            aem_key = next((k for k in md if "model" in k.lower() and not k.startswith("_")), None)
-            if aem_key and sheet_models:
-                v = md[aem_key]
-                aem_models = [x for y in (v if isinstance(v, list) else [v]) for x in models_of(str(y))]
-                a_set, e_set = {_norm(x) for x in aem_models}, {_norm(x) for x in sheet_models}
-                item["models"] = ", ".join(aem_models)
-                item["models_status"] = "pass" if a_set == e_set else "missing" if not a_set else "fail"
-                if a_set != e_set:
-                    miss = [x for x in sheet_models if _norm(x) not in a_set]
-                    extra = [x for x in aem_models if _norm(x) not in e_set]
-                    item["notes"].append("models involved differ from the sheet"
-                                         + (f"; missing in AEM ({aem_key}): {', '.join(miss)}" if miss else "")
-                                         + (f"; only in AEM: {', '.join(extra)}" if extra else ""))
             if re.search(r"test", rel, re.I):
                 item["notes"].append("test / copy folder")
+            checked = (item["doc_status"], item["page_status"], item["desc_status"])
             item["status"] = ("error" if item["error"] else
-                              "pass" if item["doc_status"] == item["page_status"] == "pass" else
-                              "fail" if "fail" in (item["doc_status"], item["page_status"]) or "missing" in (item["doc_status"], item["page_status"])
-                              else "warn")
+                              "pass" if all(x == "pass" for x in checked) else
+                              "fail" if any(x in ("fail", "missing", "placeholder") for x in checked) else "warn")
         else:
             item["status"] = "unmatched"
         return item
 
     with ThreadPoolExecutor(8) as ex:
         items = list(ex.map(one, paths))
+    # a second map on a sheet row that already has its own map, while a row with a near-identical file name
+    # has none: folder "g90" beside "G90-Series" (row "G90 Series"), and the row "GW90C Series" (file
+    # G90C-EM-V1) without a map - the second map is that row's map, filed under a shortened name
+    def reassign() -> None:
+        taken = {i.get("row") for i in items}
+        free = [r for r in rows if r["row"] not in taken]
+        groups: dict[int, list[int]] = {}
+        for k, i in enumerate(items):
+            if i.get("row"):
+                groups.setdefault(i["row"], []).append(k)
+        for ks in groups.values():
+            if len(ks) < 2 or not any(items[k]["doc_status"] == "pass" for k in ks):
+                continue  # one map, or none of them is clearly the row's own map
+            for k in ks:
+                i = items[k]
+                if i["doc_status"] == "pass" or re.search(r"test", i["product"], re.I):
+                    continue
+                key = _norm(i["folder"])
+                hit = [r for r in free if key and any(_norm(r[f]).startswith(key) and len(_norm(r[f])) - len(key) <= 2 for f in ("file", "model"))]
+                if len(hit) == 1:
+                    old = i["model"]
+                    items[k] = one(i["path"], lang, rows, force=hit[0])
+                    items[k]["notes"].append(f"folder {i['folder']!r} taken as this row's map (file {hit[0]['file']!r}); "
+                                             f"the row {old!r} has its own map")
+                    free.remove(hit[0])
+
+    reassign()
     by_row: dict[int, list[dict]] = {}
     for i in items:
         if i.get("row"):
@@ -281,6 +311,23 @@ def validate(cfg: dict, sheet: str | Path | None = None, lang: str = "en", progr
             i["notes"].append("same sheet row as " + ", ".join(o["product"] + "/" + o["map"] for o in same if o is not i))
     seen = {i.get("row") for i in items}
     missing = [r for r in rows if r["row"] not in seen]
+    # a model with no map under /<lang>/ may have its map under another language folder (a manual whose
+    # source is Chinese: i800_i800ST_UM_ZH-CN under /zh-cn/): the map is in AEM - validated there, and noted
+    if missing:
+        for other in [x for x in aem.languages() if x != lang]:
+            try:
+                other_paths = aem.maps(other)
+            except (HTTPError, URLError, OSError, ValueError):
+                continue
+            for p in other_paths:
+                item = one(p, other, missing)
+                if item["status"] == "unmatched":
+                    continue
+                item["notes"].append(f"the map is under /{other}/, not /{lang}/")
+                item["lang"] = other
+                items.append(item)
+        seen = {i.get("row") for i in items}
+        missing = [r for r in rows if r["row"] not in seen]
     count = lambda s: sum(i["status"] == s for i in items)
     return {"created": datetime.now().isoformat(timespec="seconds"), "sheet": sheet.name, "author": aem.author,
             "lang": lang, "maps": items, "not_in_aem": missing,
@@ -334,15 +381,15 @@ def sheet_rows(res: dict) -> list[dict]:
             continue
         r = by_row.setdefault(i["row"], {"row": i["row"], "brand": i.get("brand", ""), "category": i["category"],
                                          "model": i["model"], "file": i.get("file", ""), "exp_doc": i["exp_doc"],
-                                         "exp_page": i["exp_page"], "exp_models": i.get("exp_models", ""), "maps": []})
-        d, p = _field(i["doc"], i["exp_doc"]), _field(i["page"], i["exp_page"])
-        r["maps"].append({**{k: i[k] for k in ("product", "map", "path", "url", "doc", "page")},
-                          "doc_status": d, "page_status": p, "models": i.get("models", ""),
-                          "models_status": i.get("models_status", ""), "notes": i.get("notes", []),
-                          "status": "error" if i.get("error") else _worst(d, p, *([i["models_status"]] if i.get("models_status") else [])),
+                                         "exp_page": i["exp_page"], "exp_desc": i.get("exp_desc", ""),
+                                         "exp_models": i.get("exp_models", ""), "maps": []})
+        d, p, ds = _field(i["doc"], i["exp_doc"]), _field(i["page"], i["exp_page"]), _field(i.get("desc", ""), i.get("exp_desc", ""))
+        r["maps"].append({**{k: i[k] for k in ("product", "map", "path", "url", "doc", "page")}, "desc": i.get("desc", ""),
+                          "doc_status": d, "page_status": p, "desc_status": ds, "notes": i.get("notes", []),
+                          "status": "error" if i.get("error") else _worst(d, p, ds),
                           "error": i.get("error", "")})
     for r in res["not_in_aem"]:
-        by_row[r["row"]] = {**{k: r.get(k, "") for k in ("row", "brand", "category", "model", "file", "exp_doc", "exp_page")},
+        by_row[r["row"]] = {**{k: r.get(k, "") for k in ("row", "brand", "category", "model", "file", "exp_doc", "exp_page", "exp_desc")},
                             "exp_models": ", ".join(models_of(r.get("models", ""))), "maps": []}
     out = sorted(by_row.values(), key=lambda r: r["row"])
     for r in out:
@@ -358,6 +405,7 @@ def _summary(rows: list[dict], res: dict) -> dict:
             "not_in_aem": c("not_in_aem"), "error": c("error"),
             "doc_ok": sum(any(m["doc_status"] == "pass" for m in r["maps"]) for r in rows),
             "page_ok": sum(any(m["page_status"] == "pass" for m in r["maps"]) for r in rows),
+            "desc_ok": sum(any(m["desc_status"] == "pass" for m in r["maps"]) for r in rows),
             "extra_maps": sum(i["status"] == "unmatched" for i in res["maps"]), "skipped": res["summary"].get("rows_skipped", 0)}
 
 
@@ -388,14 +436,15 @@ def build_pdf(res: dict, out: str | Path) -> Path:
     sm = _summary(rows, res)
     html = [f"""<h1>AEM map titles vs Excel</h1>
 <p class="muted">The Excel is the base. For every model in the sheet the product map in AEM must have<br/>
-<b>Document Title</b> (dc:title) = "{{Product line}} {{Model name}} user manual" and <b>Page Title</b> (dc:pageTitle) = "{{Product line}} {{Model name}}"<br/>
+<b>Document Title</b> (dc:title) = "{{Product line}} {{Model name}} user manual", <b>Page Title</b> (dc:pageTitle) = "{{Product line}} {{Model name}}"<br/>
+and <b>Meta Description</b> (dc:description) = "{escape(DESCRIPTION.format(line='{Product line}', model='{Model name}'))}"<br/>
 {{Product line}} = column "Product line / product category", {{Model name}} = column "Model name" · the match is exact (capitals and spaces count).<br/>
 Excel {escape(res['sheet'])} (sheet Model-list) · AEM {escape(res['author'])} /{escape(res['lang'])}/ · {escape(res['created'].replace('T', ' '))}</p>
 <table><tr><th>Excel rows</th><th>Pass</th><th>Mismatch</th><th>Empty in AEM</th><th>Case / spacing only</th><th>No map in AEM</th>
-<th>Document Title correct</th><th>Page Title correct</th></tr>
+<th>Document Title correct</th><th>Page Title correct</th><th>Meta Description correct</th></tr>
 <tr><td>{sm['rows']}</td><td style="color:#16a34a"><b>{sm['pass']}</b></td><td style="color:#d92d20"><b>{sm['fail']}</b></td>
 <td style="color:#d92d20">{sm['missing']}</td><td style="color:#b45309">{sm['case']}</td><td>{sm['not_in_aem']}</td>
-<td>{sm['doc_ok']} / {sm['rows']}</td><td>{sm['page_ok']} / {sm['rows']}</td></tr></table>
+<td>{sm['doc_ok']} / {sm['rows']}</td><td>{sm['page_ok']} / {sm['rows']}</td><td>{sm['desc_ok']} / {sm['rows']}</td></tr></table>
 <p class="muted">{sm['skipped']} sheet rows have no model name yet (planned models, "naming TBD") and are not in scope.</p>"""]
 
     def table(title: str, sel: list[dict]) -> None:
@@ -405,7 +454,7 @@ Excel {escape(res['sheet'])} (sheet Model-list) · AEM {escape(res['author'])} /
 <th>Result</th><th>Expected (Excel)</th><th>In AEM</th><th>AEM map</th></tr>""")
         for r in sel:
             exp = (f'<span class="muted">Doc:</span> {escape(r["exp_doc"])}<br/><span class="muted">Page:</span> {escape(r["exp_page"])}'
-                   + _models_line(r))
+                   f'<br/><span class="muted">Desc:</span> {escape(r.get("exp_desc", ""))}')
             if not r["maps"]:
                 html.append(f"<tr><td class='n'>{r['row']}</td><td>{escape(r['category'])}</td><td><b>{escape(r['model'])}</b></td>"
                             f"<td>{_badge('not_in_aem')}</td><td>{exp}</td><td class='muted'>—</td><td class='muted'>file {escape(r['file'])}</td></tr>")
@@ -415,7 +464,7 @@ Excel {escape(res['sheet'])} (sheet Model-list) · AEM {escape(res['author'])} /
                         if k == 0 else "<td></td><td></td><td></td>")
                 got = (f'<span class="muted">Doc:</span> {_cell(m["doc"], m["doc_status"])}<br/>'
                        f'<span class="muted">Page:</span> {_cell(m["page"], m["page_status"])}'
-                       + (f'<br/><span class="muted">Models:</span> {_cell(re.sub(r"([/,])(?=\S)", r"\1 ", m["models"]), m["models_status"])}' if m.get("models_status") else "")
+                       + f'<br/><span class="muted">Desc:</span> {_cell(m["desc"], m["desc_status"])}'
                        + "".join(f'<br/><span class="muted">· {_wrap(n)}</span>' for n in m.get("notes", [])))
                 html.append(f"<tr>{head}<td>{_badge(m['status'])}</td><td>{exp if k == 0 else ''}</td><td>{got}</td>"
                             f"<td>{_wrap(m['product'])}<br/><span class='muted'>{escape(m['map'])}</span></td></tr>")
@@ -460,14 +509,13 @@ def write_csv(res: dict, out: str | Path) -> Path:
         w = csv.writer(f)
         w.writerow(["Excel row", "Product line", "Model name", "Result", "Expected Document Title", "Document Title in AEM",
                     "Document Title result", "Expected Page Title", "Page Title in AEM", "Page Title result",
-                    "Models involved (Excel)", "Models in AEM", "Models result", "Notes", "AEM map", "AEM link"])
+                    "Expected Meta Description", "Meta Description in AEM", "Meta Description result", "Notes", "AEM map", "AEM link"])
         for r in sheet_rows(res):
             for m in r["maps"] or [None]:
                 w.writerow([r["row"], r["category"], r["model"], STATUS[m["status"] if m else "not_in_aem"][0],
                             r["exp_doc"], m["doc"] if m else "", STATUS[m["doc_status"]][0] if m else "",
                             r["exp_page"], m["page"] if m else "", STATUS[m["page_status"]][0] if m else "",
-                            r.get("exp_models", ""), m["models"] if m else "",
-                            STATUS[m["models_status"]][0] if m and m.get("models_status") else "",
+                            r.get("exp_desc", ""), m["desc"] if m else "", STATUS[m["desc_status"]][0] if m else "",
                             "; ".join(m.get("notes", [])) if m else "", m["path"] if m else "", m["url"] if m else ""])
     return out
 

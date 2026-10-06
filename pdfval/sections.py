@@ -171,4 +171,27 @@ def match_anchors(a: list[Anchor], b: list[Anchor], cfg: dict, doc_a=None, doc_b
                 pairs.append((i, j, 1.0))
                 used_a.add(i); used_b.add(j)
                 break
+    # renumbered sections: the same title under another number (“Appendix 3: Basic Troubleshooting Checklists
+    # for X-Sign” in prod, “Appendix 4: …” in stage, the appendices in another order). The section is there -
+    # its heading text differs - not a section missing in stage plus an extra one
+    used_a, used_b = {p[0] for p in pairs}, {p[1] for p in pairs}
+    for i in range(n):
+        ka = _unnumbered(a[i].norm) if i not in used_a else None
+        if not ka:
+            continue
+        for j in range(m):
+            if j not in used_b and _unnumbered(b[j].norm) == ka:
+                pairs.append((i, j, min(0.99, SequenceMatcher(None, a[i].norm, b[j].norm).ratio())))
+                used_a.add(i); used_b.add(j)
+                break
     return sorted(pairs)
+
+
+_NUMBERED = re.compile(r"^(?:(?:appendix|chapter|part|section|annex)\s+(?:\d+(?:\.\d+)*|[ivxlc]+|[a-z])|\d+(?:\.\d+)*)\s*[:.\-–)]*\s+")
+
+
+def _unnumbered(norm: str) -> str | None:
+    """The title without its leading number (“appendix 3: basic troubleshooting …” -> “basic troubleshooting
+    …”), when it has one and at least three words are left to tell the section by."""
+    rest = _NUMBERED.sub("", norm, count=1)
+    return rest if rest != norm and len(rest.split()) >= 3 else None

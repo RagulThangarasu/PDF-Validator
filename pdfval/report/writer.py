@@ -44,8 +44,22 @@ def write_pdf_report(result: dict, out_dir: str | Path) -> Path | None:
     out = Path(out_dir)
     if not (result.get("summary") or {}).get("genuine", {}).get("total"):
         (out / "genuine-issues.pdf").unlink(missing_ok=True)
+        (out / "genuine-issues.docx").unlink(missing_ok=True)
         return None
-    return pdf_report.build(result, out, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
+    path = pdf_report.build(result, out, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
+    write_docx_report(result, out)
+    return path
+
+
+def write_docx_report(result: dict, out_dir: str | Path) -> Path | None:
+    """The Word report (genuine-issues.docx), beside the PDF report: the same issues, issues only. Built when
+    python-docx is installed; without it the PDF report is still complete."""
+    out = Path(out_dir)
+    try:
+        from . import docx_report
+        return docx_report.build(result, out)
+    except ImportError:
+        return None
 
 
 def write_all(result: dict, out_dir: str, shots: str = "all",
@@ -125,7 +139,7 @@ def write_genuine_csv(result: dict, path: Path) -> Path:
                     a = f.get("aem") or {}
                     # Excel shows the GUID as a link that opens the topic in AEM
                     guid = f'=HYPERLINK("{a["url"]}","{a["guid"]}")' if a.get("url") else a.get("guid", "")
-                    w.writerow([f["id"], s["title"], f.get("issue") or f.get("check", ""), f["severity"], pa, pc, a.get("topic", ""), guid,
+                    w.writerow([f["id"], s["title"], f.get("issue") or f.get("check", ""), pdf_report.SEV_LABEL.get(f["severity"], f["severity"]).lower(), pa, pc, a.get("topic", ""), guid,
                                 a.get("element", ""), a.get("url", ""), f.get("description") or f.get("message", ""),
                                 f.get("why", ""), shots.get("baseline", ""), shots.get("candidate", "")])
     return path
@@ -141,7 +155,7 @@ def write_issues_csv(result: dict, issues: list[tuple], path: Path) -> Path:
         for s, f in issues:
             pa, pc = where(f)
             shots, a = f.get("shots") or {}, f.get("aem") or {}
-            w.writerow([f["id"], s["title"], f.get("category", ""), ", ".join(f.get("types") or []), f["severity"],
+            w.writerow([f["id"], s["title"], f.get("category", ""), ", ".join(f.get("types") or []), pdf_report.SEV_LABEL.get(f["severity"], f["severity"]).lower(),
                         "yes" if f.get("critical") else "", "yes" if f.get("genuine") else "",
                         f.get("description") if f.get("genuine") and f.get("description") else f["message"],
                         pa, pc, a.get("topic", ""), a.get("guid", ""), a.get("url", ""),

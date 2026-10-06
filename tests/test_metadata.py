@@ -33,3 +33,21 @@ def test_row_with_a_mismatched_copy_is_not_a_pass():
            "not_in_aem": [], "summary": {}}
     (row,) = M.sheet_rows(res)
     assert row["status"] == "fail" and sorted(m["status"] for m in row["maps"]) == ["fail", "pass"]
+
+
+def test_map_matched_by_its_document_title_when_the_folder_has_another_name():
+    """Folder "stylus" holds the map of the row "BenQ Board Pens": its Document Title is the row's title."""
+    rows = [{**_row(78, "BenQ Board Pens", "PT03,PT06", "Stylus_UM_EN_V1.02"), "exp_doc": "IFP accessory BenQ Board Pens user manual"},
+            {**_row(64, "TEY41", "TEY41"), "exp_doc": "IFP accessory TEY41 user manual"}]
+    assert m.match("pens", "pens", rows, "IFP accessory BenQ Board Pens user manual")["row"] == 78
+    assert m.match("stylus", "stylus", rows)["row"] == 78  # and by the file name: Stylus_UM_EN_V1.02 -> stylus
+
+
+def test_meta_description_counts_and_models_do_not():
+    base = {"row": 5, "brand": "BenQ", "category": "Monitor", "model": "GW2291", "file": "", "product": "gw2291", "url": "", "map": "m", "path": "p",
+            "exp_doc": "Monitor GW2291 user manual", "exp_page": "Monitor GW2291", "doc": "Monitor GW2291 user manual", "page": "Monitor GW2291",
+            "exp_desc": "Learn how to set up Monitor GW2291 and its settings, and optimize performance."}
+    ok = {**base, "desc": base["exp_desc"], "models": "other", "models_status": "fail"}
+    bad = {**base, "desc": "Learn how to set up [Product] [model] and its settings, and optimize performance."}
+    assert m.sheet_rows({"maps": [ok], "not_in_aem": []})[0]["status"] == "pass"
+    assert m.sheet_rows({"maps": [bad], "not_in_aem": []})[0]["status"] == "fail"

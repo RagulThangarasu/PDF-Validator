@@ -230,6 +230,9 @@ report_types = ["missing image", "broken image", "image changed", "image blacked
                 "image distorted", "duplicate image", "image alignment", "image in wrong section", "image combined",
                 "missing image label", "image smaller", "image bigger", "image mirrored",
                 "image vertical alignment",   # an icon centred on its paragraph in prod, at its first line in stage
+                "extra image", "image order", "placement", "image outside box", "image blurred",   # a picture stage adds, pictures
+                # in another order, a picture inline vs on its own line, out of its note / box, softer than prod's
+                "icon missing inline", "icon differs", "icon pixelated",   # icons inside a sentence
                 "callout numbers missing", "image label missing", "leader lines missing"]   # picture text: image report only
 alignment_sides_only = true   # image alignment: only a complete move left <-> right (not centred / full width / indented)
 pixelated_vs_vector = false   # "image pixelated" where prod draws the artwork as vectors and stage embeds a bitmap
@@ -300,6 +303,7 @@ types = [
   "missing text", "extra text", "changed text", "case", "punctuation", "case + punctuation", "spacing",
   "superscript", "paragraph break", "content in wrong section", "duplicate content",
   "missing section", "duplicate section", "extra section",
+  "heading text",                           # the same section under a heading with other words / another number
   "emphasis",                                                        # bold / italic missing (or added)
   "label joined",                                                    # bold label + its plain text on one line (prod: 2 lines)
   # hyperlinks
@@ -312,18 +316,21 @@ types = [
   # label / caption missing is in the full report only)
   "image blurred", "image alignment", "placement", "missing image", "image smaller", "image bigger", "image vertical alignment",
   "broken image", "duplicate image", "image changed", "image blacked out", "image distorted", "image in wrong section", "image mirrored",
+  "extra image", "image order", "image outside box",   # a picture only stage has, pictures in another order, out of its box
   # content order, hyperlink title quotes
   "reordered", "order differs", "link quotes",
-  # table of contents: entries missing / added, title or level differs, wrong page number
-  "missing entry", "extra entry", "title differs", "level differs", "wrong page",
+  # table of contents: entries missing / added, title or level differs, wrong page number, the TOC's own heading
+  "missing entry", "extra entry", "title differs", "level differs", "wrong page", "heading differs",
   # notes (callouts) that differ (not "callout style" - a document-wide bar/box redesign is house
   # style, not a defect: see [ignore] types)
   "icon missing", "icon extra", "icon order", "icon above text",   # icons in table rows (missing, swapped, placed above the text)   # a NOTE: label vs an icon only is house style (info, full report only)
   "callout type differs",   # stage labels a note as another type than prod's icon shows (WARNING icon, IMPORTANT label)
   "row alignment",   # side-by-side items of a prod row at different heights in stage
+  "stacked to columns",   # a list broken into columns: text stacked in prod, side by side in stage
   # tables: header (missing / not centred as in prod), rows and cells merged or split
   "missing header", "table header alignment", "rows merged", "row split", "cells merged", "cells split",
   "missing row", "missing table", "tables merged", "cell differs",
+  "icon missing inline", "icon differs", "icon pixelated",   # icons inside a sentence: missing, another icon, low resolution
   "caption row",                            # captions of one row of pictures: level in prod, not in stage
   "cell border",                            # a line between two cells of the prod table that stage does not draw
 ]
@@ -355,8 +362,8 @@ types = [
   "spec text-align", "spec bullet", "spec list numbering", "spec callout title", "spec callout background",
   "spec callout content", "spec callout icon", "spec cover", "spec page margin", "spec page size", "spec pagination",
   "spec page structure",
-  # images: text inside a picture blurred / drawn into it is not reported
-  "image blurred", "text as graphic",
+  # images: text drawn into a picture is not reported (a picture softer than prod's - "image blurred" - is)
+  "text as graphic",
   "size / aspect",                          # the same picture at another width / aspect ratio (1.43 -> 1.34): layout
   "superscript",                            # the same text raised / not raised (MacBook® vs MacBook^®): looks the same
   "case", "punctuation", "case + punctuation",  # uppercase/lowercase and punctuation-only wording differences

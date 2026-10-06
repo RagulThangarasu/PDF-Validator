@@ -91,6 +91,8 @@ def _reset_caches() -> None:
     _gen._LINE_ART.clear()
     from .checks import caption_rows
     caption_rows._THINGS.clear()
+    from .checks import inline_icons
+    inline_icons.reset()
 
 
 def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str | None = None,

@@ -431,6 +431,16 @@ def _repeated_header_rows(d, idx: list[int], max_rows_pt: float = 90) -> list[in
             n += 1
         best = max(best, n)
     run = lead[:best]
+    # the run ends where the header ends, not inside the first data cell under it: the first row of the
+    # table's part on the earlier page may start with the same word as this page's first row (“OFF | HDR
+    # content” there, “OFF (grayed out) | Non-HDR content” here) - that word is data of this page
+    while run and run[-1] + 1 < len(d.words):
+        w, nx = d.words[run[-1]], d.words[run[-1] + 1]
+        if not (same_row(d, run[-1], run[-1] + 1) and -1 <= nx.bbox[0] - w.bbox[2] < 1.5 * w.style.size):
+            break  # the next word is in another cell or row: the run ends on a whole cell
+        run = run[:-1]
+        while run and same_row(d, run[-1], run[-1] + 1) and d.words[run[-1] + 1].bbox[0] - d.words[run[-1]].bbox[2] < 1.5 * d.words[run[-1]].style.size:
+            run = run[:-1]  # the rest of that cell
     if len(run) < 4 or len({round(d.words[i].bbox[1]) for i in run}) < 2:
         return []
     return run

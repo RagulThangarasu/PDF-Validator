@@ -5,3 +5,4 @@ pytest>=8          # CI suite: one test case per section
 pillow>=10         # screenshots, image crops and comparisons (imported as PIL)
 numpy>=1.24        # image matching (cross-correlation)
 openpyxl>=3.1
+python-docx>=1.1   # the Word report (genuine-issues.docx): the PDF report's issues as a document
