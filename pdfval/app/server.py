@@ -44,6 +44,14 @@ class Jobs:
         if n <= 0:  # auto: every core but one (the UI and AEM downloads keep running)
             n = max(1, (os.cpu_count() or 2) - 1)
         self.run_sem = threading.BoundedSemaphore(max(1, n))
+        # PDF <-> PDF runs are CPU-bound (image correlation etc.): capped near the core count above, or the
+        # worker processes themselves oversubscribe the CPU. A PDF <-> web page run spends most of its time
+        # waiting on the site, not the CPU, so many more can be in flight together; default a generous pool,
+        # and a batch of them (Prod <-> Stage pairs, "Validate many URLs") can ask for its own size, up to it
+        nh = int((engine.load_config().get("ui") or {}).get("parallel_html_runs", 0)) or max(n, 2 * (os.cpu_count() or 2))
+        self.html_sem_max = max(1, nh)
+        self.html_sem = threading.BoundedSemaphore(self.html_sem_max)
+        self.batch_sem: dict[str, threading.BoundedSemaphore] = {}  # batch id -> its own "N at a time", if set
         self.procs: dict = {}  # run id -> its worker process (to stop it)
         self.stopping: set = set()  # runs stopped by the user (their worker's exit is not an error)
         # web-page passwords live in memory only (never in job.json), per (site, user),
@@ -91,6 +99,29 @@ class Jobs:
             candidate, url_user, url_password = split_login(candidate)  # never store a login in the URL
             options = {**options, "html_user": options.get("html_user") or url_user}
             password = options.pop("html_password", "") or url_password
+            # the AEM login already known to the server (AEM login card / keychain) is used for pages of that AEM
+            # when nothing is typed here: no need to enter it for every run
+            acfg = self.aem_config()
+            if urlparse(candidate).netloc == urlparse(acfg.get("author") or "").netloc and self.aem_password:
+                options["html_user"] = options["html_user"] or acfg.get("user") or ""
+                if not password and options["html_user"] == (acfg.get("user") or options["html_user"]):
+                    password = self.aem_password
+            if aem.is_site_root(candidate):
+                # a folder of AEM Sites, not a guide page (…/sites.html/content/guide): the guide of the selected
+                # prod PDF's product is searched under it, in English, and that page is validated
+                found = self.site_for(baseline, candidate, options["html_user"], password)
+                if not found.get("url"):
+                    raise ValueError(f"No English guide found for “{found.get('product') or Path(baseline).stem}” under "
+                                     f"{found.get('root')} ({found.get('guides', 0)} guides searched). Enter the guide's "
+                                     f"page address instead.")
+                options = {**options, "site_root": candidate, "site_map": found.get("map", ""), "site_pages": found.get("pages", 0)}
+                candidate = found["url"]
+            # a page of the AEM author is read in its published view (?wcmmode=disabled): without the editing frame,
+            # and the server answers it in about half the time
+            cu = urlparse(candidate)
+            if cu.netloc == urlparse(acfg.get("author") or "").netloc and cu.path.startswith("/content/") \
+                    and "wcmmode" not in cu.query:
+                candidate += ("&" if cu.query else "?") + "wcmmode=disabled"
             if options["html_user"] and password:
                 self.passwords[(urlparse(candidate).netloc, options["html_user"])] = password
         elif options.get("aem_map"):  # stage PDF generated in AEM Guides at the start of the run
@@ -106,6 +137,18 @@ class Jobs:
         (self.path(jid) / "job.json").write_text(json.dumps(job, indent=1))
         threading.Thread(target=self._run, args=(jid,), daemon=True).start()
         return job
+
+    def site_for(self, baseline: str, root_url: str, user: str = "", password: str = "") -> dict:
+        """The English guide in AEM Sites of the prod PDF's product, searched under root_url (read-only)."""
+        cfg = self.aem_config()
+        if user and password:  # the login typed for the page, when the AEM login card is empty
+            cfg = {**cfg, "user": cfg.get("user") or user, "password": cfg.get("password") or password}
+        if not cfg.get("author"):
+            cfg["author"] = "{0.scheme}://{0.netloc}".format(urlparse(root_url))
+        try:
+            return aem.site_for_pdf(baseline, root_url, cfg)
+        except RuntimeError as e:
+            raise ValueError(str(e))
 
     def stage_from_aem(self, baseline: str, map_hint: str = "") -> dict:
         """Start (in the background) finding the prod PDF's map in AEM, generating its stage PDF with the
@@ -279,10 +322,18 @@ class Jobs:
 
     def _run(self, jid: str) -> None:
         """Wait for a free slot, then run the comparison in its own process (CPU-bound: threads would share one
-        core). The passwords go to the worker in its environment, never on disk."""
+        core). The passwords go to the worker in its environment, never on disk. A PDF <-> PDF run waits on
+        the shared CPU-sized pool; a PDF <-> web page run waits on the larger, I/O-bound pool instead - its
+        own batch's pool, when "Validate many URLs" asked for a particular "N at a time"."""
         import subprocess
         import sys
-        with self.run_sem:
+        try:
+            job = self.get(jid)
+        except (KeyError, FileNotFoundError):
+            return  # deleted while queued
+        is_html = job.get("options", {}).get("mode") == "html"
+        sem = (self.batch_sem.get(job.get("batch", "")) if is_html else None) or (self.html_sem if is_html else self.run_sem)
+        with sem:
             try:
                 job = self.get(jid)
             except (KeyError, FileNotFoundError):
@@ -352,12 +403,14 @@ class Jobs:
                                                       "max_pages": o.get("html_max_pages") or 0,
                                                       "password": self.passwords.get(
                                                           (urlparse(job["candidate"]).netloc, o.get("html_user", "")), ""),
-                                                      "width": o.get("html_width") or 1280, "wait_ms": o.get("html_wait") or 1500})
+                                                      "width": o.get("html_width") or 1440, "wait_ms": o.get("html_wait") or 500})
                 else:
                     result = engine.compare(job["baseline"], job["candidate"], cfg, progress=step)
                 # a batch run builds only what the batch delivers (genuine-issues + image report, with their
                 # screenshots); the full report and the CSS report are built when first opened
-                batch = bool(job.get("batch"))
+                # (a web page run the same: its report holds a short list of issue kinds - screenshots are made for
+                # those issues only, not for every finding of the full report nobody may open)
+                batch = bool(job.get("batch")) or job.get("mode") == "html"
                 result["meta"]["name"] = job["name"]  # the product / publication: named in every report
                 writer.write_all(result, str(self.path(jid)), "reports" if batch else job["options"].get("screenshots", "all"),
                                  progress=lambda f, m: self.update(jid, progress=round(0.45 + 0.55 * f, 3), message=m),
@@ -389,8 +442,9 @@ def _batches(jobs: Jobs) -> list[dict]:
 
 
 def _batch_zip(jobs: Jobs, bid: str) -> Path:
-    """One zip with the PDF report (genuine issues) and the image report of every finished product of the batch,
-    named after the product: "<product> - PDF report.pdf", "<product> - Image report.pdf". A product with no
+    """One zip with the PDF report (genuine issues), its Word version and the image report of every finished product
+    of the batch, named after the product: "<product> - PDF report.pdf", "<product> - PDF report.docx",
+    "<product> - Image report.pdf". A product with no
     genuine issues has no PDF report, one with no image issues has no image report - never an empty "0 issues" file."""
     import tempfile
     import zipfile
@@ -422,6 +476,20 @@ def _batch_zip(jobs: Jobs, bid: str) -> Path:
             used.add(name)
             if src.exists():
                 z.write(src, f"{name} - PDF report.pdf")
+                # the Word report of the same issues, for every publication that has a PDF report: built here
+                # when the run has none, or one made by an older version of the Word report
+                word = run_dir / "genuine-issues.docx"
+                try:
+                    from ..report import docx_report
+                    code = max(Path(docx_report.__file__).stat().st_mtime, Path(writer.__file__).stat().st_mtime)
+                    if (run_dir / "results.json").exists() and (not word.exists() or word.stat().st_mtime < code):
+                        res = json.loads((run_dir / "results.json").read_text())
+                        writer.assign_bug_ids(res)
+                        writer.write_docx_report(res, run_dir)
+                except Exception:
+                    traceback.print_exc()
+                if word.exists():
+                    z.write(word, f"{name} - PDF report.docx")
             if img.exists():
                 z.write(img, f"{name} - Image report.pdf")
     return Path(tmp)
@@ -606,6 +674,9 @@ def make_handler(jobs: Jobs, root: Path):
                         path.unlink(missing_ok=True)
                 if p == "/api/pairs":
                     return self._json(PAIRS.suggest())
+                if p == "/api/site-for":  # the English guide in AEM Sites of a prod PDF, searched under a Sites folder
+                    qs = parse_qs(u.query)
+                    return self._json(jobs.site_for(qs.get("pdf", [""])[0], qs.get("root", [""])[0]))
                 if p == "/api/prod-for":  # the prod PDF of a stage web guide, from its URL
                     return self._json(PAIRS.prod_for_url(parse_qs(u.query).get("url", [""])[0]))
                 if p == "/api/library":
@@ -668,9 +739,15 @@ def make_handler(jobs: Jobs, root: Path):
                     return self._json(meta.status())
                 if p.path == "/api/metadata":
                     return self._json(meta.start(json.loads(self._body() or b"{}")))
+                if p.path == "/api/prod-for-bulk":  # many stage web-guide URLs at once, each matched to its prod PDF
+                    req = json.loads(self._body() or b"{}")
+                    return self._json({"matches": PAIRS.prod_for_urls(req.get("urls") or [])})
                 if p.path == "/api/pairs/run":
                     req = json.loads(self._body() or b"{}")
                     bid = "batch-" + datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+                    concurrent = int(req.get("concurrent") or 0)
+                    if concurrent > 0:  # "N at a time" for this batch - web-page pairs only; set before the first job starts
+                        jobs.batch_sem[bid] = threading.BoundedSemaphore(min(max(1, concurrent), max(jobs.html_sem_max, 50)))
                     made = [jobs.create(x["baseline"], x["candidate"], x.get("name", ""), req.get("options") or {"mode": "pdf"},
                                         batch=bid)
                             for x in req.get("pairs", []) if x.get("baseline") and x.get("candidate")]
@@ -952,6 +1029,22 @@ class Pairs:
                             "via": "Excel" if row and n_k < 2 else "name", "product": name, "lang": lang,
                             "model": (row or {}).get("model", "")}
         return {"prod": "", "product": names[0] if names else "", "lang": lang}
+
+    def prod_for_urls(self, urls: list[str]) -> list[dict]:
+        """prod_for_url, for many stage web-guide URLs at once: pasted or uploaded in bulk, each matched to its
+        prod PDF the same way, so the reviewer can tick which pairs to validate."""
+        seen, out = set(), []
+        for u in urls:
+            u = u.strip()
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            try:
+                r = self.prod_for_url(u)
+            except Exception as e:
+                r = {"prod": "", "product": "", "lang": "", "error": str(e)}
+            out.append({"url": u, **r})
+        return out
 
 
 PAIRS = Pairs(PROJECT / "aem-map-pdfs", PROJECT / "stage-pdf")

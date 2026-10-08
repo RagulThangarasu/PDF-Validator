@@ -105,6 +105,8 @@ def check(u: Unit) -> list[Finding]:
     for x, y in u.image_pairs:
         if in_table(u.a, x) or in_table(u.b, y):
             continue  # a picture in a table cell (status LEDs): cells, not lines of text - not judged here
+        if icon_max(u.a, x, u.cfg["assets"]) or icon_max(u.b, y, u.cfg["assets"]):
+            continue  # icons: only compared for look, size, broken/missing and pixelation - not reflow
         ra, rb = relation(u.a, u.a_range, x), relation(u.b, u.b_range, y)
         kind_a, prev_a, next_a = ra
         kind_b, prev_b, next_b = rb

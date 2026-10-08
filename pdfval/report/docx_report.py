@@ -176,7 +176,9 @@ def _toc(doc, result: dict, seq: int) -> int:
     if head_differs:  # a numbered issue like the others: OPEN, expected (prod) and actual (stage), highlighted
         from docx.enum.text import WD_COLOR_INDEX
         p = _par(doc, before=6, after=0)
-        _run(p, f"{seq + 1}.  ", bold=True, colour=INK, size=9)
+        head_bug = next((f.get("bug") for sec in result.get("sections", []) for f in sec.get("findings", [])
+                         if f.get("check") == "toc" and "heading differs" in (f.get("types") or [])), None)
+        _run(p, f"{head_bug}  ·  " if head_bug else f"{seq + 1}.  ", bold=True, colour=INK, size=9)
         _run(p, "TOC", bold=True, colour="9333EA", size=8)
         _run(p, "  ·  ", colour=MUTED, size=8)
         _run(p, "heading differs", bold=True, colour="9333EA", size=9)
@@ -186,8 +188,8 @@ def _toc(doc, result: dict, seq: int) -> int:
             p = _par(doc, after=0)
             _run(p, label, bold=True, colour=col)
             _run(p, "“", colour=INK)
-            for k, (text, changed) in enumerate(pieces):
-                _run(p, (" " if k else "") + text, bold=changed, colour="B42318" if changed else INK)
+            for text, changed in pieces:  # (each piece carries its own spacing)
+                _run(p, text, bold=changed, colour="B42318" if changed else INK)
             _run(p, "”", colour=INK)
         seq += 1
 
@@ -204,7 +206,7 @@ def _toc(doc, result: dict, seq: int) -> int:
     def entry(e) -> str:
         if not e:
             return "—"
-        lvl = min(max(int(e.get("level") or 1), 1), 3) - 1
+        lvl = min(max(int(e.get("level") or 1), 1), 6) - 1
         page = e.get("page")
         return "\u00a0" * 6 * lvl + f"{e['title']}  (p.{page if page is not None else '—'})"
 
@@ -233,15 +235,22 @@ def _screenshots(doc, out: Path, f: dict, shots: dict, img_w):
     cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _run(cap, "   |   ".join(f"{lab} p.{shots.get(side + '_page', '?')}" for side, lab in (("baseline", "PROD"), ("candidate", "STAGE")) if imgs[side]),
          bold=True, colour=MUTED, size=7)
-    # prod and stage side by side, centred, both at the same height so the two pictures line up
+    # prod and stage side by side, centred, each filling its own column's full width - so a marker line
+    # drawn edge to edge in the screenshot (pdfval/report/shots.py) reads edge to edge here too, instead of
+    # stopping short with blank space beside it. A page's screenshot is usually tall (portrait): only when
+    # even that is implausibly tall does a picture give up filling the width, to stay a sane size on the page
     sides = [side for side in ("baseline", "candidate") if imgs[side]]
-    h = min([Inches(4.6)] + [img_w * imgs[side][1] for side in sides])
+    max_h = Inches(9.5)
     p = _par(doc, after=6, keep=False)
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for k, side in enumerate(sides):
         if k:
             p.add_run("      ")
-        p.add_run().add_picture(io.BytesIO(imgs[side][0]), height=int(h))
+        data, ratio = imgs[side]
+        if img_w * ratio <= max_h:
+            p.add_run().add_picture(io.BytesIO(data), width=int(img_w))
+        else:
+            p.add_run().add_picture(io.BytesIO(data), height=int(max_h))
 
 
 def build(result: dict, out_dir: str | Path, filename: str = "genuine-issues.docx") -> Path:
@@ -279,9 +288,15 @@ def build(result: dict, out_dir: str | Path, filename: str = "genuine-issues.doc
     _cover(doc, result)
     seq = 0  # the issues are numbered in the order of the report
     n_toc = 0
+    shown: set[str] = set()  # ids of the issues written so far: nothing that has a bug number may be left out
+    every = [(sec, f) for sec in result.get("sections", []) for f in sec.get("findings", []) + (sec.get("image_findings") or [])]
     if toc_in_own_part:  # the TOC comes first, as a table
         seq = _toc(doc, result, seq)
         n_toc = 1
+        # every TOC issue is already a row of the table above: not repeated as an issue of its own, but still
+        # marked as shown so it does not fall through to "Other issues" below
+        toc_issues = [(sec, f) for sec, f in every if f.get("check") == "toc" and (f.get("genuine") or f.get("bug"))]
+        shown.update(f["id"] for _, f in toc_issues)
     for p, label in PRIORITIES.items():
         items = buckets[p]
         if not items:
@@ -293,30 +308,76 @@ def build(result: dict, out_dir: str | Path, filename: str = "genuine-issues.doc
                 current = s
                 doc.add_heading(s["title"], level=2)
             seq += 1
+            shown.add(f["id"])
             _issue(doc, out, f, img_w, seq)
-    if not issues and not n_toc:
+    # whatever has a bug number and is not in the report yet: the picture issues of the image report (callout
+    # numbers, labels, leader lines, red overlay, artwork missing) and any other issue - no issue is dropped
+    rest = [(sec, f) for sec, f in every if f.get("bug") and f["id"] not in shown]
+    for title, part in (("Images: numbers, labels, overlays and artwork (image report)", [x for x in rest if x[1].get("check") == "assets"]),
+                        ("Other issues", [x for x in rest if x[1].get("check") != "assets"])):
+        if not part:
+            continue
+        doc.add_heading(f"{title} ({len(part)})", level=1)
+        current = None
+        for sec, f in sorted(part, key=lambda x: x[1].get("bug") or ""):
+            if sec is not current:
+                current = sec
+                doc.add_heading(sec["title"], level=2)
+            seq += 1
+            shown.add(f["id"])
+            _issue(doc, out, f, img_w, seq)
+    if not issues and not n_toc and not rest:
         _run(_par(doc), "No issues.", colour="16A34A")
     path = out / filename
+    _no_proofing(doc)
     doc.save(str(path))
     return path
 
 
+_SETTINGS_BEFORE = ("writeProtection", "view", "zoom", "removePersonalInformation", "removeDateAndTime", "doNotDisplayPageBoundaries",
+                    "displayBackgroundShape", "printPostScriptOverText", "printFractionalCharacterWidth", "printFormsData",
+                    "embedTrueTypeFonts", "embedSystemFonts", "saveSubsetFonts", "saveFormsData", "mirrorMargins",
+                    "alignBordersAndEdges", "bordersDoNotSurroundHeader", "bordersDoNotSurroundFooter", "gutterAtTop")
+_RPR_BEFORE = ("rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "dstrike", "outline", "shadow", "emboss",
+               "imprint")
+
+
+def _no_proofing(doc) -> None:
+    """The report quotes the manuals' own text - model names, part codes, other languages, deliberately wrong
+    stage text. A spelling / grammar checker underlines half of it in red and blue, and the marks read like
+    part of the finding. So: every run is marked "do not check spelling or grammar", and the document asks
+    Word to hide spelling and grammar marks."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    def put(parent, name: str, before: tuple) -> None:
+        if parent.find(qn(f"w:{name}")) is not None:
+            return
+        el = OxmlElement(f"w:{name}")
+        at = 0
+        for k, child in enumerate(parent):
+            if child.tag.split("}")[-1] in before:
+                at = k + 1
+        parent.insert(at, el)
+
+    settings = doc.settings.element
+    put(settings, "hideSpellingErrors", _SETTINGS_BEFORE)
+    put(settings, "hideGrammaticalErrors", _SETTINGS_BEFORE + ("hideSpellingErrors",))
+    for part in [doc.part] + [r.target_part for r in doc.part.rels.values() if r.reltype.endswith(("/header", "/footer"))]:
+        for run in part.element.iter(qn("w:r")):
+            rpr = run.find(qn("w:rPr"))
+            if rpr is None:
+                rpr = OxmlElement("w:rPr")
+                run.insert(0, rpr)
+            put(rpr, "noProof", _RPR_BEFORE)
+
+
 def _diff_words(expected: str, actual: str) -> tuple[list[tuple[str, bool]], list[tuple[str, bool]]]:
     """The expected (prod) and actual (stage) text as (text, changed) pieces: the words only prod has (missing in
-    stage) and the words only stage has (extra in stage) are changed; the rest is the same in both."""
-    import difflib
-    ta, tb = expected.split(), actual.split()
-    left, right = [], []
-    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ta, tb, autojunk=False).get_opcodes():
-        if op == "equal":
-            left.append((" ".join(ta[i1:i2]), False))
-            right.append((" ".join(tb[j1:j2]), False))
-        else:
-            if i2 > i1:
-                left.append((" ".join(ta[i1:i2]), True))
-            if j2 > j1:
-                right.append((" ".join(tb[j1:j2]), True))
-    return left, right
+    stage) and the words only stage has (extra in stage) are changed; the rest is the same in both. In every
+    language - text without spaces (Chinese, Japanese, Thai) is compared character by character."""
+    from .textdiff import pieces
+    return pieces(expected, actual)
 
 
 def _open_tag(par) -> None:
@@ -337,7 +398,7 @@ def _issue(doc, out: Path, f: dict, img_w, seq: int):
     pa = f"p.{f['baseline'][0]['page'] + 1}" if f.get("baseline") else "—"
     pc = f"p.{f['candidate'][0]['page'] + 1}" if f.get("candidate") else "—"
     p = _par(doc, before=6, after=0)
-    _run(p, f"{seq}.  ", bold=True, colour=INK, size=9)
+    _run(p, f"{f.get('bug') or seq}  ·  " if f.get("bug") else f"{seq}.  ", bold=True, colour=INK, size=9)
     if f.get("critical"):
         _run(p, "CRITICAL  ·  ", bold=True, colour="B42318", size=8)
     _run(p, pdf_report.SEV_LABEL.get(f["severity"], f["severity"].upper()), bold=True, colour=SEV.get(f["severity"], "475569"), size=8)
@@ -352,8 +413,8 @@ def _issue(doc, out: Path, f: dict, img_w, seq: int):
             p = _par(doc, after=0)
             _run(p, label, bold=True, colour=colour)
             _run(p, "“", colour=INK)
-            for k, (text, changed) in enumerate(pieces):
-                _run(p, (" " if k else "") + text, bold=changed, colour="B42318" if changed else INK)
+            for text, changed in pieces:  # (each piece carries its own spacing)
+                _run(p, text, bold=changed, colour="B42318" if changed else INK)
             _run(p, "”", colour=INK)
     a = f.get("aem")
     if a:

@@ -70,7 +70,8 @@ PDF_IMAGE_TYPES = {"image smaller", "image bigger", "size / aspect", "image pixe
                    # numbers, labels, leader lines, red overlay, artwork missing): reported here, or it is in no report
                    "image changed", "duplicate image", "image distorted", "image alignment", "image in wrong section",
                    "image mirrored", "extra image", "image order", "placement", "image outside box", "image blurred",
-                   "icon differs", "icon pixelated", "icon missing inline"}  # an icon in a sentence: another one, coarse, or gone
+                   "icon differs", "icon pixelated", "icon missing inline",  # an icon in a sentence: another one, coarse, or gone
+                   "missing image", "broken image", "image blacked out"}  # gone, not displaying, or part of it painted over
 
 # the genuine-issues report: the metrics at the top, then every genuine issue with its screenshots -
 # no overview tables (the issue pages say what each issue is)
@@ -79,7 +80,9 @@ GENUINE = {"include": {"summary": True, "categories": False, "genuine": "counts"
                        "toc": False, "stylemap": False, "issues": True, "screenshots": True},
            # image issues are in image-issues.pdf only - except a picture's size (smaller / bigger in stage) and a
            # pixelated picture: the image report shows picture text and overlays, so these are reported here
-           "filter": {"genuine_only": True, "no_images": True, "keep_types": sorted(PDF_IMAGE_TYPES)}}
+           # ... and a picture's own text and artwork (callout numbers, labels, leader lines missing in stage): every
+           # image issue is in this report as well, so nothing found about a picture has to be looked up elsewhere
+           "filter": {"genuine_only": True, "no_images": True, "keep_types": sorted(PDF_IMAGE_TYPES), "picture_text": True}}
 
 # the CSS report: every CSS / typography / layout issue that is not in the PDF report (fonts, sizes, colours,
 # line heights, spec styles), with its screenshots
@@ -490,7 +493,7 @@ def _toc_section(c: "_Canvas", t: dict, web: bool, out: Path) -> None:
         cols = []
         for e in (row.get("baseline"), row.get("candidate")):
             if e:
-                ind = 12 * (min(max(int(e["level"]), 1), 3) - 1)
+                ind = 12 * (min(max(int(e["level"]), 1), 6) - 1)  # each level one step in, as the TOC itself prints it
                 cols.append((ind, c.wrap(f"{e['title']} (p.{e.get('page') if e.get('page') is not None else '—'})", 8, c.regular, side_w - ind)))
             else:
                 cols.append((0, ["—"]))
@@ -506,6 +509,66 @@ def _toc_section(c: "_Canvas", t: dict, web: bool, out: Path) -> None:
             _text(c, xs[2], y + 11 * j, line, colour, True)
         c.y = y + h
     c.y += 6
+
+
+def _nav_section(c: "_Canvas", site: dict) -> None:
+    """Left navigation vs the whole TOC, entry by entry - the same statuses and colours as the TOC section
+    (pdfval.site_nav already aligns them the same way as prod TOC vs stage TOC)."""
+    rows = site.get("rows") or []
+    header = next((r for r in rows if r["group"] == "nav" and r["item"] == "TOC entries compared"), None)
+    entries = [r for r in rows if r["group"] == "nav" and r is not header]
+    if not header and not entries:
+        return
+    c.new_page()
+    c.runs([("Left navigation", "#1d2330", True), ("   the whole TOC vs the left navigation, entry by entry", "#6a7282", False)], 14)
+    c.y += 4
+    if header:
+        for line in c.wrap(header["note"], 9):
+            _text(c, c.M, c.y, line, "#6a7282", False)
+            c.y += 12
+    c.y += 10
+    side_w = c.width * 0.40
+    xs = [c.M, c.M + side_w + 8, c.M + 2 * side_w + 16]
+    st_w = c.M + c.width - xs[2]
+    for x, label, col in ((xs[0], "TOC", "#2563eb"), (xs[1], "Left navigation", "#0f766e"), (xs[2], "Status", "#475569")):
+        _text(c, x, c.y, label, col, True)
+    c.y += 14
+    for row in entries:
+        status = row["note"] or "match"
+        st = TOC_LABEL.get(status, status)
+        colour = TOC_COLOR.get(status, "#6a7282")
+        cols = [c.wrap(row["expected"] or "—", 8, c.regular, side_w), c.wrap(row["actual"] or "—", 8, c.regular, side_w)]
+        stl = c.wrap(st, 8, c.bold, st_w)
+        h = 11 * max(len(cols[0]), len(cols[1]), len(stl)) + 1
+        if not c.room(h + 2):
+            c.new_page()
+        y = c.y
+        for x, lines in zip(xs[:2], cols):
+            for j, line in enumerate(lines):
+                _text(c, x, y + 11 * j, line, "#1d2330" if line != "—" else "#9aa3af", False)
+        for j, line in enumerate(stl):
+            _text(c, xs[2], y + 11 * j, line, colour, True)
+        c.y = y + h
+    c.y += 6
+    # ---- the rest of the chrome: links, download, pager, on this page, subtitle - one line each, not a match
+    rest = [r for r in rows if r["group"] != "nav" and r["status"] != "pass"]
+    if rest:
+        from ..site_nav import GROUPS as _site_groups
+        group_label = dict(_site_groups)
+        if not c.room(40):
+            c.new_page()
+        c.y += 6
+        c.runs([("Rest of the page chrome", "#1d2330", True), ("   navigation links, download, pager, on this page, subtitle", "#6a7282", False)], 12)
+        c.y += 4
+        for r in rest:
+            col = {"fail": "#d92d20", "warn": "#b45309", "info": "#2563eb"}.get(r["status"], "#6a7282")
+            text = f"{r['item']}: {r['expected']} → {r['actual']}" if r["expected"] or r["actual"] else r["item"]
+            lines = c.wrap(f"[{group_label.get(r['group'], r['group'])}] {text}" + (f" — {r['note']}" if r["note"] else ""), 8.5)
+            if not c.room(11 * len(lines) + 4):
+                c.new_page()
+            for j, line in enumerate(lines):
+                _text(c, c.M, c.y + 11 * j, line, col, j == 0)
+            c.y += 11 * len(lines) + 4
 
 
 def _missing_sections_row(result: dict) -> str:
@@ -718,9 +781,19 @@ def select_issues(result: dict, flt: dict | None = None, severities: set[str] | 
     ids = set(flt["ids"]) if flt.get("ids") is not None else None  # exactly the issues picked in the UI
     keep = set(flt.get("keep_types") or [])  # types shown whatever genuine_only / no_images say
     out = []
+    picture_ids: set = set()
+    if flt.get("picture_text") and ids is None:
+        # the picture-text issues the image report shows (same rules: a real picture, once per picture)
+        try:
+            from . import image_report
+            picture_ids = {f.get("id") for _, f, _ in image_report.issues(result)}
+        except Exception:
+            picture_ids = set()
     for s in result["sections"]:
         if secs and s["id"] not in secs:
             continue
+        out += [(s, f) for f in s.get("image_findings", []) if f.get("id") in picture_ids and f["severity"] in sev
+                and (not q or q in f["message"].lower() or q in s["title"].lower())]
         for f in s["findings"] + (s.get("image_findings", []) if flt.get("image_issues") else []):
             if ids is not None:
                 if f["id"] in ids:
@@ -817,6 +890,9 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
     c = _Canvas(doc)
     if toc_issues:
         _toc_section(c, toc, result["meta"].get("mode") == "html", out)
+    site = result.get("site")
+    if site and not site.get("error"):
+        _nav_section(c, site)
     col_w, gap, max_h = (c.width - 16) / 2, 16, 320
     current = group = None
     for k, (s, f) in enumerate(issues):
@@ -846,13 +922,29 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
         # an issue that cannot be put that way keeps its one-line description
         from ..genuine import prod_stage
         ps = prod_stage(f)
+        marks = {}  # label -> for each character of its text: part of a difference (printed red)
         if ps:
-            rows_txt = [("Prod", ps[0], "#2563eb"), ("Stage", ps[1], "#0f766e")]
-        msg_lines = []  # (label or None, text, label colour)
+            # what only prod has (missing in stage) and what only stage has (extra in stage) is printed in red - in
+            # every language (text without spaces is compared character by character)
+            from .textdiff import flags, pieces
+            left, right = pieces(re.sub(r"\.{4,}", " ", ps[0]), re.sub(r"\.{4,}", " ", ps[1]))
+            (ta_, fa_), (tb_, fb_) = flags(left), flags(right)
+            rows_txt = [("Prod", ta_, "#2563eb"), ("Stage", tb_, "#0f766e")]
+            marks = {"Prod": fa_, "Stage": fb_}
+        msg_lines = []  # (label or None, text, label colour, red flags of the line's characters or None)
         for label, value, colour in rows_txt:
-            wrapped = c.wrap(re.sub(r"\.{4,}", " ", f"{label}: {value}"), 9)
-            msg_lines.append((label, wrapped[0][len(label) + 2:], colour))
-            msg_lines += [(None, ln, colour) for ln in wrapped[1:]]
+            value = re.sub(r"\.{4,}", " ", value)
+            wrapped = c.wrap(f"{label}: {value}", 9)
+            fl, at = marks.get(label), 0
+            for n, ln in enumerate(wrapped):
+                text = ln[len(label) + 2:] if n == 0 else ln
+                red = None
+                if fl is not None and value[at:at + len(text)] == text:
+                    red = fl[at:at + len(text)]
+                    at += len(text) + 1  # the space the line was broken at
+                else:
+                    fl = None  # the wrapped text no longer lines up with the flags: plain from here on
+                msg_lines.append((label if n == 0 else None, text, colour, red))
         a = f.get("aem")
         need = 12 + len(msg_lines) * 12.2 + (11 if a else 0) + (img_h + 16 if img_h else 0) + 8
         need = min(need, c.PAGE.height - 2 * c.M - 60)  # longer than a page: it continues on the next one
@@ -868,16 +960,26 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
             _section_header(c, s, cont=True)
         pa = f"p.{f['baseline'][0]['page'] + 1}" if f["baseline"] else "—"
         pc = f"p.{f['candidate'][0]['page'] + 1}" if f["candidate"] else "—"
-        c.runs(([("CRITICAL  ", "#b42318", True)] if f.get("critical") else [])
+        c.runs(([(f["bug"] + "  ·  ", "#1d2330", True)] if f.get("bug") else [])
+               + ([("CRITICAL  ", "#b42318", True)] if f.get("critical") else [])
                + [(SEV_LABEL.get(f["severity"], f["severity"].upper()), SEV_COLOR[f["severity"]], True), ("  ·  ", "#6a7282", False),
                 (f.get("issue") if f.get("genuine") else f"{CAT_LABEL.get(f.get('category'), f['check'])} · {', '.join(f.get('types', []))}",
                  f.get("color") or CAT_COLOR.get(f.get("category"), "#333333"), True),
                 (f"  ·  #{f['id']}  ·  prod {pa} ↔ stage {pc}", "#6a7282", False)], 8)
-        for label, line, colour in msg_lines:
+        for label, line, colour, red in msg_lines:
             if not c.room(12.2):
                 c.new_page()
                 _section_header(c, s, cont=True)
-            c.runs(([(f"{label}: ", colour, True)] if label else []) + [(line, "#1d2330", False)], 9)
+            body = [(line, "#1d2330", False)]
+            if red and any(red):
+                body, k = [], 0
+                while k < len(line):
+                    m = k
+                    while m < len(line) and red[m] == red[k]:
+                        m += 1
+                    body.append((line[k:m], "#d92d20" if red[k] else "#1d2330", bool(red[k])))
+                    k = m
+            c.runs(([(f"{label}: ", colour, True)] if label else []) + body, 9)
         if a:
             near = f"  ·  near {a['element']}" + (f" “{a['element_title']}”" if a.get("element_title") else "") if a.get("element") else ""
             c.runs([("AEM topic  ", "#6a7282", True), (a.get("topic") or "", "#1d2330", False), ("  ·  ", "#6a7282", False),

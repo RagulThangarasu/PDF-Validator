@@ -68,6 +68,8 @@ label_words = ["note", "tip", "hint", "warning", "important", "caution", "danger
 # A note with only its icon (no label) means the label its icon stands for: a stage label that matches prod's
 # icon is not "a label on one side only"; one that does not is "callout type differs" (icon kinds: callout_icons.py)
 callout_icons = { pencil = ["note"], lightbulb = ["tip"], exclamation = ["important"], triangle = ["warning"] }
+check_callout_icon_label = false  # icons are only compared for look, size, broken/missing and pixelation -
+                                   # not for which callout label they imply
 min_diff_words = 1
 severity = "warning"          # individual text diffs (they are counted in the %)
 spacing_severity = "warning"
@@ -120,7 +122,9 @@ ignore_link_text_missing = true    # when missing prod text is found in stage li
 [toc]
 # The printed table of contents is compared on its own: entries, levels (from indentation) and
 # page numbers. Its text is excluded from the content check.
-max_level = 3                 # validate TOC entries up to this level (1 = chapters, 2, 3 = sub-sections); 0 = all
+max_level = 0                 # validate TOC entries up to this level (1 = chapters, 2, 3 = sub-sections); 0 = all
+validate_deeper_levels = true # an entry on a level prod's TOC does not list (stage: 3 or 4 levels, prod: 2) is checked
+                              # against prod's heading of the same title: it exists, its level, order and page number
 min_entries = 4               # a page is a TOC page when it has >= N "Title ...... 12" lines
 max_front_fraction = 0.25     # ... and sits in the first 25 % of the document
 title_match_threshold = 0.8   # fuzzy score to pair prod and stage entries
@@ -168,9 +172,9 @@ ignore_center_placement = true  # a centred graphic only moving between inline a
                               # different/missing text is still reported
 check_wrap = false            # true = report the same text wrapping to the next line at a different word (line-wrap)
 check_bullets = true          # bullet / numbered list markers (missing, different, numbering) - see list_marker
-check_bullet_position = false # bullet / numbered list ALIGNMENT (marker position, gap to the text, hanging
-                              # indent): off - a narrow table cell / reflow moves these around with no content
-                              # change, so they are not reported at all (marker presence/kind above still is)
+check_bullet_position = true  # bullet / numbered list ALIGNMENT (marker position, gap to the text, hanging
+                              # indent): on - a mis-nested / wrongly indented item (e.g. "2." sitting under "1."'s
+                              # text column instead of level with it) is a real layout defect, not just reflow
 compare_bullets_with_prod = true  # bullet alignment (marker position, gap to the text, hanging indent) compared with
                               # prod even when compare_with_prod = false (also in tables and Note / Warning boxes);
                               # only takes effect when check_bullet_position = true
@@ -234,6 +238,10 @@ report_types = ["missing image", "broken image", "image changed", "image blacked
                 # in another order, a picture inline vs on its own line, out of its note / box, softer than prod's
                 "icon missing inline", "icon differs", "icon pixelated",   # icons inside a sentence
                 "callout numbers missing", "image label missing", "leader lines missing"]   # picture text: image report only
+picture_text = false          # what is inside a picture is not compared: no text, table rows, callout numbers,
+                              # labels or leader lines read from a picture (an embedded image, an illustration or a
+                              # screenshot drawn as vectors) - only its red overlay (highlight marks) is checked.
+                              # true = the picture's numbers / labels / leader lines go to the image report again
 alignment_sides_only = true   # image alignment: only a complete move left <-> right (not centred / full width / indented)
 pixelated_vs_vector = false   # "image pixelated" where prod draws the artwork as vectors and stage embeds a bitmap
                               # under pixelated_ppi: not reported (nothing of prod's to compare the resolution with).
@@ -271,6 +279,32 @@ max_findings_per_check = 0    # per check and section; 0 = no cap, every finding
 crawl = true                  # validate every page of the guide: follow the start page's links to the other
                               # pages under the same folder, in reading order, joined into one document
 max_pages = 0                 # stop after this many pages (0 = no limit)
+concurrency = 6               # pages fetched at once (separate browser tabs) once the whole guide's page list is
+                              # known from its left navigation (one page, one browser each - a tab is its own
+                              # OS thread, so pages do not wait on each other's network round trip); 1 = one at a
+                              # time, as before. Not used when the guide has no left navigation (its links are
+                              # followed one page at a time as they are found)
+
+# What a web page run reports - only these kinds of issue (a web guide is not validated like a stage PDF).
+# [] = everything a PDF run reports.
+report_types = [
+  # content missing, extra or changed; a whole section missing / extra; content twice
+  "missing text", "extra text", "changed text", "missing section", "extra section", "duplicate content",
+  # links: not working, missing, going somewhere else
+  "broken link", "missing link", "link to wrong section", "link target differs", "link lands elsewhere",
+  # pictures: missing, broken, extra, another picture, size, alignment / placement
+  "missing image", "broken image", "extra image", "image changed", "image smaller", "image bigger",
+  "image alignment", "placement", "image outside box", "image distorted", "image order",
+  # icons: missing, another icon, broken / low resolution, in text and in table rows
+  "icon missing inline", "icon differs", "icon pixelated", "icon missing", "icon extra", "icon order", "icon above text",
+  # tables: a table, header, row or cell missing, merged or split
+  "missing table", "missing header", "missing row", "rows merged", "row split", "cells merged", "cells split",
+  "tables merged", "cell differs",
+  # layout structure: text stacked in prod set in columns (or the other way), items of a row not level
+  "stacked to columns", "row alignment", "caption row",
+  # a picture grid laid out differently; list numbers of one list not at one left edge; list markers
+  "picture row", "list alignment", "bullet", "bullet marker", "numbering style", "numbering format", "numbering sequence",
+]
 
 [site]                        # web page runs: the chrome around the content (see pdfval/site_nav.py)
 enabled = true                # left navigation vs the PDF's L1 TOC, its links, Download PDF, next / previous
@@ -279,6 +313,7 @@ enabled = true                # left navigation vs the PDF's L1 TOC, its links, 
 # do not find the element on a site; empty = found automatically
 nav = ""                      # the left navigation (table of contents)
 on_this_page = ""             # the right-hand list of the page's headings
+on_this_page_max_level = 4    # every heading of the page down to this level (h2, h3, h4) must be in "On this page"
 next = ""                     # the next-topic link
 prev = ""                     # the previous-topic link
 download = ""                 # the Download PDF link / button
@@ -321,17 +356,24 @@ types = [
   "reordered", "order differs", "link quotes",
   # table of contents: entries missing / added, title or level differs, wrong page number, the TOC's own heading
   "missing entry", "extra entry", "title differs", "level differs", "wrong page", "heading differs",
+  "toc deeper levels",   # stage's TOC lists levels prod's does not: one entry, after each was checked against prod's headings
   # notes (callouts) that differ (not "callout style" - a document-wide bar/box redesign is house
   # style, not a defect: see [ignore] types)
   "icon missing", "icon extra", "icon order", "icon above text",   # icons in table rows (missing, swapped, placed above the text)   # a NOTE: label vs an icon only is house style (info, full report only)
   "callout type differs",   # stage labels a note as another type than prod's icon shows (WARNING icon, IMPORTANT label)
   "row alignment",   # side-by-side items of a prod row at different heights in stage
   "stacked to columns",   # a list broken into columns: text stacked in prod, side by side in stage
+  "list alignment",       # the numbers of one numbered list at one left edge in prod, at different indents in stage
+  "picture row",          # a picture grid laid out differently: side by side in prod, stacked in stage (or the reverse)
   # tables: header (missing / not centred as in prod), rows and cells merged or split
-  "missing header", "table header alignment", "rows merged", "row split", "cells merged", "cells split",
+  "missing header", "rows merged", "row split", "cells merged", "cells split",
   "missing row", "missing table", "tables merged", "cell differs",
   "icon missing inline", "icon differs", "icon pixelated",   # icons inside a sentence: missing, another icon, low resolution
   "caption row",                            # captions of one row of pictures: level in prod, not in stage
+  "missing image label",                    # a picture's caption / label missing in stage: live text that
+                                             # belongs beside the picture, not drawn into it (not "label in
+                                             # picture" / "text in image" - text drawn inside the picture itself,
+                                             # still not reported: [genuine] report_image_labels / report_visually_present)
   "cell border",                            # a line between two cells of the prod table that stage does not draw
 ]
 data_missing_words = 1        # "missing text" is genuine when >= N of its words are absent from stage (1 = any)
@@ -368,6 +410,10 @@ types = [
   "superscript",                            # the same text raised / not raised (MacBook® vs MacBook^®): looks the same
   "case", "punctuation", "case + punctuation",  # uppercase/lowercase and punctuation-only wording differences
   "callout style",                          # a note drawn another way throughout (bar vs filled box): house style
+  "order differs",                          # a section moved to another position: its content is still there
+  "table header alignment",                 # a table header cell not centred: confirmed real (narrow / numeric
+                                             # columns, e.g. "No.") but the site's own template issue, not
+                                             # reported per table
 ]
 in_table_cells = ["paragraph break", "line-wrap",   # text wrapping inside table cells
                   "emphasis", "indent", "text-align", "spec text-align"]  # table layout: header weight, alignment

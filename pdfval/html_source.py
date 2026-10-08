@@ -61,11 +61,71 @@ _EXTRACT_JS = r"""
   const words = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const range = document.createRange();
+  // ---- list markers. A browser draws "1." / "•" itself (CSS), so they are not text of the page; the PDF prints
+  // them. Each list item's marker is worked out here and read as a word in front of the item's text.
+  const roman = n => { const t = [[1000,'m'],[900,'cm'],[500,'d'],[400,'cd'],[100,'c'],[90,'xc'],[50,'l'],[40,'xl'],[10,'x'],[9,'ix'],[5,'v'],[4,'iv'],[1,'i']];
+    let o = ''; for (const [v, r] of t) while (n >= v) { o += r; n -= v; } return o; };
+  const alpha = n => { let o = ''; while (n > 0) { n--; o = String.fromCharCode(97 + n % 26) + o; n = Math.floor(n / 26); } return o; };
+  const ordinal = li => {  // the item's number in its list: start / value attributes, and a CSS counter-reset on the list
+    const list = li.parentElement;
+    let n = 1;
+    if (list && list.tagName === 'OL' && list.hasAttribute('start')) n = +list.getAttribute('start') || 1;
+    else if (list) { const m = /(?:^|\s)[\w-]+\s+(-?\d+)/.exec(getComputedStyle(list).counterReset || ''); if (m && +m[1] > 0) n = +m[1] + 1; }
+    for (const sib of (list ? list.children : [])) {
+      if (sib.tagName !== 'LI') continue;
+      if (sib.hasAttribute('value') && +sib.getAttribute('value')) n = +sib.getAttribute('value');
+      if (sib === li) return n;
+      n++;
+    }
+    return n;
+  };
+  const numbered = (type, n) => type === 'decimal' ? '' + n : type === 'decimal-leading-zero' ? ('' + n).padStart(2, '0') :
+    /^lower-(alpha|latin)$/.test(type) ? alpha(n) : /^upper-(alpha|latin)$/.test(type) ? alpha(n).toUpperCase() :
+    type === 'lower-roman' ? roman(n) : type === 'upper-roman' ? roman(n).toUpperCase() : null;
+  const markerOf = li => {
+    const cs = getComputedStyle(li);
+    if (cs.display === 'list-item' && cs.listStyleType && cs.listStyleType !== 'none') {
+      const t = cs.listStyleType;
+      const num = numbered(t, ordinal(li));
+      if (num !== null) return num + '.';
+      if (/^(disc|circle|square|disclosure-(open|closed))$/.test(t)) return '\u2022';
+      const str = /^"(.*)"$/.exec(t);
+      return str ? str[1].trim() : '\u2022';
+    }
+    // a marker drawn with ::before: a counter ("1.", "a)") or a fixed character ("•", "-")
+    for (const pseudo of ['::before', '::marker']) {
+      const c = getComputedStyle(li, pseudo).content;
+      if (!c || c === 'none' || c === 'normal') continue;
+      const ctr = /counters?\(\s*[\w-]+\s*(?:,\s*"[^"]*")?\s*(?:,\s*([\w-]+))?\s*\)/.exec(c);
+      const lits = [...c.matchAll(/"([^"]*)"/g)].map(m => m[1]).join('');
+      if (ctr) { const num = numbered(ctr[1] || 'decimal', ordinal(li)); return num === null ? null : num + (lits.trim() || '.'); }
+      if (lits.trim() && lits.trim().length <= 3) return lits.trim();
+    }
+    return null;
+  };
+  const marked = new Set();
   let node;
   while ((node = walker.nextNode())) {
     const el = node.parentElement;
     if (!el || excluded(el) || !visible(el) || !node.data.trim()) continue;
     const st = styleOf(el), block = blockOf(el);
+    // the first text of a list item: its marker comes first, just left of it on the same line
+    const li = el.closest('li');
+    if (li && root.contains(li) && !marked.has(li)) {
+      marked.add(li);
+      const mk = markerOf(li);
+      const lead = /\S/.exec(node.data);
+      // (a number typed into the text itself - "1. Press OK" in a list without markers - is already a word)
+      if (mk && lead && !node.data.trim().startsWith(mk)) {
+        range.setStart(node, lead.index); range.setEnd(node, lead.index + 1);
+        const r0 = range.getClientRects()[0];
+        if (r0) {
+          const w = Math.max(st.size * 0.5 * mk.length, st.size * 0.5);
+          const x1 = r0.left - st.size * 0.45, x0 = x1 - w;
+          words.push([mk, x0 + sx, r0.top + sy, x1 + sx, r0.bottom + sy, st.family, st.weight, st.italic, st.size, st.color, block, 0, '', 1]);
+        }
+      }
+    }
     const h = el.closest('h1,h2,h3,h4,h5,h6');
     const a = el.closest('a[href]');
     // a character of a script written without spaces (Chinese, Japanese, Thai, ...) is its own word
@@ -106,6 +166,20 @@ _EXTRACT_JS = r"""
     if (!(boxed || /^(FIGURE|BLOCKQUOTE|PRE|LI|P|DL|DT|DD|H[1-6])$/.test(e.tagName) || e.getAttribute('role') === 'note') || !visible(e)) continue;
     const r = rect(e);
     if (r[3] - r[1] > 4) keep.push([r[1], /^H[1-6]$/.test(e.tagName) ? r[3] + 40 : r[3]]);
+  }
+  // the "Previous topic / Next topic" pager bar: wherever it sits (often in a <nav>/<footer>, excluded
+  // from `root`'s own text), a slice must still never cut through it - the reader needs to see the
+  // whole bar, and site_nav's own next/previous cross-check reads it from the live page, not a slice
+  const pagerRe = /\bnext\b|\bprev(ious)?\b/i;
+  for (const a of document.querySelectorAll('a[href]')) {
+    if (!visible(a) || !pagerRe.test((a.innerText || '') + ' ' + (a.getAttribute('rel') || '') + ' ' + (a.getAttribute('aria-label') || ''))) continue;
+    let e = a;
+    for (let p = a.parentElement; p && p !== document.body; p = p.parentElement) {
+      if ([...p.querySelectorAll('a[href]')].length > 2) break;  // past the pager's own small container
+      e = p;
+    }
+    const r = rect(e);
+    if (r[3] - r[1] > 4 && r[3] - r[1] < 300) keep.push([r[1], r[3]]);
   }
   const de = document.documentElement;
   return { title: document.title, width: Math.max(de.clientWidth, 320), height: Math.max(de.scrollHeight, document.body.scrollHeight),
@@ -164,7 +238,7 @@ def _sign_in(page, user: str, password: str, timeout: int, settle_ms: int) -> No
 
 
 _SIGN_IN_MS = 30_000  # a sign-in that has not left the login form by then has failed
-_IDLE_MS = 8_000  # at most this long for background requests to calm down after a page has loaded
+_IDLE_MS = 4_000  # at most this long for background requests to calm down after a page has loaded
 
 
 # Resolves when the page is ready to read: every image has loaded (or failed), the fonts are in and the DOM
@@ -206,6 +280,24 @@ def _settle(page, extra_ms: int = 0) -> None:
         page.wait_for_timeout(min(extra_ms, 5_000))
 
 
+# requests of the guide's own server that are not part of the page's content and hold every page up: AEM's
+# ContextHub (personalisation) script is generated on the server for each page - about 1.5 s of the 2 s a page
+# takes to be ready - and blocks the page until it arrives
+# (the sign-in form's own requests - its CSRF token - must load: only the personalisation script is left out)
+_NOT_CONTENT = re.compile(r"/etc/cloudsettings\.kernel\.js/|/contexthub(\.|/|$)", re.I)
+
+
+def _filter_request(route, own: str) -> None:
+    """Do not load what is not the guide: other sites' scripts, trackers, chat widgets and videos, and the server's
+    own personalisation script (_NOT_CONTENT). The guide's files, and every stylesheet, font and image, load."""
+    rq = route.request
+    if _NOT_CONTENT.search(rq.url) or (rq.resource_type in ("script", "xhr", "fetch", "media", "websocket", "eventsource")
+                                      and urlsplit(rq.url).netloc not in ("", own)):
+        route.abort()
+    else:
+        route.continue_()
+
+
 def _goto(page, url: str, timeout: int):
     """Open a page: wait for its HTML, then a bounded time for the rest (_settle). Waiting for the "load"
     event can last forever on an AEM author page (a request that never finishes)."""
@@ -231,9 +323,9 @@ def _launch_hint(e: Exception) -> str:
 
 
 def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEFAULT_EXCLUDE,
-            width: int = 1280, wait_ms: int = 1500, slice_h: int = 1800, progress=None,
+            width: int = 1440, wait_ms: int = 500, slice_h: int = 1800, progress=None,
             user: str = "", password: str = "", crawl: bool = False, max_pages: int = 0,
-            site: dict | None = None, toc_l1: list[str] | None = None) -> tuple[Doc, dict]:
+            site: dict | None = None, toc_l1: list[str] | None = None, concurrency: int = 1) -> tuple[Doc, dict]:
     """Render `url`, extract its structure and write <out_dir>/candidate_source.pdf. Returns (Doc, info).
     user/password (or a login in the URL): sent as HTTP basic auth and, when the site
     shows a sign-in form instead of the page, typed into that form.
@@ -259,7 +351,7 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
     timeout = 90_000
     import time as _time
     t_start = _time.monotonic()
-    timing = {"open_s": 0.0, "load_s": 0.0, "read_s": 0.0, "site_s": 0.0, "build_s": 0.0}
+    timing = {"open_s": 0.0, "load_s": 0.0, "read_s": 0.0, "parallel_s": 0.0, "site_s": 0.0, "build_s": 0.0}
     captured, skipped = [], []
     chromes, visited, site_raw = [], {}, None
     with sync_playwright() as p:
@@ -269,13 +361,22 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
             raise RuntimeError(_launch_hint(e)) from None
         try:
             page = browser.new_page(viewport={"width": width, "height": 1000}, device_scale_factor=1, http_credentials=creds)
+            # other sites' scripts, trackers, chat widgets and videos are not part of the guide: not loaded (each
+            # page waited for them). The guide's own files, and every stylesheet, font and image, load as usual
+            own = urlsplit(url).netloc
+            page.route("**/*", lambda route: _filter_request(route, own))
             report(0.02, f"Opening {url}")
             t0 = _time.monotonic()
             _open(page, url, user, password, timeout, wait_ms, report)
             timing["open_s"] = _time.monotonic() - t0
+            # a parallel worker's own browser starts signed out - a session cookie (set by a login form,
+            # not http_credentials) would not carry over otherwise, and every one of its pages would hit
+            # the same login wall this page just got past
+            session_state = page.context.storage_state()
             queue, seen = [url], {_page_key(url)}
             titles: dict[str, str] = {}  # page key -> its left-navigation entry
             nav_led, ordered = False, not crawl
+            parallel_pending = False  # the rest of the queue is known complete and still to be fetched, in parallel
             not_in_nav: list[str] = []
             nav_toc: list[dict] = []  # the left navigation of the first captured page: the stage TOC
             k = 0
@@ -300,19 +401,34 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                 if crawl and not ordered:  # first page: decide which pages make up the guide, in which order
                     ordered = True
                     plan, not_in_nav = _nav_plan(page, site or {}, root, toc_l1 or [])
+                    order = plan
                     if plan:  # the PDF's L1 TOC, looked up in the left navigation
                         nav_led = True
-                        queue = [l for l, _ in plan]
+                        # the whole guide at once, from the one navigation already read, when there is more
+                        # than one page to fetch and more than one worker to fetch them with
+                        full = _full_nav_order(page, site or {}, root, url) if concurrency > 1 else None
+                        if full:
+                            order = full
+                            parallel_pending = len(full) > 1
+                        queue = [l for l, _ in order]
                     else:  # no navigation to go by: the guide's links, in their order
                         not_in_nav = []
                         links = _guide_links(page, url)
                         if _page_key(url) in {_page_key(l) for l in links}:
                             queue = links
                     seen = {_page_key(l) for l in queue}
-                    titles = {_page_key(l): t for l, t in plan}
+                    titles = {_page_key(l): t for l, t in order}
                     skipped += [{"url": "", "title": t, "reason": "not in the left navigation"} for t in not_in_nav]
                     if _page_key(queue[0]) != _page_key(page.url):
                         continue  # start with the first page of the guide
+                if parallel_pending and k == 1:
+                    parallel_pending = False
+                    k = _dispatch_parallel(queue, titles, k, max_pages, captured, chromes, visited, skipped,
+                                          width=width, creds=creds, session_state=session_state, own=own,
+                                          root=root, exclude=exclude, wait_ms=wait_ms, slice_h=slice_h,
+                                          timeout=timeout, site=site, concurrency=concurrency, report=report,
+                                          timing=timing)
+                    continue
                 if crawl:
                     found = _nav_children(page, site or {}, root) if nav_led else [(l, "") for l in _guide_links(page, url)]
                     new = [(l, t) for l, t in found if _page_key(l) not in seen]
@@ -336,6 +452,12 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                 else:
                     skipped.append({"url": u, "title": titles.get(_page_key(u), ""), "reason": "no text"})
                 k += 1
+            # pages left unopened because the run's page limit was reached: named, so their sections are reported as
+            # "page not opened (Max pages)" - not as content missing from the guide
+            if max_pages and k < len(queue):
+                skipped += [{"url": l, "title": titles.get(_page_key(l), ""),
+                             "reason": f"not opened: the run's page limit (Max pages = {max_pages}) was reached"}
+                            for l in queue[k:]]
             if site is not None and chromes:
                 report(0.86, "Checking the site navigation")
                 t0 = _time.monotonic()
@@ -376,8 +498,10 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
             "nav_toc": nav_toc,
             "crawl_by": "left navigation (PDF L1 TOC)" if nav_led else "guide links" if crawl else "",
             "skipped": skipped}
-    # where the capture's time went (seconds): signing in / first page, opening the other pages, reading them
-    # (scroll, structure, screenshots), the site-navigation link checks, building the document
+    # where the capture's time went (seconds): signing in / first page, opening the other pages one at a time
+    # (only the guide-links path still does that), reading them (scroll, structure, screenshots), the rest of
+    # the queue fetched in parallel (parallel_s - wall time, several pages at once, not summed per page), the
+    # site-navigation link checks, building the document
     timing["build_s"] = _time.monotonic() - t_build
     info["timing"] = {**{k: round(v, 1) for k, v in timing.items()}, "total_s": round(_time.monotonic() - t_start, 1),
                       "web_pages": len(captured)}
@@ -466,6 +590,131 @@ async (step) => {
   }
 }
 """
+
+
+def _full_nav_order(page, cfg: dict, root: str, start_href: str) -> list[tuple[str, str]] | None:
+    """Every page of the guide, in the order its left navigation lists them, read once from the one page
+    already open: the left navigation of an AEM Guides-style site lists the whole tree on every page (not
+    just the branch open at the time), which is exactly what the "same navigation on every page" / whole-TOC
+    checks already assume - so the rest of the guide does not have to be visited one page at a time just to
+    find out it exists. None when the navigation does not look complete enough to trust (fewer than 2 pages)."""
+    items = _nav_items(page, cfg, root)
+    seen, out = {_page_key(start_href)}, [(start_href, "")]
+    for it in items:
+        k = _page_key(it["href"])
+        if k not in seen:
+            seen.add(k)
+            out.append((it["href"].split("#")[0], it["text"]))
+    return out if len(out) > 1 else None
+
+
+def _visit_in_tab(page, u: str, root: str, exclude: str, wait_ms: int, slice_h: int, timeout: int,
+                  site: dict | None, report=lambda f, m: None, frac: float = 0.5) -> dict:
+    """Load and read one page in an already-open tab: the same per-page work the serial crawl does (retry a
+    gateway hiccup once, skip a login wall or an HTTP error), returned instead of appended straight to the
+    document so a parallel worker's tab can run this with no other state to share."""
+    resp = _goto(page, u, timeout)
+    if resp is not None and resp.status >= 500:
+        page.wait_for_timeout(2_000)
+        resp = _goto(page, u, timeout)
+    if (resp is not None and resp.status >= 400) or _login_form(page):
+        bad = f"HTTP {resp.status}" if resp is not None and resp.status >= 400 else "login form"
+        return {"skipped": bad, "status": resp.status if resp is not None else 0, "url": page.url}
+    data, slices = _read_page(page, root, exclude, wait_ms, slice_h, report, frac)
+    out = {"data": data, "slices": slices, "url": page.url}
+    if site is not None:
+        out["chrome"] = site_nav.read_chrome(page, site, root)
+    return out
+
+
+def _visit_many(urls: list[tuple[str, str]], *, width: int, creds, session_state: dict, own: str, root: str,
+                exclude: str, wait_ms: int, slice_h: int, timeout: int, site: dict | None,
+                on_page=lambda u, t, r: None) -> list[tuple[str, str, dict]]:
+    """One worker's share of the queue: its own Playwright and browser (sync Playwright is not safe to share
+    across threads), visited one page after another in its own tab. Returns [(url, title, result), ...], one
+    per url, in the order given. session_state: the first page's cookies (set by its login form, if it had
+    one) and local storage, so this fresh browser is signed in exactly as that page is, not signed out.
+    on_page: called (from this worker's own thread) right after each page, not only once the whole chunk is
+    done - so progress moves with every page finished, from whichever worker finishes it, not in one jump
+    per worker when its last page completes."""
+    from playwright.sync_api import sync_playwright
+    out = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": width, "height": 1000}, device_scale_factor=1,
+                                    http_credentials=creds, storage_state=session_state or None)
+            page.route("**/*", lambda route: _filter_request(route, own))
+            for u, t in urls:
+                r = _visit_in_tab(page, u, root, exclude, wait_ms, slice_h, timeout, site)
+                out.append((u, t, r))
+                on_page(u, t, r)
+        finally:
+            browser.close()
+    return out
+
+
+def _dispatch_parallel(queue: list[str], titles: dict[str, str], k: int, max_pages: int, captured: list,
+                       chromes: list, visited: dict, skipped: list, *, width: int, creds, session_state: dict,
+                       own: str, root: str, exclude: str, wait_ms: int, slice_h: int, timeout: int,
+                       site: dict | None, concurrency: int, report, timing: dict) -> int:
+    """The rest of the queue (page 0 is already read, on the caller's own tab), fetched by several workers
+    at once instead of one page after another; `captured` / `chromes` / `visited` / `skipped` are filled in
+    queue order, exactly as the one-page-at-a-time loop would have left them. Returns the new `k`: the end of
+    the queue, unless `max_pages` cut it short - then the caller's own "page limit reached" labelling of
+    `queue[k:]` (after its loop) still runs, the same as it would for the one-page-at-a-time path."""
+    import threading
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    t0 = _time.monotonic()
+    rest = queue[k:]
+    if max_pages:
+        rest = rest[:max(0, max_pages - len(captured))]
+    end = k + len(rest)  # queue[end:] is unopened, same as the one-page-at-a-time path leaving k there
+    if rest:
+        n = max(1, min(concurrency, len(rest)))
+        chunks = [rest[i::n] for i in range(n)]  # interleaved: one slow page does not stall a whole third of the guide
+        results: dict[str, tuple[str, dict]] = {}
+        lock = threading.Lock()
+        done = 0
+
+        def on_page(u, t, r):
+            nonlocal done
+            with lock:  # several workers call this at once; one page's progress at a time, not lost or garbled
+                results[_page_key(u)] = (t, r)
+                done += 1
+                report(0.05 + 0.8 * done / max(len(rest), 1), f"Page {done}/{len(rest)} ({n} at a time)")
+
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            futs = [ex.submit(_visit_many, [(u, titles.get(_page_key(u), "")) for u in chunk],
+                              width=width, creds=creds, session_state=session_state, own=own, root=root,
+                              exclude=exclude, wait_ms=wait_ms, slice_h=slice_h, timeout=timeout, site=site,
+                              on_page=on_page) for chunk in chunks if chunk]
+            for fut in as_completed(futs):
+                fut.result()  # surfaces a worker's exception here rather than losing it silently
+        for u in rest:
+            t, r = results.get(_page_key(u), ("", None))
+            if r is None:
+                continue  # scheduled but a worker never got to it (should not happen; nothing lost, just not in this run)
+            if r.get("skipped"):
+                skipped.append({"url": u, "title": t, "reason": r["skipped"]})
+                visited[site_nav.key(u)] = {"status": r.get("status", 0), "url": r.get("url", u),
+                                            "error": r["skipped"], "crawled": True}
+                continue
+            data, slices = r["data"], r["slices"]
+            if site is not None and "chrome" in r:
+                ch = r["chrome"]
+                chromes.append(ch)
+                visited[site_nav.key(u)] = visited[site_nav.key(r["url"])] = {
+                    "status": 200, "url": r["url"], "title": ch.get("title", ""), "h1": ch.get("h1", ""),
+                    "ids": ch.get("ids") or [], "crawled": True}
+            if data["words"]:
+                captured.append((r["url"], data, slices))
+            else:
+                skipped.append({"url": u, "title": t, "reason": "no text"})
+    timing["parallel_s"] = timing.get("parallel_s", 0.0) + (_time.monotonic() - t0)
+    return end
 
 
 def _read_page(page, root: str, exclude: str, wait_ms: int, slice_h: int, report, frac: float):

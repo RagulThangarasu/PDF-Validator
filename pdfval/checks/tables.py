@@ -639,8 +639,8 @@ def check(u: Unit) -> list[Finding]:
     findings: list[Finding] = []
     rtext = lambda d, r, n=14: snippet(d, r.idx, n)
 
-    def add(sev, msg, a_locs, b_locs, kind, critical=False, a_at=None, b_at=None):
-        findings.append(Finding("tables", sev, msg, a_locs, b_locs, {"kind": kind}, baseline_at=a_at,
+    def add(sev, msg, a_locs, b_locs, kind, critical=False, a_at=None, b_at=None, detail=None):
+        findings.append(Finding("tables", sev, msg, a_locs, b_locs, {"kind": kind, **(detail or {})}, baseline_at=a_at,
                                 candidate_at=b_at, critical=critical, types=[kind]))
 
     # ---- rows: missing / split / merged
@@ -671,7 +671,10 @@ def check(u: Unit) -> list[Finding]:
         if in_text or paired:
             continue  # the row's text exists in stage, just not inside a detected table row
         add(tcfg.get("missing_row_severity", "error"), f"Table row missing in stage: “{rtext(A, r)}” (prod p.{r.page + 1})",
-            [Loc(r.page, r.box)], [], "missing row", critical=True, b_at=al.loc_in_b(r.idx[0]))
+            [Loc(r.page, r.box)], [], "missing row", critical=True, b_at=al.loc_in_b(r.idx[0]),
+            # so a later pass can check the row is not just baked into a stage picture (a button /
+            # legend bar drawn under a device mockup, read as a one-row table)
+            detail={"baseline_text": snippet(A, r.idx)})
         missing_row[k] = findings[-1]
     for m, ks in target.items():
         ks = [k for k in ks if rows_a[k].table == rows_a[ks[0]].table]
@@ -740,7 +743,10 @@ def check(u: Unit) -> list[Finding]:
             else:
                 add(tcfg.get("missing_table_severity", "error"),
                     f"Table missing in stage (prod p.{t.page + 1}, {len(t.rows)} rows: “{rtext(A, t.rows[0], 8)}”)",
-                    [Loc(t.page, t.bbox)], [], "missing table", critical=True, b_at=al.loc_in_b(t.rows[0].idx[0]))
+                    [Loc(t.page, t.bbox)], [], "missing table", critical=True, b_at=al.loc_in_b(t.rows[0].idx[0]),
+                    # the whole table's text, so a later pass can check it is not just baked into a stage
+                    # picture (a device's on-screen-display panel set as a photo instead of a real table)
+                    detail={"baseline_text": snippet(A, [i for r in t.rows for i in r.idx])})
                 # its rows are part of this one finding, not each a "row missing" of their own
                 for k in [k for k, r in enumerate(rows_a) if r.table == t.key and k in missing_row]:
                     if missing_row[k] in findings:
@@ -876,9 +882,8 @@ def _icons_in(doc: Doc, row: TRow) -> list:
 
 def _row_icons(u: Unit, rows_a: list[TRow], rows_b: list[TRow], fwd: dict, target: dict) -> list[Finding]:
     """The icons in each table row, prod against stage (rows paired one to one): an icon missing or extra in
-    stage, the icons in another order (“⌄ / ⌃” in prod, “⌃ / ⌄” in stage), and an icon set above its text in
-    stage where prod sets it beside the text in a column of its own. One finding per kind and table."""
-    from .assets import visual_distance
+    stage, and an icon set above its text in stage where prod sets it beside the text in a column of its own.
+    One finding per kind and table."""
     A, B = u.a, u.b
     sev = u.cfg["tables"].get("icon_severity", "warning")
     rtext = lambda d, r: snippet(d, r.label or r.idx, 6)
@@ -899,18 +904,6 @@ def _row_icons(u: Unit, rows_a: list[TRow], rows_b: list[TRow], fwd: dict, targe
         if len(ia) != len(ib):
             groups[(r.table, "icon missing" if len(ia) > len(ib) else "icon extra")].append((r, s, ia, ib))
             continue
-        one_line = lambda ims: max(im.bbox[1] for im in ims) - min(im.bbox[1] for im in ims) <= \
-            0.5 * min(im.bbox[3] - im.bbox[1] for im in ims)
-        # order is compared for icons set side by side (“⌄ / ⌃”); icons inside wrapping text move with the wrap
-        if len(ia) >= 2 and one_line(ia) and one_line(ib):
-            # each prod icon's look-alike in stage: another position = another order
-            dist = [[visual_distance(A, x, B, y) for y in ib] for x in ia]
-            best = [min(range(len(ib)), key=lambda j: dist[i][j]) for i in range(len(ia))]
-            straight = sum(dist[i][i] for i in range(len(ia)))
-            swapped = sum(dist[i][best[i]] for i in range(len(ia)))
-            # swapped only when that pairing is clearly the better one (small look-alike icons are no proof)
-            if len(set(best)) == len(best) and best != list(range(len(ia))) and swapped < straight - 0.08 * len(ia):
-                groups[(r.table, "icon order")].append((r, s, ia, ib))
         # where the icon sits against the row's first text: beside it (prod) vs on a line above it (stage)
         word = lambda d, i: d.words[i].norm and any(c.isalnum() for c in d.words[i].text)
         la = [A.words[i] for i in r.idx if word(A, i)]  # the row's first real word (“/” between two icons is not)
@@ -925,7 +918,6 @@ def _row_icons(u: Unit, rows_a: list[TRow], rows_b: list[TRow], fwd: dict, targe
         eg = "; ".join(f"“{rtext(A, r)}”" for r, *_ in items[:4])
         msg = {"icon missing": f"Icon missing in a table row in stage: {len(items)} row(s) show fewer icons than in prod (e.g. {eg})",
                "icon extra": f"Extra icon in a table row in stage: {len(items)} row(s) show more icons than in prod (e.g. {eg})",
-               "icon order": f"Icons in another order in stage: in {len(items)} table row(s) the icons are swapped (e.g. {eg})",
                "icon above text": f"Icon not beside its text in stage: in {len(items)} table row(s) the icon sits above the "
                                   f"text in the same cell, where prod sets it beside the text in a column of its own (e.g. {eg})"}[kind]
         out.append(Finding("tables", sev, msg,

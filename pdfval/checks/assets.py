@@ -97,6 +97,49 @@ def _has_artwork(doc: Doc, page: int, rect) -> bool:
     return n >= 4
 
 
+def _drawn_pair_geometry(u, x: "Image", y: "Image", acfg: dict, icon_w: float) -> list:
+    """Size and alignment of a picture prod draws as vector artwork and stage embeds as a bitmap - the same
+    comparison a pair of bitmaps gets. (Such a pair used to end as a note "drawn as vectors in prod": in a manual
+    whose prod pictures are all drawn - FrameMaker artwork - no picture was ever measured.)"""
+    out = []
+    rel_x, rel_y = _rel_width(u.a, x), _rel_width(u.b, y)
+    if max(rel_x, rel_y) < icon_w or rel_x <= 0:
+        return out
+    grow = rel_y / rel_x - 1
+    wx, hx = x.bbox[2] - x.bbox[0], x.bbox[3] - x.bbox[1]
+    wy, hy = y.bbox[2] - y.bbox[0], y.bbox[3] - y.bbox[1]
+    # the artwork search may frame the drawing a little loosely: only a difference its height confirms as well.
+    # A web page is another width than the printed page, so there the picture's share of the content width is
+    # what counts (a picture at 23 % of the page where prod has it at 33 %): confirmed when the two boxes have
+    # the same shape (the search framed the drawing right), not by the height in points
+    web = u.b.raw_tables is not None
+    same_shape = hx > 0 and hy > 0 and 0.85 <= (wy / hy) / (wx / hx) <= 1.18
+    confirmed = same_shape if web else (hx > 0 and (hy / hx - 1) * grow > 0 and abs(hy / hx - 1) > 0.5 * abs(grow))
+    if size_reported(rel_x, rel_y, acfg) and confirmed:
+        out.append(Finding(
+            "assets", acfg.get("geometry_severity", "warning"),
+            f"Image {'smaller' if grow < 0 else 'bigger'} in stage by {abs(grow):.0%} (prod p.{x.page + 1} ↔ stage p.{y.page + 1}): "
+            f"{wx:.0f}×{hx:.0f} pt → {wy:.0f}×{hy:.0f} pt, width {rel_x:.0%} → {rel_y:.0%} of content box",
+            [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
+            {"kind": "size", "baseline_width": round(rel_x, 3), "candidate_width": round(rel_y, 3), "drawn_in_prod": True},
+            types=["image smaller" if grow < 0 else "image bigger"]))
+    if acfg.get("check_alignment", True):
+        al_x, al_y = alignment(u.a, x.page, x.bbox), alignment(u.b, y.page, y.bbox)
+        centre = lambda doc, im: ((im.bbox[0] + im.bbox[2]) / 2 - doc.left(im.page)) / max(doc.right(im.page) - doc.left(im.page), 1)
+        shift = abs(centre(u.a, x) - centre(u.b, y))
+        side = lambda a: a.split()[0] if a.split() and a.split()[0] in ("left", "right") else None
+        sides_ok = not acfg.get("alignment_sides_only", True) or (side(al_x) and side(al_y) and side(al_x) != side(al_y))
+        skip_center = acfg.get("ignore_center_alignment", True) and ("centred" in al_x or "centred" in al_y)
+        if al_x != al_y and sides_ok and not skip_center and shift >= acfg.get("align_min_shift", 0.15) \
+                and not (al_x.startswith("indented") and al_y.startswith("indented")):
+            out.append(Finding(
+                "assets", acfg.get("geometry_severity", "warning"),
+                f"Image alignment differs (prod p.{x.page + 1} ↔ stage p.{y.page + 1}): alignment {al_x} → {al_y}",
+                [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)], {"kind": "alignment", "drawn_in_prod": True},
+                types=["image alignment"]))
+    return out
+
+
 def size_reported(rel_x: float, rel_y: float, acfg: dict) -> bool:
     """A size difference worth reporting: the stage picture grew or shrank by more than [assets]
     size_ratio_tolerance (relative) or width_tolerance (as a fraction of the content box) - either
@@ -405,6 +448,126 @@ def _outside(doc: Doc, rng: tuple[int, int], page: int) -> list[tuple[int, tuple
         out.append((page, (0, 0, W, max(0.0, sy - 2))))
     if page == ep:
         out.append((page, (0, ey - 1, W, H)))
+    return out
+
+
+def _stacked_drawings(doc: Doc, rng: tuple[int, int], at, claimed: list, pic: Image, reach: float = 320) -> list | None:
+    """Two or three drawings of this section, one under the other (their x ranges overlap), near the spot `at`
+    and not claimed yet, that together have the shape of the picture `pic` (width : height within 12 %): the
+    parts prod draws separately of what stage shows as one picture."""
+    from .tables import _figure_rects
+    out = [o for _, o in _outside(doc, rng, at.page)]
+    rects = []
+    for r in _figure_rects(doc, at.page):
+        c = pymupdf.Point((r[0] + r[2]) / 2, (r[1] + r[3]) / 2)
+        if r[2] - r[0] < 20 or r[3] - r[1] < 20 or any(pymupdf.Rect(o).contains(c) for o in out):
+            continue
+        if any(pg == at.page and pymupdf.Rect(cr).intersects(pymupdf.Rect(r)) for pg, cr in claimed):
+            continue
+        if abs((r[1] + r[3]) / 2 - (at.bbox[1] + at.bbox[3]) / 2) > reach:
+            continue
+        rects.append(tuple(r))
+    rects.sort(key=lambda r: r[1])
+    shape = (pic.bbox[2] - pic.bbox[0]) / max(pic.bbox[3] - pic.bbox[1], 1)
+    best = None
+    for i in range(len(rects)):
+        for n in (2, 3):
+            group = rects[i:i + n]
+            if len(group) < n:
+                continue
+            if not all(min(a[2], b[2]) - max(a[0], b[0]) > 0.5 * min(a[2] - a[0], b[2] - b[0]) for a, b in zip(group, group[1:])):
+                continue  # not one under the other
+            if any(b[1] - a[3] > 0.5 * max(a[3] - a[1], b[3] - b[1]) for a, b in zip(group, group[1:])):
+                continue  # too far apart to be one picture
+            w = max(r[2] for r in group) - min(r[0] for r in group)
+            h = max(r[3] for r in group) - min(r[1] for r in group)
+            d = abs((w / max(h, 1)) / shape - 1)
+            if d <= 0.12 and (best is None or d < best[0]):
+                best = (d, group)
+    return list(best[1]) if best else None
+
+
+_ROW_ART: dict = {}
+
+
+def _row_artwork(doc: Doc, at, claimed: list) -> tuple | None:
+    """The artwork drawn in the other cells of the table row that holds the spot `at` (the row's text): the box
+    of the vector shapes inside one of those cells - its borders aside - when it is a real drawing (several
+    shapes, at least 15 x 12 pt) that no picture has claimed yet. None when the spot is in no table row."""
+    key = (doc.path, at.page)
+    if key not in _ROW_ART:
+        try:
+            pdf = _DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+            pg = pdf[at.page]
+            rows = [[tuple(c) for c in r.cells if c] for tb in pg.find_tables().tables for r in tb.rows]
+            shapes = [d["rect"] for d in pg.get_drawings() if d.get("rect") is not None]
+            words = [pymupdf.Rect(w[:4]) for w in pg.get_text("words")]
+        except Exception:
+            rows, shapes, words = [], [], []
+        _ROW_ART[key] = (rows, shapes, words)
+    rows, shapes, words = _ROW_ART[key]
+    cx, cy = (at.bbox[0] + at.bbox[2]) / 2, (at.bbox[1] + at.bbox[3]) / 2
+    for cells in rows:
+        if len(cells) < 2 or not any(c[0] - 1 <= cx <= c[2] + 1 and c[1] - 1 <= cy <= c[3] + 1 for c in cells):
+            continue
+        for c in cells:
+            if c[0] - 1 <= cx <= c[2] + 1:
+                continue  # the text cell itself
+            cell = pymupdf.Rect(c)
+            inner = pymupdf.Rect(c[0] + 3, c[1] + 3, c[2] - 3, c[3] - 3)
+            if sum(1 for w in words if inner.contains((w.tl + w.br) / 2)) > 6:
+                continue  # a cell of text, not a picture cell
+            art = [r for r in shapes if inner.contains(r) and r.width < 0.98 * cell.width and r.get_area() > 0]
+            if len(art) < 3:
+                continue
+            box = art[0]
+            for r in art[1:]:
+                box = box | r
+            if box.width < 15 or box.height < 12:
+                continue
+            if any(pg == at.page and pymupdf.Rect(cr).intersects(box) for pg, cr in claimed):
+                continue
+            return tuple(box)
+        return None
+    return None
+
+
+_CELL_PICS: dict = {}
+
+
+def cell_pictures(doc: Doc, page: int) -> list[Image]:
+    """The pictures drawn inside table cells on a page (a "name | picture" table: package contents, parts):
+    for every cell that holds several vector shapes and little text, the box of those shapes. The page's own
+    figure detection sees such a table as one big drawing, so its pictures are found here, cell by cell."""
+    key = (doc.path, page)
+    if key in _CELL_PICS:
+        return _CELL_PICS[key]
+    out = []
+    try:
+        pdf = _DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+        pg = pdf[page]
+        shapes = [d["rect"] for d in pg.get_drawings() if d.get("rect") is not None]
+        words = [pymupdf.Rect(w[:4]) for w in pg.get_text("words")]
+        for tb in pg.find_tables().tables:
+            for r in tb.rows:
+                for c in r.cells:
+                    if not c:
+                        continue
+                    cell = pymupdf.Rect(c)
+                    inner = pymupdf.Rect(c[0] + 3, c[1] + 3, c[2] - 3, c[3] - 3)
+                    art = [x for x in shapes if inner.contains(x) and x.width < 0.98 * cell.width and x.get_area() > 0]
+                    if len(art) < 3:
+                        continue
+                    box = art[0]
+                    for x in art[1:]:
+                        box = box | x
+                    inside = [w for w in words if inner.contains((w.tl + w.br) / 2)]
+                    # a picture cell: its text (labels) sits on the artwork, not beside it as a paragraph would
+                    if box.width >= 15 and box.height >= 12 and sum(1 for w in inside if not (box + (-4, -4, 4, 4)).intersects(w)) <= 2:
+                        out.append(Image(page, tuple(box)))
+    except Exception:
+        out = []
+    _CELL_PICS[key] = out
     return out
 
 
@@ -1215,6 +1378,7 @@ def check(u: Unit) -> list[Finding]:
             findings[-1].severity, findings[-1].types = "info", ["image recropped"]
             findings[-1].detail["kind"] = "recropped"
     pending = []  # stage pictures with no artwork found in prod: a drawing of prod's own at the spot, or extra
+    drawn_pairs = []  # (prod drawing, stage bitmap) of the same artwork: measured and placed like any picture pair
     for n, y in enumerate(ib):
         if n in used:
             continue
@@ -1243,6 +1407,9 @@ def check(u: Unit) -> list[Finding]:
                 "assets", vec_sev, f"Same artwork, but drawn as vector/text in prod and an embedded image in stage "
                                    f"(prod p.{at.page + 1} ↔ stage p.{y.page + 1}, match {vec[0]:.0%})",
                 [Loc(at.page, vec[1])], [Loc(y.page, y.bbox)], {"kind": "raster-vs-vector"}))
+            if not icon:
+                drawn_pairs.append((Image(at.page, tuple(vec[1])), y))
+                findings += _drawn_pair_geometry(u, drawn_pairs[-1][0], y, acfg, icon_w)
             continue
         pending.append((y, at, icon))  # after every stage picture had its artwork search (see below)
     for y, at, icon in pending:
@@ -1258,6 +1425,8 @@ def check(u: Unit) -> list[Finding]:
                         "assets", vec_sev, f"Same artwork, but drawn as vector/text in prod and an embedded image in stage "
                                            f"(prod p.{at.page + 1} ↔ stage p.{y.page + 1}, drawn in parts in prod)",
                         [Loc(at.page, whole)], [Loc(y.page, y.bbox)], {"kind": "raster-vs-vector"}))
+                    drawn_pairs.append((xw, y))
+                    findings += _drawn_pair_geometry(u, xw, y, acfg, icon_w)
                     continue
             # prod has a drawing of its own at this spot (vector artwork, e.g. with callout numbers stage's
             # picture lacks), of about the picture's size, not the same artwork: another picture at the same
@@ -1291,11 +1460,35 @@ def check(u: Unit) -> list[Finding]:
                     [Loc(at.page, twin)], [Loc(y.page, y.bbox)], {"kind": "size"},
                     types=["image smaller" if grow < 0 else "image bigger"]))
             continue
+        # prod draws the picture as two or three drawings one under the other (two side views of the monitor),
+        # stage shows them as one picture: together they have the picture's shape - the same picture, not an extra
+        parts = _stacked_drawings(u.a, u.a_range, at, claimed_a, y) if not icon and at is not None else None
+        if parts:
+            box = parts[0]
+            for r in parts[1:]:
+                box = (min(box[0], r[0]), min(box[1], r[1]), max(box[2], r[2]), max(box[3], r[3]))
+            claimed_a.extend((at.page, r) for r in parts)
+            xw = Image(at.page, box)
+            drawn_pairs.append((xw, y))
+            findings += _drawn_pair_geometry(u, xw, y, acfg, icon_w)
+            continue
+        # a picture in a table row (package contents: name | picture): prod's row with the same text holds a
+        # drawing in its picture cell - too plain or too different in line weight for the artwork search (a
+        # puck with two batteries). The picture is there in prod: the same row's picture, not an extra one
+        cell_art = _row_artwork(u.a, at, claimed_a) if not icon and at is not None else None
+        if cell_art:
+            claimed_a.append((at.page, cell_art))
+            xw = Image(at.page, cell_art)
+            drawn_pairs.append((xw, y))
+            findings += _drawn_pair_geometry(u, xw, y, acfg, icon_w)
+            continue
         findings.append(Finding(
             "assets", acfg.get("icons", "warning") if icon else acfg.get("count_severity", "error"),
             f"Extra {kind(icon).lower()} in candidate (stage p.{y.page + 1}, {_rel_width(u.b, y):.0%} of content width)",
             [], [Loc(y.page, y.bbox)], {"kind": "extra", "icon": icon},
             baseline_at=at))
+    # (the drawn pairs are measured above only: the artwork search frames a drawing loosely, too loosely to say
+    # whether it stands inside a note box or in a line of text - the placement check keeps to bitmap pairs)
     u.image_pairs = [(x, y) for x, y, _ in pairs]
     # a matched picture flipped in stage: the hash/correlation above tolerates it (same shapes, same ink
     # mass), so a real left-right or top-bottom flip would otherwise pass as "the same picture" unreported

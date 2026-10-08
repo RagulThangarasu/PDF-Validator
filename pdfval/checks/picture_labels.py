@@ -150,7 +150,10 @@ def check(A: Doc, B: Doc, units: list, cfg: dict) -> dict:
                 elif not (_key(text) and (_key(text) in flat or ocr.found(text, hay))):
                     labels.append(text)
             lead_a = _leader_lines(A, box, [A.words[k] for k in idx])
-            lead_b = _leader_lines(B, y.bbox, [B.words[k] for k in s_idx]) if s_idx else None
+            # (stage's own labels only: one known as a label just because prod has the same text says nothing about
+            # how stage ties it to the picture - its lines may be drawn into the bitmap)
+            own = [k for k in s_idx if k not in getattr(B, "picture_text_paired", ())]
+            lead_b = _leader_lines(B, y.bbox, [B.words[k] for k in own]) if own else None
             lines_missing = lead_b is not None and lead_a >= 1 and lead_b < lead_a
             if not (numbers or labels or lines_missing):
                 continue

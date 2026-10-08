@@ -113,6 +113,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
         from . import genuine as _g
         _g.skip_picture_text(A, cfg)
         _g.skip_picture_text(B, cfg)
+        _g.pair_picture_text(A, B, cfg)  # a label that is picture text on one side is picture text on the other
     labels = cfg["content"].get("label_words") or []
     if labels:  # "Tips" -> "TIPS:", "Note" -> "NOTE:" is house style, not a content change
         normalize.fold_labels(A, labels)
@@ -177,6 +178,9 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
         toc_a.entries = [e for e in toc_a.entries if not skip_sec(e.norm)]
         toc_b.entries = [e for e in toc_b.entries if not skip_sec(e.norm)]
     toc_info, toc_findings = tocmod.compare(toc_a, toc_b, cfg)
+    if cfg.get("toc", {}).get("validate_deeper_levels", True):
+        # entries stage's TOC lists on levels prod's TOC does not have: checked against prod's headings
+        tocmod.validate_deeper_levels(toc_info, toc_findings, A, toc_a, cfg)
     if toc_a.heading and toc_b.heading and normalize_heading(toc_a.heading) != normalize_heading(toc_b.heading):
         toc_findings.insert(0, Finding("toc", "warning", f"TOC heading differs: “{toc_a.heading}” → “{toc_b.heading}”",
                                        detail={"kind": "heading"}, types=["heading differs"]))
@@ -304,6 +308,11 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             end = min((x.word for x in anA if x.word > an.word), default=len(A.words))
             missing_spans.append((pos_a(an.word), pos_a(end), spot, an.title))
             broken = failed_page_of(i)
+            if broken and broken.get("reason", "").startswith("not opened: the run's page limit"):
+                # this section's stage page was never even requested - cut by Max pages, not missing from
+                # the guide - so it is not a content defect: nothing was checked here, nothing to report
+                missing_spans.pop()
+                continue
             # the whole lost section: its word count, its text and every line of it highlighted (heading first)
             body = [k for k in range(an.word, end) if A.words[k].norm] if an.located else []
             if an.located and not body and A.outline:
@@ -413,6 +422,13 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     picture_findings = checks_picture_labels.check(A, B, units, cfg)
     doc_findings += checks_typography.document(B, cfg)  # stage vs the design spec (config/typography.toml)
     genuine_types = set(cfg.get("genuine", {}).get("types", []))
+    if (candidate_meta or {}).get("mode") == "html":
+        # a web guide is not validated like a stage PDF: only the kinds of issue listed in [html] report_types
+        # are reported (content missing / extra, links, pictures, icons, tables, layout) - no word gaps, fonts,
+        # TOC or heading-level findings
+        web_types = set(cfg.get("html", {}).get("report_types") or [])
+        if web_types:
+            genuine_types &= web_types
 
     # --- run checks
     only_re = re.compile(only, re.I) if only else None
@@ -521,6 +537,11 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
         # issues for the image report only (a picture's label missing in stage): kept apart - they do not count
         # in the section's verdict, the other reports or the viewer
         image_only = _one_per_picture([f for f in findings if f.detail.get("image_report_only")])
+        if not cfg.get("assets", {}).get("picture_text", False):
+            # nothing drawn inside a picture is compared but its red overlay (marks) and a label/caption missing
+            # from stage (labels: live text that belongs beside the picture, not text drawn into it - so this is
+            # not "picture text"): no callout numbers or leader lines read out of the picture itself
+            image_only = [f for f in image_only if f.detail.get("kind") in ("marks", "labels")]
         findings[:] = [f for f in findings if not f.detail.get("image_report_only")]
         per_check = {c: _check_summary([f for f in findings if f.check == c]) for c in all_checks}
         for c, n in truncated.items():
@@ -1054,6 +1075,18 @@ def _toc_l1(baseline: str, cfg: dict) -> list[str]:
     return [e.title for e in entries if e.level == top]
 
 
+def _toc_full(baseline: str, cfg: dict) -> list[tuple[str, int]]:
+    """The PDF's whole table of contents, every level: (title, level) in document order - its bookmarks,
+    else its printed table of contents - so the left navigation can be checked against it completely,
+    not only its top level."""
+    import pymupdf
+    full = [(t.strip(), lvl) for lvl, t, _ in pymupdf.open(baseline).get_toc()]
+    if full:
+        return full
+    entries = tocmod.detect(extract.load(baseline, "baseline", cfg), cfg).entries
+    return [(e.title, e.level) for e in entries]
+
+
 def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, *, html: dict | None = None,
                 progress: Callable[[float, str], None] | None = None) -> dict:
     """Validate a PDF (baseline) against a web page (candidate), driven by the TOC.
@@ -1061,8 +1094,9 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
     The page is rendered and read from its DOM (html_source.capture): words with
     boxes and styles, the h1-h6 outline, real tables, images and links. Sections
     come from the PDF's TOC/bookmarks matched to the page's headings; each section's
-    text, tables, images and links are validated like PDF vs PDF. Layout checks
-    (indent/alignment) are switched off – web and print layout are not comparable."""
+    text, tables, images and links are validated like PDF vs PDF. Layout and structure are
+    compared too (lists, picture grids, items side by side, graphic placement); only the measures
+    in points (indent, alignment offsets, line height) are left out - a web page is another width."""
     from . import html_source
 
     report = progress or (lambda f, m: None)
@@ -1072,19 +1106,30 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
     crawl = h.get("crawl", hcfg.get("crawl", True))
     max_pages = int(h.get("max_pages") or hcfg.get("max_pages", 0) or 0)
     toc_l1 = _toc_l1(baseline, cfg) if crawl else []
+    toc_full = _toc_full(baseline, cfg) if crawl else []
     doc, info = html_source.capture(
         url, out_dir, root=h.get("root", ""), exclude=h.get("exclude") or html_source.DEFAULT_EXCLUDE,
         width=int(h.get("width") or 1280), wait_ms=int(h.get("wait_ms") or 1500),
         user=h.get("user", ""), password=h.get("password", ""), crawl=crawl, max_pages=max_pages,
         site=cfg.get("site", {}) if cfg.get("site", {}).get("enabled", True) else None, toc_l1=toc_l1,
+        concurrency=int(h.get("concurrency") or hcfg.get("concurrency", 1) or 1),
         progress=lambda f, m: report(0.3 * f, m))
     site = info.pop("site", None)
     if site is not None:
         site.setdefault("toc_l1", toc_l1)
+        site.setdefault("toc_full", toc_full)
     if crawl:  # the whole guide against the whole PDF, not one chapter
         cfg["sections"]["page_scope"] = False
-    cfg["layout"]["enabled"] = False
-    cfg["layout"]["check_placement"] = False
+    # layout and structure of the site follow the PDF: what is relative to the content is compared - captions
+    # level under a row of pictures, items side by side / stacked, picture grids, a graphic
+    # inline vs on its own line. What is measured in points (indent, alignment offsets, line height, space above
+    # headings) is not: a web page is another width than a printed page.
+    cfg["layout"]["enabled"] = True
+    cfg["layout"]["compare_with_prod"] = False
+    cfg["layout"]["check_bullet_position"] = False
+    # (list bullets and numbers are drawn by the browser; the capture reads them as words - html_source - so the
+    # list checks compare them with the PDF's printed "•" / "1." like any other marker)
+    cfg["layout"]["check_placement"] = cfg.get("site", {}).get("check_placement", True)
     cfg["sections"]["front_matter"] = False  # a web page has no cover / printed front matter
     cfg["content"]["spacing_mode"] = "presence"  # browsers collapse repeated spaces: only gap vs no gap is visible
     for k, v in cfg.get("html", {}).items():  # [html] overrides in the config file

@@ -38,10 +38,50 @@ def write_image_report(result: dict, out_dir: str | Path) -> Path | None:
     return image_report.build(result, out)
 
 
+def assign_bug_ids(result: dict) -> int:
+    """Every issue gets a running number for bug tracking - Bug_001, Bug_002, … - in the order of the PDF
+    report (content, links, formatting; section by section), then the picture issues of the image report, then
+    the failed / warned site checks of a web run. The same issue has the same number in every report and CSV."""
+    from . import image_report
+    n, seen = 0, set()
+
+    def give(f: dict) -> None:
+        nonlocal n
+        if id(f) in seen:
+            return
+        seen.add(id(f))
+        n += 1
+        f["bug"] = f"Bug_{n:03d}"
+
+    for s in result.get("sections", []):
+        for f in s.get("findings", []) + (s.get("image_findings") or []):
+            f.pop("bug", None)
+    for _, f in pdf_report.select_issues(result, pdf_report.GENUINE["filter"], None):
+        give(f)
+    for s in result.get("sections", []):
+        for f in s.get("findings", []):
+            if f.get("genuine") or pdf_report.is_image_issue(f):
+                give(f)
+    by_id = {f["id"]: f for sec in result.get("sections", []) for f in sec.get("findings", []) + (sec.get("image_findings") or [])}
+    try:
+        for _, f, _name in image_report.issues(result):  # (the image report works on copies: number the finding itself)
+            if f.get("id") in by_id:
+                give(by_id[f["id"]])
+    except Exception:  # the image report is optional: the other numbers stand
+        pass
+    for r in (result.get("site") or {}).get("rows", []):
+        r.pop("bug", None)
+        if r.get("status") in ("fail", "warn"):
+            n += 1
+            r["bug"] = f"Bug_{n:03d}"
+    return n
+
+
 def write_pdf_report(result: dict, out_dir: str | Path) -> Path | None:
     """The PDF report (genuine-issues.pdf) - only when there is at least one genuine issue: a clean
     pass needs no report, and one left from an earlier run is removed."""
     out = Path(out_dir)
+    assign_bug_ids(result)
     if not (result.get("summary") or {}).get("genuine", {}).get("total"):
         (out / "genuine-issues.pdf").unlink(missing_ok=True)
         (out / "genuine-issues.docx").unlink(missing_ok=True)
@@ -72,6 +112,7 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     result["meta"]["screenshots"] = shots
+    assign_bug_ids(result)  # Bug_001, Bug_002, …: before any report is built, so every report names an issue the same
     shotmod.render(result, out, shots, progress=lambda f, m: report(0.72 * f, m))
     report(0.72, "Rendering TOC pages")
     _toc_images(result, out)
@@ -128,18 +169,21 @@ def write_genuine_csv(result: dict, path: Path) -> Path:
     from ..genuine import where
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
-        w.writerow(["#", "Section", "Issue", "Severity", "Prod pages", "Stage pages", "AEM topic", "GUID", "Element",
+        w.writerow(["Bug ID", "#", "Section", "Issue", "Severity", "Prod pages", "Stage pages", "AEM topic", "GUID", "Element",
                     "Open in AEM", "Description", "Why it matters", "Prod screenshot", "Stage screenshot"])
         from .pdf_report import is_image_issue
-        for s in result["sections"]:
-            for f in s["findings"]:
-                if f.get("genuine") or is_image_issue(f):  # the same issues as the PDF report
+        # in Bug ID order (Bug_001 first): the order of the PDF report
+        listed = sorted(((s, f) for s in result["sections"] for f in s["findings"] if f.get("genuine") or is_image_issue(f)),
+                        key=lambda sf: sf[1].get("bug") or "Bug_99999")
+        for s, f in listed:
+            for _ in (0,):
+                if True:  # the same issues as the PDF report
                     pa, pc = where(f)
                     shots = f.get("shots") or {}
                     a = f.get("aem") or {}
                     # Excel shows the GUID as a link that opens the topic in AEM
                     guid = f'=HYPERLINK("{a["url"]}","{a["guid"]}")' if a.get("url") else a.get("guid", "")
-                    w.writerow([f["id"], s["title"], f.get("issue") or f.get("check", ""), pdf_report.SEV_LABEL.get(f["severity"], f["severity"]).lower(), pa, pc, a.get("topic", ""), guid,
+                    w.writerow([f.get("bug", ""), f["id"], s["title"], f.get("issue") or f.get("check", ""), pdf_report.SEV_LABEL.get(f["severity"], f["severity"]).lower(), pa, pc, a.get("topic", ""), guid,
                                 a.get("element", ""), a.get("url", ""), f.get("description") or f.get("message", ""),
                                 f.get("why", ""), shots.get("baseline", ""), shots.get("candidate", "")])
     return path

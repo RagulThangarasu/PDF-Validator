@@ -32,7 +32,7 @@ _GOTO = (pymupdf.LINK_GOTO, pymupdf.LINK_NAMED)
 
 
 # text a reader sees in stage, only not as live text: dropped unless [genuine] report_visually_present = true
-VISUALLY_PRESENT = {"label in picture", "text in image", "text as graphic"}
+VISUALLY_PRESENT = {"label in picture", "text in image", "text as graphic", "table in image"}
 # text that belongs to a picture (its labels, callout numbers, dimension lines): dropped unless
 # [genuine] report_image_labels = true
 IMAGE_TEXT = {"missing image label", "label in picture", "text in image"}
@@ -53,6 +53,7 @@ def cross_section(results: list[tuple[Unit, list[Finding]]], A: Doc, B: Doc, cfg
     _text_as_graphics(results, A, B, cfg)  # first: it finds the text at its own spot, OCR anywhere
     _graphics_in_prod(results, A, B, cfg)  # the other way: extra stage text that prod has drawn as a graphic
     _text_in_images(results, A, B, cfg, say)
+    _table_in_images(results, A, B, cfg, say)
     say("Checking links and image labels")
     _image_labels(results, A, B, cfg)
     _label_wording(results, A, B, cfg)
@@ -87,6 +88,8 @@ def cross_section(results: list[tuple[Unit, list[Finding]]], A: Doc, B: Doc, cfg
                 keep.append(f)
             findings[:] = keep
         _drop_picture_text(results, A, B, cfg)
+    if not cfg.get("assets", {}).get("picture_text", False):
+        _drop_inside_pictures(results, A, B, cfg)
     _xref_format(results, A, B)
     # suppress false "missing text" findings when the text appears in stage links
     _suppress_link_text_missing(results, B, cfg)
@@ -416,7 +419,10 @@ def _text_in_images(results, A: Doc, B: Doc, cfg: dict, progress=None) -> None:
     into the image): read the stage pictures with OCR - the section's own pages and the pages next
     to it first, then the rest of the document - and when the words are there, the text is not
     missing: an info finding "Text in image", counted as present in the content %.
-    Only text that sits on or next to a prod figure is a label; missing body text is not looked for."""
+    Text that sits on or next to a prod figure is a label; text whose aligned stage position lands
+    on a stage picture also qualifies - prod may recreate a UI mockup (an on-screen-display menu)
+    with plain text and straight-edged shapes, which never registers as a "figure" there, while
+    stage shows the same screen as an actual photo (no figure on the prod side to gate on)."""
     ccfg = cfg["content"]
     if not ccfg.get("ocr_images", True) or not ocr.available():
         return
@@ -438,7 +444,12 @@ def _text_in_images(results, A: Doc, B: Doc, cfg: dict, progress=None) -> None:
         beside = lambda b, r: b.y1 > r.y0 - pad and b.y0 < r.y1 + pad and max(r.x0 - b.x1, b.x0 - r.x1) <= 0.5 * r.width
         on_fig = lambda l: any((r + (-pad, -pad, pad, pad)).contains(pymupdf.Rect(l.bbox)) or beside(pymupdf.Rect(l.bbox), r)
                                for r in figs.get(l.page, []))
-        todo = [f for f in todo if 2 * sum(map(on_fig, f.baseline)) >= len(f.baseline)]
+        # the other way to qualify: the aligned stage spot for this gap already sits on an actual
+        # stage picture (prod need not have drawn a "figure" at all for this to be a real label)
+        at_pic = lambda f: f.candidate_at is not None and any(
+            im.page == f.candidate_at.page and (pymupdf.Rect(im.bbox) + (-pad, -pad, pad, pad)).contains(
+                pymupdf.Rect(f.candidate_at.bbox)) for im in pics)
+        todo = [f for f in todo if 2 * sum(map(on_fig, f.baseline)) >= len(f.baseline) or at_pic(f)]
         if not todo:
             continue
         pages = {B.words[k].page for k in range(*u.b_range)} if u.b_range[1] > u.b_range[0] else set()
@@ -467,6 +478,50 @@ def _text_in_images(results, A: Doc, B: Doc, cfg: dict, progress=None) -> None:
             f.candidate, f.candidate_at = [Loc(hit.page, hit.bbox)], None
             f.detail = {**f.detail, "ocr_page": hit.page, "ocr_box": list(hit.bbox), "credited": True}
             _count_present(u, n)
+
+
+def _table_in_images(results, A: Doc, B: Doc, cfg: dict, progress=None) -> None:
+    """A prod table (or one of its rows) reported missing from stage that is really there, baked into
+    a stage picture (a device's on-screen-display panel, or a button / legend bar under its mockup,
+    set as a photo instead of real text): read the stage pictures with OCR, the section's own pages
+    first, before calling the table or row gone."""
+    ccfg = cfg["content"]
+    if not ccfg.get("ocr_images", True) or not ocr.available():
+        return
+    max_words, dpi = ccfg.get("ocr_max_words", 60), ccfg.get("ocr_dpi", 300)
+    min_pt = ccfg.get("ocr_min_image_pt", 40)
+    pics = [im for im in B.images if im.bbox[2] - im.bbox[0] >= min_pt and im.bbox[3] - im.bbox[1] >= min_pt * 0.5]
+    if not pics:
+        return
+    work = []  # (unit, findings to look for, pictures on the section's own pages first)
+    for u, fs in results:
+        todo = [f for f in fs if f.check == "tables" and {"missing table", "missing row"} & set(f.types or [])
+                and 0 < len(_tokens(f.detail.get("baseline_text"))) <= max_words]
+        if not todo:
+            continue
+        pages = {B.words[k].page for k in range(*u.b_range)} if u.b_range[1] > u.b_range[0] else set()
+        near = {p + d for p in pages for d in (-1, 0, 1)}
+        work.append((u, todo, [im for im in pics if im.page in near]))
+    if not work:
+        return
+    say = progress or (lambda m: None)
+    close = {(im.page, tuple(im.bbox)) for _, _, ims in work for im in ims}
+    ocr.prefetch(B.path, [(im.page, im.bbox) for im in pics], dpi, (1, 2),
+                 lambda k, n: say(f"Reading text in pictures (OCR) {k}/{n}"))
+    ocr.prefetch(B.path, sorted(close), dpi, (3,), lambda k, n: say(f"Reading small labels in pictures (OCR) {k}/{n}"))
+    for u, todo, near_pics in work:
+        order = near_pics + [im for im in pics if im not in near_pics]
+        for f in todo:
+            text = f.detail.get("baseline_text", "")
+            hit = next((im for im in order if ocr.found(text, ocr.image_text(B.path, im.page, im.bbox, dpi, (1, 2)))), None) \
+                or next((im for im in near_pics if ocr.found(text, ocr.image_text(B.path, im.page, im.bbox, dpi, (1, 2, 3)))), None)
+            if hit is None:
+                continue
+            what = "table" if "missing table" in f.types else "row"
+            f.severity, f.critical, f.types = "info", False, ["table in image"]
+            f.message = f"Table {what} drawn in a picture in stage (read by OCR, stage p.{hit.page + 1}): “{snippet_text(text)}”"
+            f.candidate, f.candidate_at = [Loc(hit.page, hit.bbox)], None
+            f.detail = {**f.detail, "ocr_page": hit.page, "ocr_box": list(hit.bbox), "credited": True}
 
 
 def credit_dropped(u: Unit, f: Finding) -> None:
@@ -786,6 +841,64 @@ def _glyphs_match(A: Doc, a_page: int, box, B: Doc, page: int, near, edge_thr: f
             e = float((pe * te).sum() / (np.sqrt((pe * pe).sum() * (te * te).sum()) + 1e-9))
             best = (float(ncc[iy, ix]), e, (rect[0] + ix / k, rect[1] + iy / k, rect[0] + (ix + tw) / k, rect[1] + (iy + th) / k))
     return best[2] if best and best[1] >= edge_thr else None
+
+
+def pair_picture_text(a: Doc, b: Doc, cfg: dict, reach: float = 60.0) -> int:
+    """The same label is a picture's text on one side and plain text on the other: prod sets “Projector / Display”
+    on the lower edge of its picture, stage 24 pt under it - too far to be taken for the picture's own text. It was
+    then left out of prod's content and kept in stage's, and reported as text stage adds. A label is the same thing
+    on both sides: where one side's picture text reads the same as a short line of its own close to a picture
+    (above, under or beside it, up to `reach` away) on the other side, that line is picture text there as well -
+    out of the content comparison, in the image report with its picture. Returns the words taken out."""
+    from .checks.assets import icon_max
+    acfg = cfg.get("assets", {})
+    key = lambda t: re.sub(r"[^\w]+", "", t.lower())
+    n = 0
+    for src, dst in ((a, b), (b, a)):
+        labels = set()
+        for idx in (getattr(src, "picture_text", None) or {}).values():
+            by_line = defaultdict(list)
+            for k in idx:
+                by_line[src.words[k].line].append(k)
+            for ks in by_line.values():
+                raw = " ".join(src.words[k].text for k in sorted(ks))
+                t = key(raw)
+                # a label in words (“Projector / Display”). Callout numbers belong to their own picture only, and a
+                # model name over a picture (“(PD3420Q)”) is a caption both sides print as text
+                if len(t) >= 4 and re.search(r"(?<![^\W\d_])[^\W\d_]{3,}(?![^\W\d_]|\d)", raw) and not re.fullmatch(r"\(?[A-Z0-9 /\-]+\)?", raw.strip()):
+                    labels.add(t)
+        if not labels:
+            continue
+        lines = defaultdict(list)
+        for k, w in enumerate(dst.words):
+            lines[w.line].append(k)
+        pics: dict = {}
+        for li, ks in lines.items():
+            ws = [dst.words[k] for k in ks]
+            if not all(w.norm for w in ws) or len(ws) > 8 or key(" ".join(w.text for w in ws)) not in labels:
+                continue
+            ln = dst.lines[li]
+            if ln.page not in pics:
+                pics[ln.page] = [x.bbox for x in dst.images if x.page == ln.page and not icon_max(dst, x, acfg)] + \
+                    [x.bbox for x in _vector_pictures(dst, ln.page)] + [x.bbox for x in _line_drawings(dst, ln.page)]
+            x0, y0, x1, y1 = ln.bbox
+
+            def close(p) -> bool:
+                over_x = min(p[2], x1) - max(p[0], x0) > 0
+                over_y = min(p[3], y1) - max(p[1], y0) > 0
+                return (over_x and (0 <= y0 - p[3] <= reach or 0 <= p[1] - y1 <= reach)) or \
+                    (over_y and (0 <= x0 - p[2] <= reach or 0 <= p[0] - x1 <= reach)) or (over_x and over_y)
+            near = [p for p in pics[ln.page] if close(p)]
+            if not near:
+                continue
+            pic = min(near, key=lambda p: min(abs(y0 - p[3]), abs(p[1] - y1), abs(x0 - p[2]), abs(p[0] - x1)))
+            for k in ks:
+                dst.words[k].norm = ""
+            dst.picture_text.setdefault((ln.page, tuple(pic)), []).extend(ks)
+            # (known as a label by its text only - not by a leader line or its place on the picture)
+            dst.__dict__.setdefault("picture_text_paired", set()).update(ks)
+            n += len(ks)
+    return n
 
 
 def skip_picture_text(doc: Doc, cfg: dict) -> int:
@@ -1403,6 +1516,84 @@ def _text_in_matched_artwork(results) -> None:
             _count_present(u, len(_tokens(f.detail.get("baseline_text"))))
 
 
+_PANELS: dict = {}
+
+
+def _screen_panels(doc: Doc, page: int) -> list:
+    """Screenshots drawn as vectors: a large dark filled panel (an OSD menu, a software window) with its text
+    set on it. Not a table header bar (short) - at least 150 x 100 pt."""
+    key = (doc.path, page)
+    if key not in _PANELS:
+        out = []
+        try:
+            pg = pymupdf.open(doc.path)[page]
+            dark = [d["rect"] for d in pg.get_drawings()
+                    if d.get("fill") and d.get("rect") is not None and sum(d["fill"][:3]) < 1.2
+                    and d["rect"].width >= 150 and d["rect"].height >= 100 and d["rect"].get_area() < 0.9 * pg.rect.get_area()]
+            try:
+                groups = list(pg.cluster_drawings())
+            except Exception:
+                groups = []
+            for r in dark:
+                # the whole screenshot: the group of shapes the dark panel is the body of (its title bar above, its
+                # key bar below), when the panel is most of that group
+                whole = next((g for g in groups if g.contains(r) and r.get_area() >= 0.4 * g.get_area()
+                              and g.get_area() < 0.9 * pg.rect.get_area()), r)
+                out.append(Image(page, tuple(whole)))
+        except Exception:
+            out = []
+        _PANELS[key] = out
+    return _PANELS[key]
+
+
+def _drop_inside_pictures(results, A: Doc, B: Doc, cfg: dict) -> None:
+    """[assets] picture_text = false: nothing inside a picture is compared - only its red overlay (assets:
+    marks). A finding of the text, table or layout checks whose every location lies inside a picture - an
+    embedded image, an illustration or a screenshot drawn as vectors (the menu bar “Exit | Move | Edit” of an
+    OSD screenshot read as a table row), a picture cell of a table - is dropped."""
+    acfg = cfg["assets"]
+    from .checks.assets import cell_pictures
+    boxes: dict = {}
+
+    def pictures(doc: Doc, page: int, solid: bool) -> list:
+        """solid: only what is one picture for sure - an embedded image or a screenshot drawn on a dark panel.
+        A table's own rows and icons are never inside those; small drawings (icons in a table row, an
+        illustration in a cell) are pictures for text findings only."""
+        k = (id(doc), page, solid)
+        if k not in boxes:
+            pics = [x for x in doc.images if x.page == page and not icon_max(doc, x, acfg)]
+            if doc.raw_tables is None:  # a PDF: its drawn pictures too (a web page has only <img> pictures)
+                pics += _screen_panels(doc, page)
+                if not solid:
+                    pics += _vector_pictures(doc, page, min_w=20) + cell_pictures(doc, page)
+            boxes[k] = [pymupdf.Rect(x.bbox) + (-2, -2, 2, 2) for x in pics]
+        return boxes[k]
+
+    def inside(doc: Doc, locs, solid: bool = False) -> bool:
+        return bool(locs) and all(any(b.contains(pymupdf.Point((l.bbox[0] + l.bbox[2]) / 2, (l.bbox[1] + l.bbox[3]) / 2))
+                                      # a part of the picture (a label, a row of a screenshot) - not the picture
+                                      # itself: a finding placed on the whole picture or icon is about that picture
+                                      # (a small picture - an icon - is easily "covered": half of it at most)
+                                      and pymupdf.Rect(l.bbox).get_area() <= (0.5 if b.width < 60 else 0.95) * b.get_area()
+                                      for b in pictures(doc, l.page, solid)) for l in locs)
+
+    for u, findings in results:
+        gone = [f for f in findings if f.check in ("content", "tables", "layout", "style", "joined", "brackets")
+                and (f.baseline or f.candidate)
+                # what prod shows inside a picture is picture content, wherever stage's side of the finding is (an OSD
+                # screenshot's rows paired with the rows of the real table under it); a stage-only finding counts
+                # when it lies inside a stage picture
+                and (inside(A, f.baseline, f.check == "tables") if f.baseline else inside(B, f.candidate, f.check == "tables"))]
+        if not gone:
+            continue
+        findings[:] = [f for f in findings if not any(f is x for x in gone)]
+        for f in gone:
+            try:
+                credit_dropped(u, f)
+            except Exception:
+                pass
+
+
 def _drop_picture_text(results, A: Doc, B: Doc, cfg: dict) -> None:
     """[genuine] report_image_labels = false: a text difference in a picture's own labels - on the picture,
     right beside it or a short label just above / below it (“2 seconds” → “2 second” over the remote
@@ -1414,6 +1605,9 @@ def _drop_picture_text(results, A: Doc, B: Doc, cfg: dict) -> None:
         if (id(doc), page) not in pics:
             pics[(id(doc), page)] = [x for x in doc.images if x.page == page and not icon_max(doc, x, acfg)] \
                 + _vector_pictures(doc, page, min_w=20)  # a tall, narrow drawing too: the remote control
+            if doc.raw_tables is None:  # a PDF: pictures drawn inside table cells (name | picture rows), with their labels
+                from .checks.assets import cell_pictures
+                pics[(id(doc), page)] = pics[(id(doc), page)] + cell_pictures(doc, page)
         return pics[(id(doc), page)]
 
     def short(doc: Doc, l) -> bool:
@@ -1851,6 +2045,7 @@ _WHY = {
     "outline level": ("Heading level differs", "The heading sits at a different level of the outline in stage (e.g. H3 → H2)."),
     "missing entry": ("TOC entry missing", "A chapter listed in the prod table of contents is not listed in stage."),
     "extra entry": ("Extra TOC entry", "The stage table of contents lists a chapter that prod does not."),
+    "toc deeper levels": ("TOC lists deeper levels in stage", "Stage's table of contents lists sub-section levels that prod's does not; each entry was checked against its heading in prod."),
     "title differs": ("TOC title differs", "A chapter is listed with different words in the stage table of contents."),
     "wrong page": ("TOC page number wrong", "The stage table of contents points to a page where the chapter does not start."),
     "level differs": ("TOC level differs", "A chapter is listed at a different level in the stage table of contents."),
@@ -1951,6 +2146,8 @@ _WHY = {
     "size / aspect": ("Image size differs", "The picture is shown at another width or aspect ratio in stage."),
     "emphasis": ("Font weight / italic differs", "The same words are set in another font weight (bold, medium, light ...) or italic on one side only: the emphasis the reader relies on changed."),
     "list level": ("List level differs", "A paragraph that sits under a list item's text in prod (part of that bullet or numbered item) starts under another item's text, or as body text, in stage: the list's marker / text columns are not kept."),
+    "list alignment": ("List numbers not aligned", "The numbers of a numbered list start at one left edge in prod; in stage some items are set further in or out than the others."),
+    "picture row": ("Layout broken: picture grid differs", "Pictures that sit side by side on one row in prod are stacked in stage (or the reverse): the column layout of the pictures is not the same."),
     "stacked to columns": ("Layout broken: stacked text in columns", "Text that prod stacks (a list item with its description underneath) is laid out side by side in columns in stage."),
     "row alignment": ("Items not aligned in a row", "Text that sits side by side on one row in prod (list items in two columns, captions under a row of pictures) is at different heights in stage."),
     "label in picture": ("Image label on the stage picture", "The picture's label is there in stage, drawn into the image instead of as live text."),
@@ -2241,6 +2438,15 @@ def where(f: dict) -> tuple[str, str]:
 
 
 _KEEP_PAREN = re.compile(r"\d|[“”\"‘’]|\bp\.|↔|→|%|pt\b|mm\b|px\b|places?\b|level\b|items?\b|cells?\b|rows?\b|words?\b")
+# content matching gone badly wrong at one spot (a whole page read as one block) quotes most of that page
+# back in the message: never shown in full - a short label instead, so the report does not drown in it
+MAX_CONCISE = 600
+_LONG_LABEL = [
+    (re.compile(r"^Missing (content block|text):", re.I), "Content is missing in the page body."),
+    (re.compile(r"^Extra (content block|text):", re.I), "Extra content is in the page body."),
+    (re.compile(r"^Missing section:", re.I), "A whole section is missing."),
+    (re.compile(r"^Extra section:", re.I), "An extra section is present."),
+]
 
 
 def concise(msg: str) -> str:
@@ -2288,4 +2494,9 @@ def concise(msg: str) -> str:
         # “(13 items, e.g. “a”; “b”; “c”; “d” …)” -> the first three examples
         head = re.sub(r"(e\.g\. (?:“[^”]*”; ){2}“[^”]*”)(?:; “[^”]*”)+", r"\1 …", head)
         parts.append("\n".join([head.strip()] + rest + extra))
-    return "  ·  ".join(parts)
+    out = "  ·  ".join(parts)
+    if len(out) > MAX_CONCISE:
+        first = msg.split("\n", 1)[0]
+        label = next((lab for pat, lab in _LONG_LABEL if pat.search(first)), None)
+        return label or (first[:MAX_CONCISE].rstrip() + " … (too long to show in full here)")
+    return out

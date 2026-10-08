@@ -1270,7 +1270,7 @@ def _icon_vs_label(u: Unit, f: Finding, at: Loc, norms: list[str]) -> None:
     from . import callout_icons
     icons = u.cfg["content"].get("callout_icons") or {}
     label = next((n[len("<label:"):-1] for n in norms if n.startswith("<label:")), None)
-    if not icons or not label:
+    if not u.cfg["content"].get("check_callout_icon_label", True) or not icons or not label:
         return
     box = callout_icons.icon_left_of(u.a, at)
     kind = callout_icons.kind(u.a, at.page, box) if box else None

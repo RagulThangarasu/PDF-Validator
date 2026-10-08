@@ -133,8 +133,66 @@ def stacked_to_columns(u: Unit) -> list[Finding]:
         links=[(Loc(A.lines[la].page, A.lines[la].bbox), Loc(B.lines[s1].page, B.lines[s1].bbox)) for la, _, s1, _ in pairs])]
 
 
+_NUM = __import__("re").compile(r"^(\d{1,3})[.)]$")
+
+
+def numbered_alignment(u: Unit) -> list[Finding]:
+    """The numbers of one numbered list line up in prod (1. 2. 3. at the same left edge) and do not in stage: an
+    item set further in or out than the items before it (“1.” at the margin, “2.” - “5.” indented). Compared
+    through the matched numbers; a list prod itself sets at different indents is left alone."""
+    lcfg = u.cfg["layout"]
+    if not lcfg.get("check_numbered_alignment", True):
+        return []
+    A, B = u.a, u.b
+    items = []  # (number, prod word, stage word) for every matched list number that starts its prod line
+    for i, j in sorted(u.pairs):
+        wa, wb = A.words[i], B.words[j]
+        m = _NUM.match(wa.text)
+        if not m or not _NUM.match(wb.text):
+            continue
+        la = A.lines[wa.line]
+        if abs(wa.bbox[0] - la.bbox[0]) > 1.0:
+            continue  # not the first word of its line: a number inside a sentence
+        items.append((int(m.group(1)), i, j))
+    runs, run = [], []
+    for it in items:  # consecutive numbers at one left edge on one prod page: one list
+        if run and it[0] == run[-1][0] + 1 and A.words[it[1]].page == A.words[run[-1][1]].page \
+                and abs(A.words[it[1]].bbox[0] - A.words[run[-1][1]].bbox[0]) <= 2.0:
+            run.append(it)
+        else:
+            if len(run) >= 2:
+                runs.append(run)
+            run = [it]
+    if len(run) >= 2:
+        runs.append(run)
+    findings = []
+    for run in runs:
+        size = max(B.words[run[0][2]].style.size, 1)
+        xs = [B.words[j].bbox[0] for _, _, j in run]
+        if len({B.words[j].page for _, _, j in run}) != 1:
+            continue  # the list goes over a page / slice break in stage
+        tol = lcfg.get("numbered_alignment_em", 0.6) * size
+        ref = sorted(xs)[len(xs) // 2]  # where most of the numbers sit
+        odd = [(n, j, x - ref) for (n, _, j), x in zip(run, xs) if abs(x - ref) > tol]
+        if not odd or max(xs) - min(xs) > 8 * size:
+            continue  # aligned, or the items are in different columns (a reflow, not a misalignment)
+        text = "; ".join(f"“{n}.” {abs(d):.0f} pt {'right' if d > 0 else 'left'} of the others" for n, _, d in odd[:4])
+        findings.append(Finding(
+            "layout", lcfg.get("severity", {}).get("list alignment", "warning"),
+            f"List numbers not aligned in stage: {run[0][0]}.–{run[-1][0]}. start at one left edge in prod "
+            f"(p.{A.words[run[0][1]].page + 1}); in stage (p.{B.words[run[0][2]].page + 1}) {text}",
+            [Loc(A.words[i].page, A.lines[A.words[i].line].bbox) for _, i, _ in run],
+            [Loc(B.words[j].page, B.lines[B.words[j].line].bbox) for _, _, j in run],
+            {"kind": "list alignment", "property": "list alignment",
+             "baseline_text": f"{run[0][0]}.–{run[-1][0]}. aligned at one left edge",
+             "candidate_text": text},
+            types=["list alignment"],
+            links=[(Loc(A.words[i].page, A.lines[A.words[i].line].bbox), Loc(B.words[j].page, B.lines[B.words[j].line].bbox)) for _, i, j in run]))
+    return findings
+
+
 def check(u: Unit) -> list[Finding]:
-    return _row_alignment(u) + stacked_to_columns(u)
+    return _row_alignment(u) + stacked_to_columns(u) + numbered_alignment(u)
 
 
 def _row_alignment(u: Unit) -> list[Finding]:

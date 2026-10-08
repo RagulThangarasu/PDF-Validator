@@ -598,3 +598,81 @@ def site_for_map(map_path: str, cfg: dict, lang: str = "") -> str:
         return (len(seg) > 3 and seg[3] in brands, seg[-1].lower() == lang, roots[path], -len(path))
     best = max(roots, key=rank)
     return f"{author}{best}.html"
+
+
+_SITE_NOISE = re.compile(r"(?i)(^|[_\-\s.])(um|em|qsg|user\s*manual|instructions?|manual|marked|final|v\d+(\.\d+)*|en|eng)(?=$|[_\-\s.])")
+
+
+def is_site_root(url: str) -> bool:
+    """The URL names a folder of AEM Sites, not a guide page: the Sites console (…/sites.html/content/guide) or the
+    folder itself (…/content/guide, …/content/guide/consumer)."""
+    from urllib.parse import urlsplit
+    path = urlsplit(url).path.rstrip("/")
+    if "/sites.html" in path:
+        return True
+    last = path.rsplit("/", 1)[-1]
+    return path.startswith("/content/") and "." not in last and not re.fullmatch(r"[a-z]{2}([-_][a-zA-Z]{2,4})?", last)
+
+
+def site_for_pdf(pdf_path: str, root_url: str, cfg: dict, lang: str = "en") -> dict:
+    """The guide of a prod PDF's product in AEM Sites, searched under the folder `root_url` names: every topic
+    page there records the map it was published from (basePath) and its guide's language page (indexPath). The
+    product is taken from the PDF's name and its folders (BL2291_UM-en.pdf in …/BL2291-EM-V0/ -> bl2291); the
+    guide is the one whose map or site folder carries that name, in `lang`. Read-only (a query).
+    The page is opened with ?wcmmode=disabled: the published view, without the author's editing frame (the crawl
+    gives the same query to every page of the guide).
+    Returns {"url": the language page (…/en.html?wcmmode=disabled) or "", "site", "map", "pages", "product", "candidates": [...]}."""
+    import json
+    from collections import Counter, defaultdict
+    from pathlib import Path
+    from urllib import request as _rq
+    from urllib.parse import urlencode, urlsplit
+    author, auth = _auth(cfg)
+    root = urlsplit(root_url).path.rstrip("/")
+    root = root.split("/sites.html", 1)[1] if "/sites.html" in root else root
+    root = root or cfg.get("sites_root") or "/content/guide"
+    q = {"path": root, "type": "cq:PageContent", "property": "basePath", "property.operation": "exists",
+         "p.limit": "-1", "p.hits": "selective", "p.properties": "basePath indexPath"}
+    with _rq.urlopen(_rq.Request(f"{author}/bin/querybuilder.json?{urlencode(q)}", headers={"Authorization": auth}), timeout=120) as r:
+        hits = json.load(r).get("hits", [])
+    guides: dict = defaultdict(Counter)  # language page -> maps it was published from (topic pages each)
+    for h in hits:
+        if h.get("basePath") and h.get("indexPath"):
+            guides[h["indexPath"]][h["basePath"]] += 1
+    norm = lambda t: re.sub(r"[^a-z0-9]", "", t.lower())
+    clean = lambda t: norm(_SITE_NOISE.sub(" ", _SITE_NOISE.sub(" ", t)))
+    pp = Path(pdf_path)
+    # the PDF's own name first, then the folders it sits in (the product's archive folder)
+    keys = list(dict.fromkeys(k for k in [clean(pp.stem)] + [clean(x) for x in list(pp.parts[:-1])[::-1][:3]] if len(k) >= 3))
+    lang = (lang or "en").lower()
+    scored = []
+    for index, maps in guides.items():
+        seg = index.strip("/").split("/")
+        if seg[-1].lower() != lang:
+            continue
+        names = {norm(seg[-2]) if len(seg) > 1 else ""} | {norm(m.rsplit("/", 1)[-1].replace(".ditamap", "")) for m in maps}
+        names.discard("")
+        best = 0
+        for rank, k in enumerate(keys):
+            for n in names:
+                sc = 100 if n == k else 80 if n.startswith(k) or k.startswith(n) and len(n) >= 4 else \
+                    60 if (k in n or n in k) and min(len(k), len(n)) >= 4 else 0
+                best = max(best, sc - 5 * rank)
+        if best > 0:
+            scored.append((best, sum(maps.values()), index, maps.most_common(1)[0][0]))
+    scored.sort(key=lambda x: (-x[0], -x[1], len(x[2])))
+    cands = [{"url": f"{author}{i}.html?wcmmode=disabled", "site": i, "map": m, "pages": n, "score": sc} for sc, n, i, m in scored[:5]]
+    top = cands[0] if cands else {}
+    if top:
+        # the language page itself is an empty landing page (its title, no navigation): the guide starts at its
+        # first topic page, which carries the left navigation the crawl follows to every other page
+        try:
+            with _rq.urlopen(_rq.Request(f"{author}{top['site']}.1.json", headers={"Authorization": auth}), timeout=60) as r:
+                kids = [k for k, v in json.load(r).items() if isinstance(v, dict) and v.get("jcr:primaryType") == "cq:Page"]
+            if kids:
+                top["url"] = f"{author}{top['site']}/{kids[0]}.html?wcmmode=disabled"
+                top["first_page"] = kids[0]
+        except Exception:
+            pass
+    return {"url": top.get("url", ""), "site": top.get("site", ""), "map": top.get("map", ""), "pages": top.get("pages", 0),
+            "product": keys[0] if keys else "", "root": root, "guides": len(guides), "candidates": cands}

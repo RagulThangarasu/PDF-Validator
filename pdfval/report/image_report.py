@@ -466,7 +466,7 @@ def build(result: dict, out_dir: str | Path, filename: str = "image-issues.pdf")
         p = doc.new_page(width=W, height=H)
         topic = (f.get("aem") or {}).get("topic") or ""
         guid = (f.get("aem") or {}).get("guid") or ""
-        head = f"{s['title']}  ·  {name}"
+        head = (f"{f['bug']}  ·  " if f.get("bug") else "") + f"{s['title']}  ·  {name}"
         p.insert_text((M, M + 12), head, fontsize=13, fontname="hebo")
         sub = "  ·  ".join(x for x in (f"AEM topic: {topic}" if topic else "", guid,
                                         f"prod p.{f['baseline'][0]['page'] + 1}  ↔  stage p.{spage + 1}") if x)

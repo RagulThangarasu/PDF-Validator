@@ -154,6 +154,102 @@ CHROME_JS = r"""
   const heads = [...root.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(h => visible(h) && txt(h) && !inPanels(h))
     .map(h => ({ level: +h.tagName[1], text: txt(h), id: h.id || (h.closest('[id]') && h.closest('[id]') !== root ? h.closest('[id]').id : '') ||
                  (h.querySelector('[id], a[name]') ? (h.querySelector('[id]')?.id || h.querySelector('a[name]').getAttribute('name')) : '') }));
+  // the gap between the breadcrumb and the H1 below it: present and measured (null when either is missing),
+  // so a collapsed/overlapping gap or a missing breadcrumb above a heading is caught, not just guessed at
+  const h1El = root.querySelector('h1');
+  let breadcrumbGap = null;
+  if (crumbs && visible(crumbs) && h1El && visible(h1El)) {
+    const cr = crumbs.getBoundingClientRect(), hr = h1El.getBoundingClientRect();
+    breadcrumbGap = Math.round(hr.top - cr.bottom);
+  }
+  // ---- page layout and pictures: what is broken on the page itself (no prod needed)
+  const rb = root.getBoundingClientRect();
+  const R = [rb.left + scrollX, rb.right + scrollX];
+  const layout = [];
+  const doc = document.documentElement;
+  if (doc.scrollWidth > doc.clientWidth + 4)
+    layout.push({ kind: 'page-scroll', text: 'The page scrolls sideways', detail: `content ${doc.scrollWidth}px wide in a ${doc.clientWidth}px window`, where: '' });
+  // the page is only its H1 (or other headings), nothing else below: a topic with no body at all
+  if (h1El) {
+    const body = [...root.querySelectorAll('p, li, td, th, pre, blockquote, img, svg, table, figure, dl, [role="note"]')]
+      .filter(e => visible(e) && !inPanels(e) && (e.tagName === 'IMG' || e.tagName === 'SVG' || e.tagName === 'TABLE' || e.tagName === 'FIGURE' || txt(e).trim()));
+    if (!body.length)
+      layout.push({ kind: 'empty-page', text: txt(h1El), detail: 'Only the heading is on the page, no body content below it', where: path(h1El) });
+  }
+  const pics = [...root.querySelectorAll('img, svg, picture > img')].filter(e => !inPanels(e) && !(e.tagName === 'svg' && e.closest('a,button')));
+  const images = [];
+  for (const im of pics) {
+    const r = im.getBoundingClientRect();
+    const isImg = im.tagName === 'IMG';
+    const name = (isImg ? (im.getAttribute('alt') || (im.currentSrc || im.src || '').split('/').pop().split('?')[0]) : 'svg') || 'image';
+    if (isImg && im.complete && !im.naturalWidth) { layout.push({ kind: 'image-broken', text: name, detail: 'the picture did not load', where: path(im) }); continue; }
+    if (!visible(im) || r.width < 8 || r.height < 8) {
+      if (isImg && im.naturalWidth > 8 && visible(im.parentElement)) layout.push({ kind: 'image-collapsed', text: name, detail: `drawn ${Math.round(r.width)}×${Math.round(r.height)}px (its file is ${im.naturalWidth}×${im.naturalHeight}px)`, where: path(im) });
+      continue;
+    }
+    const left = r.left + scrollX, right = r.right + scrollX;
+    // the box the picture sits in: the nearest block ancestor
+    let boxEl = im.parentElement;
+    while (boxEl && boxEl !== root && getComputedStyle(boxEl).display.startsWith('inline')) boxEl = boxEl.parentElement;
+    const pb = (boxEl || root).getBoundingClientRect();
+    if (right > R[1] + 3 || left < R[0] - 3)
+      layout.push({ kind: 'image-overflow', text: name, detail: `runs ${Math.round(Math.max(right - R[1], R[0] - left))}px outside the content area`, where: path(im) });
+    else if (r.width > pb.width + 3)
+      layout.push({ kind: 'image-overflow', text: name, detail: `${Math.round(r.width)}px wide in a ${Math.round(pb.width)}px box`, where: path(im) });
+    if (isImg && im.naturalWidth && im.naturalHeight) {
+      const drawn = r.width / r.height, own = im.naturalWidth / im.naturalHeight;
+      const fit = getComputedStyle(im).objectFit;
+      if (Math.abs(drawn / own - 1) > 0.06 && !['contain', 'cover', 'scale-down', 'none'].includes(fit))
+        layout.push({ kind: 'image-stretched', text: name, detail: `drawn ${Math.round(r.width)}×${Math.round(r.height)}px, its file is ${im.naturalWidth}×${im.naturalHeight}px (proportions changed)`, where: path(im) });
+      if (r.width > im.naturalWidth * 1.5 && r.width > 120 && !/\.svg(\?|$)/i.test(im.currentSrc || im.src || ''))
+        layout.push({ kind: 'image-upscaled', text: name, detail: `drawn ${Math.round(r.width)}px wide from a ${im.naturalWidth}px file: it will look blurred`, where: path(im) });
+    }
+    // where the picture sits in its box: left, centre or right (a picture as wide as its box is "full")
+    const free = pb.width - r.width, off = r.left - pb.left;
+    const align = free < 0.08 * pb.width ? 'full' : off < 0.2 * free ? 'left' : off > 0.8 * free ? 'right' : Math.abs(off - free / 2) < 0.15 * free ? 'center' : 'other';
+    images.push({ name, width: Math.round(r.width), height: Math.round(r.height), natural: isImg ? [im.naturalWidth, im.naturalHeight] : null,
+                  share: Math.round(100 * r.width / Math.max(1, rb.width)), align, top: Math.round(r.top + scrollY), where: path(im) });
+  }
+  // blocks that run out of the content area: tables, code, wide boxes
+  for (const e of root.querySelectorAll('table, pre, iframe, video, .table, [class*="col"], [class*="flex"], [class*="grid"]')) {
+    if (inPanels(e) || !visible(e)) continue;
+    const r = e.getBoundingClientRect();
+    if (r.width < 40) continue;
+    const over = Math.max(r.right + scrollX - R[1], R[0] - (r.left + scrollX));
+    const scrolls = /(auto|scroll)/.test(getComputedStyle(e.parentElement || e).overflowX);
+    if (over > 4 && !scrolls)
+      layout.push({ kind: 'block-overflow', text: (e.tagName.toLowerCase() + (e.className && typeof e.className === 'string' ? '.' + e.className.trim().split(/\s+/)[0] : '')), detail: `runs ${Math.round(over)}px outside the content area: ${txt(e).slice(0, 60)}`, where: path(e) });
+  }
+  // text run over by a picture, or two text blocks printed on top of each other
+  const blocks = [...root.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, td, th, figcaption')].filter(e => visible(e) && !inPanels(e) && txt(e).length > 2 && !e.querySelector('p, li, table'));
+  const rect = e => e.getBoundingClientRect();
+  const cut = (a, b) => Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+  for (const im of pics) {
+    const r = rect(im);
+    if (r.width < 24 || r.height < 24 || !visible(im)) continue;
+    for (const b of blocks) {
+      if (b.contains(im) || im.contains(b)) continue;
+      const t = document.createRange(); t.selectNodeContents(b);
+      const tr = t.getBoundingClientRect();
+      if (tr.width < 4 || tr.height < 4) continue;
+      const a = cut(r, tr);
+      if (a > 0.25 * Math.min(r.width * r.height, tr.width * tr.height) && a > 300) {
+        layout.push({ kind: 'overlap', text: txt(b).slice(0, 60), detail: 'a picture is drawn over this text', where: path(b) });
+        break;
+      }
+    }
+  }
+  for (let i = 0; i + 1 < blocks.length && layout.length < 200; i++) {
+    const a = blocks[i], b = blocks[i + 1];
+    if (a.contains(b) || b.contains(a)) continue;
+    const ra = rect(a), rc = rect(b);
+    const o = cut(ra, rc);
+    if (o > 0.4 * Math.min(ra.width * ra.height, rc.width * rc.height) && o > 200)
+      layout.push({ kind: 'overlap', text: txt(b).slice(0, 60), detail: `printed on top of “${txt(a).slice(0, 40)}”`, where: path(b) });
+  }
+  if (breadcrumbGap !== null && breadcrumbGap < 0)
+    layout.push({ kind: 'breadcrumb-overlap', text: txt(crumbs).slice(0, 60),
+                 detail: `the H1 overlaps the breadcrumb by ${-breadcrumbGap}px`, where: path(h1El) });
   // what each #fragment of this page lands on
   const targets = {};
   for (const it of items(otp)) {
@@ -167,7 +263,8 @@ CHROME_JS = r"""
     nav: nav ? { label: navLabel, where: path(nav), items: items(nav) } : null,
     otp: otp ? { label: otpLabel, where: path(otp), items: items(otp), targets } : null,
     next, prev, download: dl, subtitle, header: headTexts.map(({ text, where, size, weight }) => ({ text, where, size, weight })),
-    footer: footer ? txt(footer).slice(0, 400) : '', breadcrumb: crumbs ? txt(crumbs) : '', headings: heads,
+    footer: footer ? txt(footer).slice(0, 400) : '', breadcrumb: crumbs ? txt(crumbs) : '', breadcrumb_gap: breadcrumbGap, headings: heads,
+    layout: layout.slice(0, 200), images: images.slice(0, 400), content_width: Math.round(rb.width),
     ids: [...document.querySelectorAll('[id]')].map(e => e.id).slice(0, 5000),
   };
 }
@@ -206,19 +303,37 @@ def probe(page, pages: list[dict], visited: dict, out: Path, report=None) -> dic
                 targets.setdefault(key(pg["href"]), pg["href"])
     status = dict(visited)
     todo = [(k, u) for k, u in targets.items() if k not in status and urlsplit(u).scheme in ("http", "https")]
-    for n, (k, u) in enumerate(todo[:200]):
-        say(f"Checking navigation link {n + 1}/{len(todo)}")
+    # the browser's own session (cookies, basic auth), read once here (its only safe use from another thread:
+    # sync Playwright objects must stay on this one thread) and replayed as plain HTTP from here on, several
+    # links at once - checking a link never has to drive the browser itself, one page at a time
+    cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in page.context.cookies())
+
+    def one(u: str) -> dict:
+        import urllib.error
+        from urllib.request import Request, urlopen
         try:
-            r = page.request.get(u, timeout=30_000, max_redirects=10)
-            body = r.text() if "html" in (r.headers.get("content-type") or "") else ""
-            m = re.search(r"<title[^>]*>(.*?)</title>", body, re.S | re.I)
-            h = re.search(r"<h1[^>]*>(.*?)</h1>", body, re.S | re.I)
-            strip = lambda s: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s or "")).strip()
-            ids = re.findall(r"""\s(?:id|name)=["']([^"']+)["']""", body)
-            status[k] = {"status": r.status, "url": r.url, "title": strip(m.group(1)) if m else "",
-                         "h1": strip(h.group(1)) if h else "", "ids": ids[:5000], "crawled": False}
+            req = Request(u, headers={"Cookie": cookie_header} if cookie_header else {})
+            with urlopen(req, timeout=30) as resp:
+                body = resp.read(1_000_000).decode("utf-8", "replace") if "html" in (resp.headers.get("content-type") or "") else ""
+                status_code, final_url = resp.status, resp.geturl()
+        except urllib.error.HTTPError as e:
+            body, status_code, final_url = (e.read(1_000_000).decode("utf-8", "replace") if "html" in (e.headers.get("content-type") or "") else ""), e.code, e.url
         except Exception as e:
-            status[k] = {"status": 0, "url": u, "error": f"{type(e).__name__}: {e}", "crawled": False}
+            return {"status": 0, "url": u, "error": f"{type(e).__name__}: {e}", "crawled": False}
+        m = re.search(r"<title[^>]*>(.*?)</title>", body, re.S | re.I)
+        h = re.search(r"<h1[^>]*>(.*?)</h1>", body, re.S | re.I)
+        strip = lambda s: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s or "")).strip()
+        ids = re.findall(r"""\s(?:id|name)=["']([^"']+)["']""", body)
+        return {"status": status_code, "url": final_url, "title": strip(m.group(1)) if m else "",
+               "h1": strip(h.group(1)) if h else "", "ids": ids[:5000], "crawled": False}
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        n = 0
+        for (k, u), result in zip(todo[:200], ex.map(lambda ku: one(ku[1]), todo[:200])):
+            n += 1
+            say(f"Checking navigation link {n}/{len(todo)}")
+            status[k] = result
     return {"links": status, "download": _download(page, pages, out, say), "subtitle_source": _subtitle_source(page, pages)}
 
 
@@ -304,8 +419,13 @@ def _row(group: str, status: str, item: str, expected: str = "", actual: str = "
             "page": page, "note": note, "where": where}
 
 
-GROUPS = [("nav", "Left navigation — L1 TOC"), ("links", "Navigation links"), ("download", "Download PDF"),
-          ("pager", "Next / previous topic"), ("otp", "On this page"), ("subtitle", "Product subtitle")]
+GROUPS = [("nav", "Left navigation — whole TOC"), ("links", "Navigation links"), ("download", "Download PDF"),
+          ("pager", "Next / previous topic"), ("otp", "On this page"), ("layout", "Page layout and pictures"),
+          ("subtitle", "Product subtitle")]
+LAYOUT_ISSUE = {"page-scroll": "Page scrolls sideways", "image-broken": "Picture not loaded", "image-collapsed": "Picture collapsed",
+                "image-overflow": "Picture outside its area", "image-stretched": "Picture stretched", "image-upscaled": "Picture enlarged (blurred)",
+                "block-overflow": "Content outside the page area", "overlap": "Content overlapping",
+                "breadcrumb-overlap": "Breadcrumb / H1 overlap", "empty-page": "Page has only a heading, no content"}
 
 
 def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
@@ -322,7 +442,9 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
     if not l1 and site.get("toc_l1"):
         l1, l1_source = site["toc_l1"], "printed TOC (level 1)"
 
-    # ---- left navigation: all L1 TOC entries
+    # ---- left navigation: the whole TOC, every level - not only L1 - matched entry by entry the same way
+    # the PDF's own TOC is matched against stage (pdfval.toc): same title -> same entry, a title repeated at
+    # another level (a sub-item listed elsewhere, then the real heading) resolved towards the matching level
     navs = [p for p in pages if p.get("nav") and p["nav"]["items"]]
     if not pages:
         rows.append(_row("nav", "fail", "Chrome", note="No page could be read"))
@@ -330,43 +452,53 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
         rows.append(_row("nav", "fail", "Left navigation", "a table of contents on every page", "not found",
                          note="Set [site] nav = \"<css selector>\" if the site has one"))
     else:
+        from collections import Counter
+        from . import toc as tocmod
+
         ref = navs[0]
         items = ref["nav"]["items"]
-        top = [it for it in items if it["depth"] == 0]
-        used, order = set(), []
-        for t in l1:
-            k = next((i for i, it in enumerate(top) if i not in used and _same(t, it["text"])), None)
-            if k is not None:
-                used.add(k)
-                order.append(k)
-                rows.append(_row("nav", "pass", t, t, top[k]["text"], ref["url"], "top level", ref["nav"]["where"]))
-                continue
-            deeper = next((it for it in items if it["depth"] > 0 and _same(t, it["text"])), None)
-            if deeper:
-                rows.append(_row("nav", "warn", t, "top level", f"{deeper['text']} (level {deeper['depth'] + 1})", ref["url"],
-                                 "In the navigation, but not as a top-level entry", ref["nav"]["where"]))
+        toc_full = site.get("toc_full") or [(t, 1) for t in l1]
+        # a shallow nav (top-level chapters only, sub-headings left to "On this page") is complete on its own
+        # terms: only the TOC levels the nav itself actually goes to are compared, so it is not faulted for a
+        # level it was never meant to carry
+        nav_depth = max((it["depth"] for it in items), default=0) + 1
+        toc_full = [(t, lvl) for t, lvl in toc_full if lvl <= nav_depth]
+        thr = (cfg.get("toc") or {}).get("title_match_threshold", 0.8)
+        entry = lambda title, level: tocmod.TocEntry(title, _norm(title), max(level, 1), None, -1, (0, 0, 0, 0), 0.0)
+        toc_side = [entry(t, lvl) for t, lvl in toc_full]
+        nav_side = [entry(it["text"], it["depth"] + 1) for it in items]
+        aligned = tocmod._sequence(tocmod._align(toc_side, nav_side, thr), toc_side, nav_side, thr)
+        counts = Counter()
+        label = lambda e: f"L{e.level} “{e.title}”"
+        for i, j, s, moved in aligned:
+            ea, eb = (toc_side[i] if i is not None else None), (nav_side[j] if j is not None else None)
+            if ea and eb and moved:
+                status = "order differs"
+            elif ea and eb:
+                status = "match" if s == 1.0 and ea.level == eb.level else "level differs" if s == 1.0 else "title differs"
             else:
-                rows.append(_row("nav", "fail", t, t, "missing", ref["url"], "L1 TOC entry not in the left navigation",
-                                 ref["nav"]["where"]))
-        if order != sorted(order):
-            rows.append(_row("nav", "fail", "Order", " → ".join(top[k]["text"] for k in sorted(order)),
-                             " → ".join(top[k]["text"] for k in order), ref["url"], "L1 entries are in a different order than the PDF TOC"))
-        for i, it in enumerate(top):
-            if i not in used:
-                rows.append(_row("nav", "info", it["text"], "", it["text"], ref["url"], "Top-level navigation entry that is not an L1 TOC entry"))
+                status = "missing in stage" if ea else "extra in stage"
+            counts[status] += 1
+            sev = {"match": "pass", "order differs": "fail", "level differs": "warn", "title differs": "warn",
+                  "missing in stage": "fail", "extra in stage": "info"}[status]
+            rows.append(_row("nav", sev, (ea or eb).title, label(ea) if ea else "—", label(eb) if eb else "—",
+                             ref["url"], status if status != "match" else "", ref["nav"]["where"]))
+        note = (f"{counts['match']} match · {counts['level differs']} level differs · {counts['title differs']} title differs · "
+               f"{counts['order differs']} order differs · {counts['missing in stage']} missing in the navigation · "
+               f"{counts['extra in stage']} in the navigation but not in the TOC")
+        bad = counts["missing in stage"] or counts["order differs"]
+        rows.insert(0, _row("nav", "fail" if bad else "warn" if counts["level differs"] or counts["title differs"] or counts["extra in stage"] else "pass",
+                            "TOC entries compared", str(len(toc_side)), str(len(nav_side)), ref["url"], note, ref["nav"]["where"]))
         sig = lambda p: [(it["text"], key(it["href"])) for it in p["nav"]["items"]]
         for p in navs[1:]:
             if sig(p) != sig(ref):
-                a, b = {x[0] for x in sig(ref)}, {x[0] for x in sig(p)}
-                diff = ", ".join(f"-{x}" for x in sorted(a - b)) + " " + ", ".join(f"+{x}" for x in sorted(b - a))
+                sa, sb = {x[0] for x in sig(ref)}, {x[0] for x in sig(p)}
+                diff = ", ".join(f"-{x}" for x in sorted(sa - sb)) + " " + ", ".join(f"+{x}" for x in sorted(sb - sa))
                 rows.append(_row("nav", "warn", "Same navigation on every page", f"{len(sig(ref))} entries as on the first page",
                                  f"{len(sig(p))} entries {diff.strip()}", p["url"], "Navigation differs from page to page"))
         for p in pages:
             if not p.get("nav"):
                 rows.append(_row("nav", "fail", "Left navigation", "present", "not found", p["url"]))
-        l1_note = f"{len(l1)} L1 entries from the {l1_source}; {len(top)} top-level navigation entries"
-        rows.insert(0, _row("nav", "pass" if l1 else "warn", "L1 entries compared", str(len(l1)), str(len(top)), ref["url"], l1_note,
-                            ref["nav"]["where"]))
 
     # ---- navigation links: open, land on the right page, active entry
     seen = set()
@@ -466,7 +598,10 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
             continue
         its = [it for it in p["otp"]["items"] if "#" in it["href"]]
         top = min((h["level"] for h in heads), default=2)
-        want = [h for h in heads if h["level"] <= top + max(it["depth"] for it in its or [{"depth": 0}])]
+        # every sub-heading down to H4 belongs in the list ([site] on_this_page_max_level); deeper ones only as
+        # far as the list itself goes
+        deep = max(int((cfg or {}).get("on_this_page_max_level", 4)), top + max(it["depth"] for it in its or [{"depth": 0}]))
+        want = [h for h in heads if h["level"] <= deep]
         used = set()
         for h in want:
             k = next((i for i, it in enumerate(its) if i not in used and _same(h["text"], it["text"], 0.85)), None)
@@ -489,6 +624,31 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
             if i not in used:
                 rows.append(_row("otp", "warn", it["text"], "", it["text"], p["url"], "Entry without a matching heading on the page",
                                  p["otp"]["where"]))
+
+    # ---- page layout and pictures: breaking issues on each page; pictures of one page at inconsistent alignment
+    for p in pages:
+        issues = p.get("layout") or []
+        for it in issues:
+            rows.append(_row("layout", "fail", LAYOUT_ISSUE.get(it["kind"], it["kind"]), "", it.get("text", ""), p["url"],
+                             it.get("detail", ""), it.get("where", "")))
+        pics = [im for im in p.get("images") or [] if im["width"] >= 60]  # icons aside
+        sides = {im["align"] for im in pics} & {"left", "center", "right"}
+        if len(sides) > 1 and len(pics) >= 2:
+            by = {a: [im for im in pics if im["align"] == a] for a in sides}
+            usual = max(by, key=lambda a: len(by[a]))
+            for a, ims in by.items():
+                if a != usual and len(ims) <= max(1, len(by[usual]) // 2):  # the odd ones out
+                    for im in ims:
+                        rows.append(_row("layout", "warn", "Picture alignment", f"{usual} (as the page's other pictures)", f"{im['name']}: {a}",
+                                         p["url"], f"{im['width']}×{im['height']}px, {im['share']}% of the content width", im["where"]))
+        if "layout" in p and not issues:
+            rows.append(_row("layout", "pass", "Page layout", "", f"{len(p.get('images') or [])} picture(s) checked", p["url"]))
+        h1, gap = p.get("h1") or "", p.get("breadcrumb_gap")
+        if h1 and not p.get("breadcrumb"):
+            rows.append(_row("layout", "warn", "Breadcrumb above H1", "a breadcrumb trail", "not found", p["url"],
+                             "The page has an H1 but no breadcrumb above it"))
+        elif h1 and p.get("breadcrumb") and gap is not None and gap >= 0:
+            rows.append(_row("layout", "pass", "Space above H1 (breadcrumb)", "", f"{gap}px gap to the breadcrumb", p["url"]))
 
     # ---- product subtitle
     rows += _subtitle_rows(pages, prod, site.get("subtitle_source") or {}, baseline)
@@ -656,8 +816,8 @@ def write_csv(site: dict, path: Path) -> Path:
     titles = dict((g, t) for g, t in GROUPS)
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
-        w.writerow(["Check", "Status", "Item", "Expected", "Actual", "Page", "Note", "Element"])
+        w.writerow(["Bug ID", "Check", "Status", "Item", "Expected", "Actual", "Page", "Note", "Element"])
         for r in site["rows"]:
-            w.writerow([titles.get(r["group"], r["group"]), r["status"], r["item"], r["expected"], r["actual"],
+            w.writerow([r.get("bug", ""), titles.get(r["group"], r["group"]), r["status"], r["item"], r["expected"], r["actual"],
                         r["page"], r["note"], r["where"]])
     return path

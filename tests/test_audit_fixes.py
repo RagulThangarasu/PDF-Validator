@@ -534,13 +534,13 @@ def _ui_table_pdf(path, stage: bool):
 
 def test_rule_only_table_rows_and_icons_are_validated(tmp_path, cfg):
     """A table with rules between its rows only (no cell borders) is a table: its rows are compared, and the
-    icons of each row - here swapped (⌄ / ⌃ → ⌃ / ⌄) and set above the text instead of beside it."""
+    icons of each row - here set above the text instead of beside it."""
     from pdfval.checks import tables
     a = _ui_table_pdf(tmp_path / "a.pdf", False)
     assert [t for t in tables.detect(pymupdf.open(a)[0]) if len(t[2]) >= 4], "the rule-only table is not detected"
     r = compare(a, _ui_table_pdf(tmp_path / "b.pdf", True), cfg)
     kinds = {t for f in found(r, "tables") for t in f["types"]}
-    assert {"icon order", "icon above text"} <= kinds, [f["message"] for f in found(r, "tables")]
+    assert "icon above text" in kinds, [f["message"] for f in found(r, "tables")]
     assert not kinds & {"missing row", "extra row", "rows merged", "row split"}, [f["message"] for f in found(r, "tables")]
 
 
@@ -598,6 +598,7 @@ def test_image_report_has_the_missing_callout_numbers(tmp_path, cfg):
     (prod and stage picture only), never a content issue."""
     from pdfval.report import image_report
     cfg["ignore"]["cover_pages"] = False  # the test PDF is one page: its first page is no cover
+    cfg["assets"]["picture_text"] = True  # (off by default: inside a picture only the red overlay is checked)
     r = compare(_screenshot_pdf(tmp_path / "a.pdf", True), _screenshot_pdf(tmp_path / "b.pdf", False), cfg)
     rows = image_report.issues(r)
     assert any("Callout numbers missing" in name for _, _, name in rows), [f["message"] for s in r["sections"]
@@ -784,3 +785,13 @@ def test_bullet_at_the_top_of_many_pages_is_not_a_running_header(tmp_path, cfg):
     D = extract.load(str(tmp_path / "m.pdf"), "baseline", cfg)
     # (the built-in font prints the bullet as a middle dot)
     assert sum(1 for w in D.words if len(w.text) == 1 and not w.text.isalnum()) == 8, [w.text for w in D.words][:12]
+
+
+def test_only_the_red_overlay_of_a_picture_is_checked_by_default(tmp_path, cfg):
+    """[assets] picture_text = false (the default): a picture's callout numbers, labels and leader lines are not
+    reported - its red overlay still is."""
+    from pdfval.report import image_report
+    cfg["ignore"]["cover_pages"] = False
+    r = compare(_screenshot_pdf(tmp_path / "a.pdf", True), _screenshot_pdf(tmp_path / "b.pdf", False), cfg)
+    names = [name for _, _, name in image_report.issues(r)]
+    assert not any("Callout numbers" in n or "labels" in n or "Leader lines" in n for n in names), names

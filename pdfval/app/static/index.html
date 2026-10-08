@@ -410,6 +410,84 @@ async function pairsPanel(root, embedded) {
   draw();
 }
 
+// ---------------- bulk web-page URLs: paste or upload many, each matched to its prod PDF, tick the ones to run
+async function urlsPanel(root) {
+  const $ = sel => root.querySelector(sel);
+  let prod = [];
+  try { prod = (await api('/api/library')).files; } catch (e) { /* the picker still works without the datalist */ }
+  const label = f => `${f.group}/${f.product}${f.sub ? '/' + f.sub : ''}/${f.name}`;
+  const byLabel = new Map(prod.map(f => [label(f), f.path]));
+  const byPath = new Map(prod.map(f => [f.path, label(f)]));
+  let rows = [];  // {k, url, prod, name, product, lang, via, on}
+  root.innerHTML = `<div class="row"><div><div class="role">Bulk · many web pages at once</div><h2 style="margin-top:4px">Validate many URLs</h2></div>
+      <span class="spacer"></span>
+      <label class="small" style="display:flex;align-items:center;gap:6px">Run <input type="number" id="ur-conc" value="6" min="1" max="50" style="width:56px"> at a time</label>
+      <span class="small muted" id="ur-count"></span><button class="btn primary" id="ur-run" disabled>Validate selected</button></div>
+    <p class="small muted" style="margin:4px 0 10px">Paste one URL per line, or upload a .txt/.csv listing them, then <b>Match</b> — each is paired with its prod PDF the
+      same way a single URL is (the guide's product / language against the prod library and the migration Excel). Tick the ones to validate — up to the number above run
+      at once (each one also reads several of the guide's own pages in parallel), the rest queue behind them on the Runs page.</p>
+    <div class="row" style="gap:8px;align-items:flex-start">
+      <textarea id="ur-list" rows="4" style="flex:1" placeholder="https://docs.example.com/manual/sl04/en/page-a.html&#10;https://docs.example.com/manual/sl04/en/page-b.html"></textarea>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="btn sm" style="text-align:center;cursor:pointer">Upload list<input type="file" id="ur-file" accept=".txt,.csv" hidden></label>
+        <button class="btn primary sm" id="ur-match">Match</button>
+      </div>
+    </div>
+    <datalist id="ur-prod">${prod.map(f => `<option value="${esc(label(f))}">`).join('')}</datalist>
+    <div id="ur-table" style="overflow:auto;max-height:380px;margin-top:10px"></div>`;
+  $('#ur-file').onchange = () => {
+    const f = $('#ur-file').files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => { $('#ur-list').value = ($('#ur-list').value.trim() + '\n' + reader.result).trim(); };
+    reader.readAsText(f);
+  };
+  const count = () => { const n = rows.filter(r => r.on && r.prod).length; $('#ur-count').textContent = n ? `${n} pair(s) selected` : ''; $('#ur-run').disabled = !n; };
+  const draw = () => {
+    if (!rows.length) { $('#ur-table').innerHTML = ''; count(); return; }
+    $('#ur-table').innerHTML = `<table class="t" style="margin:0"><thead><tr><th></th><th>URL</th><th>Prod PDF</th><th>Paired by</th></tr></thead>
+      <tbody>${rows.map(r => `<tr data-k="${r.k}">
+        <td><input type="checkbox" data-on ${r.on && r.prod ? 'checked' : ''} ${r.prod ? '' : 'disabled'}></td>
+        <td><b>${esc(r.product || r.url)}</b>${r.lang ? ` <span class="badge">${esc(r.lang)}</span>` : ''}<div class="small muted" style="word-break:break-all">${esc(r.url)}</div></td>
+        <td style="min-width:300px"><input list="ur-prod" data-prod value="${esc(byPath.get(r.prod) || '')}" placeholder="— pick the prod PDF —" style="width:100%"></td>
+        <td>${r.prod ? `<span class="badge ${r.via === 'Excel' ? 'b-pass' : 'b-warn'}">${esc(r.via || 'name')}</span>` : '<span class="badge b-fail">none</span>'}</td></tr>`).join('')}
+      </tbody></table>`;
+    count();
+  };
+  $('#ur-table').onchange = e => {
+    const r = rows[+e.target.closest('tr').dataset.k];
+    if (e.target.matches('[data-on]')) r.on = e.target.checked;
+    if (e.target.matches('[data-prod]')) {
+      const path = byLabel.get(e.target.value.trim()) || '';
+      r.prod = path; r.on = !!path; r.via = path ? 'manual' : '';
+      draw();
+    }
+    count();
+  };
+  $('#ur-match').onclick = async () => {
+    const urls = $('#ur-list').value.split('\n').map(s => s.trim()).filter(s => /^https?:\/\//.test(s));
+    if (!urls.length) { alert('Paste at least one http(s) URL, one per line.'); return; }
+    $('#ur-match').disabled = true;
+    try {
+      const r = await api('/api/prod-for-bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ urls }) });
+      rows = r.matches.map((m, k) => ({ ...m, k, on: !!m.prod }));
+      draw();
+    } catch (e) { alert(e.message); }
+    $('#ur-match').disabled = false;
+  };
+  $('#ur-run').onclick = async () => {
+    const pairs = rows.filter(r => r.on && r.prod).map(r => ({ baseline: r.prod, candidate: r.url, name: `${r.product || r.url}${r.lang ? ' (' + r.lang + ')' : ''}` }));
+    const options = { mode: 'html' };
+    document.querySelectorAll('[id^="o-"]').forEach(el => options[el.id.slice(2)] = el.type === 'checkbox' ? el.checked : el.value);
+    const concurrent = Math.max(1, +$('#ur-conc').value || 6);
+    if (!pairs.length || !confirm(`Queue ${pairs.length} prod ⇄ web page comparison(s)? ${Math.min(concurrent, pairs.length)} run at a time, the rest queue behind them.`)) return;
+    $('#ur-run').disabled = true;
+    try { await api('/api/pairs/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pairs, options, concurrent }) });
+          location.hash = '#/runs'; }
+    catch (e) { alert(e.message); $('#ur-run').disabled = false; }
+  };
+}
+
 // ---------------- metadata: Document Title / Page Title / Meta Description of every product map in AEM vs the migration sheet
 async function viewMetadata() {
   const st = await api('/api/metadata');
@@ -496,7 +574,7 @@ async function viewNew(qs) {
         <div class="role">Web page · candidate</div><h2 style="margin-top:4px">HTML page URL</h2>
         <input type="url" id="url" placeholder="https://docs.example.com/manual/sl04" value="${esc(prev?.mode === 'html' ? prev.candidate : '')}" aria-label="Web page URL">
         <p class="small muted" style="margin:8px 0 0">The page is opened in a headless browser and read from its structure (headings, text, tables, images, links).
-          Its headings are matched to the PDF's table of contents and every section is validated.</p>
+          Its headings are matched to the PDF's table of contents and every section is validated. Enter a Sites folder instead of a page (e.g. <code>…/sites.html/content/guide</code>) and the English guide of the selected prod PDF's product is searched under it and validated.</p>
         <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="o-html_crawl" ${o.html_crawl === false ? '' : 'checked'}>
           <span><b>All pages of the guide</b> – follow this page's links to every page under the same folder (in navigation order) and validate them all against the whole PDF.
           Unchecked: only this page, against the PDF chapter it belongs to.</span></label>
@@ -504,7 +582,7 @@ async function viewNew(qs) {
         <details style="margin-top:10px" ${o.html_user ? 'open' : ''}><summary>Login (if the page needs one)</summary>
           <div class="opts">
             <div><label class="f">User name</label><input type="text" id="o-html_user" value="${esc(o.html_user || '')}" autocomplete="username"></div>
-            <div><label class="f">Password</label><input type="password" id="o-html_password" value="" autocomplete="current-password"></div>
+            <div><label class="f">Password</label><input type="password" id="o-html_password" value="" autocomplete="current-password" placeholder="saved AEM login is used when empty"></div>
           </div>
           <p class="small muted" style="margin:6px 0 0">Sent as HTTP basic auth and typed into the site's sign-in form (e.g. AEM author).
             The password is kept in the server's memory only – it is not saved with the run; re-enter it after a server restart.</p>
@@ -512,15 +590,15 @@ async function viewNew(qs) {
         <details style="margin-top:10px" ${o.html_root || o.html_exclude ? 'open' : ''}><summary>Web page options</summary>
           <div class="opts">
             <div><label class="f">Content area (CSS selector)</label><input type="text" id="o-html_root" value="${esc(o.html_root || '')}" placeholder="auto: main / article / body"></div>
-            <div><label class="f">Viewport width (px)</label><input type="number" id="o-html_width" value="${esc(o.html_width || 1280)}" min="320" max="2560"></div>
-            <div><label class="f">Wait after load (ms)</label><input type="number" id="o-html_wait" value="${esc(o.html_wait || 1500)}" min="0" step="250"></div>
+            <div><label class="f">Viewport width (px)</label><input type="number" id="o-html_width" value="${esc(o.html_width || 1440)}" min="320" max="2560"></div>
+            <div><label class="f">Wait after load (ms)</label><input type="number" id="o-html_wait" value="${esc(o.html_wait || 500)}" min="0" step="250"></div>
           </div>
           <div style="margin-top:10px"><label class="f">Exclude (CSS selectors – site navigation, headers, footers…)</label>
             <input type="text" id="o-html_exclude" value="${esc(o.html_exclude || '')}" placeholder="nav, header, footer, aside, [role=navigation] (default)"></div>
         </details>`}
       </div>
     </div>
-    ${MODE === 'pdf' ? '<div class="card" id="pairs-panel" style="margin-top:16px"></div>' : ''}
+    ${MODE === 'pdf' ? '<div class="card" id="pairs-panel" style="margin-top:16px"></div>' : '<div class="card" id="urls-panel" style="margin-top:16px"></div>'}
     <div class="card" id="aem-card" style="margin-top:16px">
       <div class="row"><b>AEM login</b><span class="muted small">— so every issue links to its exact topic file in AEM (stage PDFs from AEM Guides)</span>
         <span class="spacer"></span><span id="aem-state" class="small"></span></div>
@@ -615,6 +693,7 @@ async function viewNew(qs) {
   }
   $('#go').onclick = start;
   if ($('#pairs-panel')) pairsPanel($('#pairs-panel'), true);
+  if ($('#urls-panel')) urlsPanel($('#urls-panel'));
   $('#aem-check').onclick = () => aemLogin(true);
   if ($('#aem-stage-go')) {
     const info = () => $('#aem-map-info');

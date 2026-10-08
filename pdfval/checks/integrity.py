@@ -176,6 +176,12 @@ def _destination(doc: Doc, ln: dict) -> str:
     # the first line that reaches below the target point: a line ending at / above it (the last line of
     # the previous section, right above the heading the jump targets) is not where the reader lands
     lines = [l for l in doc.lines if l.page == page and l.bbox[3] > y + 1]
+    # ... nor is a line the point only cuts through: AEM points at the top of the target topic's box, a few points
+    # above its heading - with tight spacing that is inside the last line of the paragraph before it (the point
+    # at mid-height of “Please refer to the tables below …”, the heading “Button LED indicator” right under it).
+    # A line counts when the point is at its top (its upper third); else the next line down is the landing
+    below = [l for l in lines if l.bbox[1] >= y - 0.35 * (l.bbox[3] - l.bbox[1])]
+    lines = below or lines
     return (min(lines, key=lambda l: l.bbox[1]).text.strip()[:60]) if lines else ""
 
 
@@ -191,6 +197,13 @@ def _link_look(doc: Doc, idx: list[int]) -> str:
     colour = w0.style.color
     own_colour = bool(others) and all(w.style.color != colour for w in others) or \
         (not others and colour.lower() not in ("#000000", "#231f20", "#1d1d1b"))
+    if not own_colour and others:
+        # the words next to them on the line may be part of the same link (“Notes on HDMI port and cable” + “on
+        # page 6”, all blue): a link colour is one that is not the colour the page's text is printed in
+        from collections import Counter
+        body = Counter(w.style.color for w in doc.words if w.page == w0.page and w.norm).most_common(1)[0][0]
+        own_colour = colour != body and all(doc.words[k].style.color == colour for k in idx) \
+            and any(w.style.color == body for w in others)
     under = False
     try:
         pg = _pdf(doc)[w0.page]

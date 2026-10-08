@@ -179,7 +179,9 @@ def make_icon_pdf(path, tmp_path, inline: bool):
     return str(path)
 
 
-def test_inline_icon_dropped_below_text_is_flagged(tmp_path, cfg):
+def test_inline_icon_dropped_below_text_is_not_flagged(tmp_path, cfg):
+    """Icons are only compared for look, size, broken/missing and pixelation - not reflow/placement:
+    an icon moving out of its text line is not reported as a "placement" finding."""
     cfg["layout"]["compare_with_prod"] = True  # the optional prod -> stage layout comparison
     a = make_icon_pdf(tmp_path / "a.pdf", tmp_path, inline=True)
     same = make_icon_pdf(tmp_path / "same.pdf", tmp_path, inline=True)
@@ -187,8 +189,7 @@ def test_inline_icon_dropped_below_text_is_flagged(tmp_path, cfg):
     placement = lambda r: [f for s in r["sections"] for f in s["findings"]
                            if f["category"] == "images" and "placement" in f["types"]]
     assert placement(compare(a, same, cfg)) == []
-    found = placement(compare(a, moved, cfg))
-    assert len(found) == 1 and "dropped out of its line" in found[0]["message"] and "Select" in found[0]["message"]
+    assert placement(compare(a, moved, cfg)) == []
 
 
 ROWS = [("Model", "SL4304"), ("Storage", "64 GB"), ("Operating system", "Android 13"), ("Memory", "8 GB DDR4")]

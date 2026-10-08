@@ -174,13 +174,13 @@ def test_planted_defect_is_a_genuine_issue(tmp_path, name):
 
 
 @pytest.mark.skipif(not Path(PROD).exists(), reason="sample prod PDF not present")
-def test_section_order_is_in_the_pdf_report(tmp_path):
-    """A section in the wrong place (content sequence) is one of the user's main scenarios: it is in the
-    PDF report ([genuine] types has "order differs")."""
+def test_section_order_is_not_reported(tmp_path):
+    """A section moved to another position is not reported at all ([ignore] types has "order differs"):
+    its content is still there, just elsewhere, so it is not treated as an issue."""
     doc = pymupdf.open(PROD)
     d_section_order(doc)
     out = tmp_path / "stage.pdf"
     doc.save(out, garbage=3)
     r = compare(PROD, str(out), load_config())
     order = [f for s in r["sections"] for f in s["findings"] if "order differs" in (f.get("types") or [])]
-    assert order and all(f["genuine"] for f in order)
+    assert not order

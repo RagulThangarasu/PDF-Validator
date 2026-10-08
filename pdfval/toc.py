@@ -225,18 +225,20 @@ def _align(a: list[TocEntry], b: list[TocEntry], thr: float) -> list[tuple[int |
         SequenceMatcher(None, a[i].norm, b[j].norm).ratio())
     S = [[sim(i, j) for j in range(m)] for i in range(n)]
     # exact titles outweigh fuzzy ones, so two swapped entries with similar titles
-    # ("Updating an app" / "Updating all apps") are not paired with each other in order
-    W = lambda x: 1.0 if x == 1.0 else 0.45 * x
+    # ("Updating an app" / "Updating all apps") are not paired with each other in order; a tiny same-level
+    # bonus breaks ties among several exact-title candidates (a title repeated at another level, e.g. "WAN"
+    # both as a heading and as an item of a list above it) towards the one that is also the same level
+    W = lambda x, i, j: (1.0 + (0.01 if a[i].level == b[j].level else 0.0)) if x == 1.0 else 0.45 * x
     dp = [[0.0] * (m + 1) for _ in range(n + 1)]
     for i in range(n - 1, -1, -1):
         for j in range(m - 1, -1, -1):
             best = max(dp[i + 1][j], dp[i][j + 1])
             if S[i][j]:
-                best = max(best, dp[i + 1][j + 1] + W(S[i][j]))
+                best = max(best, dp[i + 1][j + 1] + W(S[i][j], i, j))
             dp[i][j] = best
     rows, i, j = [], 0, 0
     while i < n or j < m:
-        if i < n and j < m and S[i][j] and dp[i][j] == dp[i + 1][j + 1] + W(S[i][j]):
+        if i < n and j < m and S[i][j] and dp[i][j] == dp[i + 1][j + 1] + W(S[i][j], i, j):
             rows.append((i, j, S[i][j])); i += 1; j += 1
         elif j >= m or (i < n and dp[i + 1][j] >= dp[i][j + 1]):
             rows.append((i, None, 0.0)); i += 1
@@ -342,6 +344,135 @@ def compare(ta: Toc, tb: Toc, cfg: dict) -> tuple[dict, list[Finding]]:
     info["page_size"] = {"baseline": {p + 1: list(sz) for p, sz in ta.page_sizes.items()},
                          "candidate": {p + 1: list(sz) for p, sz in tb.page_sizes.items()}}
     return info, findings
+
+
+def _body_headings(doc: Doc, toc_pages: list[int]) -> dict:
+    """Every heading of the document's body, by its normalised text: {norm: [(0-based page, y, font size), ...]} - every place
+    it stands (“Pairing” is a section and, further on, a sub-section of another one). A heading is a line set larger
+    than the body text; one that wraps is its lines joined (up to three)."""
+    sizes = Counter(round(ln.size, 1) for ln in doc.lines)
+    if not sizes:
+        return {}
+    body = sizes.most_common(1)[0][0]
+    skip = set(toc_pages)
+    big = [ln for ln in doc.lines if ln.page not in skip and ln.size >= body + 1.5 and ln.text.strip()]
+    out: dict = {}
+    for k, ln in enumerate(big):
+        text = ""
+        for n in range(3):
+            if k + n >= len(big):
+                break
+            nxt = big[k + n]
+            if n and (nxt.page != ln.page or abs(nxt.size - ln.size) > 0.3 or nxt.bbox[1] - big[k + n - 1].bbox[3] > 0.8 * ln.size):
+                break
+            text = f"{text} {nxt.text}".strip()
+            out.setdefault(normalize.title(text), []).append((ln.page, ln.bbox[1], round(ln.size, 1)))
+    return out
+
+
+def validate_deeper_levels(info: dict, findings: list[Finding], doc_a: Doc, toc_a: Toc, cfg: dict) -> None:
+    """Stage's table of contents often lists more levels than prod's (prod: chapters and sections; stage: the
+    sub-sections under them too). Such an entry has no entry in prod's TOC to be compared with - but it has a
+    heading in prod's document. Each one is validated against that heading:
+
+    * the heading exists in prod (same title) - else it is an entry stage adds: "Extra TOC entry";
+    * its level fits: a heading set smaller than prod's last TOC level is a deeper level, one set as large as a
+      level prod's TOC lists belongs on that level;
+    * it stands in the document's order: between the TOC entries before and after it;
+    * its page number is right (checked for every entry already).
+
+    The entries that pass are reported once, as the levels stage lists and prod's TOC does not; an entry that
+    fails is reported on its own."""
+    rows = info["rows"]
+    extras = [k for k, r in enumerate(rows) if r["status"] == "extra in stage"]
+    if not extras:
+        return
+    heads = _body_headings(doc_a, toc_a.pages)
+    thr = cfg.get("toc", {}).get("title_match_threshold", 0.8)
+
+    def places(title: str) -> list:
+        n = normalize.title(title)
+        if n in heads:
+            return heads[n]
+        best = max(heads, key=lambda h: SequenceMatcher(None, n, h).ratio(), default=None)
+        return heads[best] if best is not None and SequenceMatcher(None, n, best).ratio() >= max(thr, 0.9) else []
+
+    # walk stage's TOC from top to bottom, keeping the place reached in prod's document: each entry is the next
+    # heading of its title from there on (a title used twice is then the right one of the two)
+    at = (-1, -1.0)
+    where: dict = {}  # row -> (page, y, size) of its heading in prod
+    late: set = set()  # rows whose only heading in prod stands before the place reached
+    for k, r in enumerate(rows):
+        e = r["baseline"] or (r["candidate"] if r["status"] == "extra in stage" else None)
+        if not e:
+            continue
+        ps = sorted(places(e["title"]))
+        if r["baseline"] and r["baseline"].get("actual_page"):
+            on = [p for p in ps if p[0] == r["baseline"]["actual_page"] - 1]
+            ps = on or ps
+        nxt = [p for p in ps if (p[0], p[1]) > at]
+        if nxt:
+            where[k] = nxt[0]
+            at = (nxt[0][0], nxt[0][1])
+        elif ps and not r["baseline"]:
+            where[k] = ps[-1]
+            late.add(k)
+    by_level: dict = {}
+    for k, r in enumerate(rows):  # the font size prod sets each TOC level's headings in
+        if r["baseline"] and r["candidate"] and k in where:
+            by_level.setdefault(r["baseline"]["level"], []).append(where[k][2])
+    size_of = {lvl: Counter(v).most_common(1)[0][0] for lvl, v in by_level.items()}
+    deepest = max(size_of, default=0)
+
+    sev = cfg.get("toc", {}).get("severity", {})
+    drop, ok, problems = set(), [], []
+    for k in extras:
+        e = rows[k]["candidate"]
+        h = where.get(k)
+        if h is None:
+            continue  # no such heading in prod: stays an extra entry
+        rows[k]["prod_heading"] = {"page": h[0] + 1, "size": h[2]}
+        rows[k]["flags"].append(f"heading in prod (p.{h[0] + 1}), not listed in prod's TOC")
+        drop.add(k)
+        same = [lvl for lvl, sz in size_of.items() if abs(sz - h[2]) <= 0.3]
+        smaller = bool(size_of) and h[2] < min(size_of.values()) - 0.3
+        if k in late:
+            problems.append((k, "order differs", f"TOC entry out of order: “{e['title']}” (level {e['level']}) is a heading on p.{h[0] + 1} "
+                                                 f"of prod - before the entries stage's TOC lists ahead of it"))
+        elif same and e["level"] not in same:
+            problems.append((k, "level differs", f"TOC level differs: stage lists “{e['title']}” as level {e['level']}; in prod it is a "
+                                                 f"level {same[0]} heading (p.{h[0] + 1}, set like the other level {same[0]} headings)"))
+        elif smaller and e["level"] <= deepest:
+            problems.append((k, "level differs", f"TOC level differs: stage lists “{e['title']}” as level {e['level']}; in prod it is a "
+                                                 f"sub-heading below level {deepest} (p.{h[0] + 1})"))
+        else:
+            ok.append(k)
+    if not drop:
+        return
+    row_of = lambda f: f.detail.get("row")
+    findings[:] = [f for f in findings if not (f.detail.get("kind") == "extra entry" and row_of(f) in drop)]
+    for k, typ, msg in problems:
+        e = rows[k]["candidate"]
+        rows[k]["flags"].append(typ)
+        findings.append(Finding("toc", sev.get(typ, "warning"), msg, [], [Loc(e["toc_page"] - 1, tuple(e["bbox"]))] if e.get("toc_page") else [],
+                                {"kind": typ, "row": k}, types=[typ]))
+    if ok:
+        lv = Counter(rows[k]["candidate"]["level"] for k in ok)
+        levels = ", ".join(f"{n} on level {lvl}" for lvl, n in sorted(lv.items()))
+        eg = "; ".join(f"“{rows[k]['candidate']['title']}”" for k in ok[:4])
+        findings.append(Finding(
+            "toc", sev.get("deeper levels", "info"),
+            f"Stage's TOC lists deeper levels than prod's: {len(ok)} entries ({levels}) are not in prod's TOC but are headings "
+            f"of prod's document. Each was checked against its prod heading - title, level, order and page number are right "
+            f"(e.g. {eg})",
+            [], [Loc(rows[k]["candidate"]["toc_page"] - 1, tuple(rows[k]["candidate"]["bbox"])) for k in ok
+                 if rows[k]["candidate"].get("toc_page")][:cfg["report"]["max_locs"]],
+            {"kind": "deeper levels", "entries": len(ok), "levels": dict(lv)}, types=["toc deeper levels"]))
+    sm = info["summary"]
+    sm["extra validated"] = len(ok)
+    sm["extra in stage"] = sum(1 for k in extras if k not in drop)
+    sm["level differs"] += sum(1 for _, t, _ in problems if t == "level differs")
+    sm["order differs"] += sum(1 for _, t, _ in problems if t == "order differs")
 
 
 def _entry_json(e: TocEntry | None) -> dict | None:
