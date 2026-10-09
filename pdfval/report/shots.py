@@ -288,6 +288,16 @@ def _with_pictures(pc: "_PageCache", page: int, y: list, near: float = 12) -> li
     return [y0, y1]
 
 
+def _content_bounds(meta: dict) -> tuple[float, float] | None:
+    """The content column's own left/right (pt), so a marker line is drawn only across it - not the
+    whole page width. On a web capture the page image is the full browser viewport (left nav, content,
+    "on this page" panel side by side): a full-width line also crosses the nav, landing on whatever
+    heading happens to sit at that height in its own unrelated list - confusing, not a wrong position.
+    None when the document has no measured margins (too few lines) - callers fall back to full width."""
+    lr = (meta.get("margins") or {}).get("odd")
+    return (lr[0], lr[1]) if lr and lr[1] - lr[0] > 50 else None
+
+
 def _plan(sides: dict, line: dict, page_h: dict) -> dict:
     """One crop window per side, so prod and stage show the same area: the same number of text
     lines (each document measured in its own line height - an A5 manual at 8 pt and an A4 one
@@ -344,6 +354,7 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 2
               "candidate": _PageCache(result["meta"]["candidate"]["path"], zoom)}
     # a text line in each document (pt): its body size x 1.4
     line = {side: 1.4 * float(result["meta"][side].get("body_size") or 10) for side in ("baseline", "candidate")}
+    content_x = {side: _content_bounds(result["meta"][side]) for side in ("baseline", "candidate")}
     for k, (s, f) in enumerate(todo):
         f["shots"] = {}
         c = f.get("color")  # the issue's own colour (genuine.color_of): red / blue, else by check
@@ -398,8 +409,8 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 2
                 if not missing_sec and "label only" not in (f.get("types") or []):
                     marked[side] = (page, at["bbox"][1], where_)
                 what[side] = (page, "section-slot" if missing_sec else "aligned",
-                              lambda w, c=caches[side], p=page, y=at["bbox"][1], t=f"Not in {where_} - marker shows {how}":
-                              _crop_marker(c, p, y, color, t, w))
+                              lambda w, c=caches[side], p=page, y=at["bbox"][1], t=f"Not in {where_} - marker shows {how}", xb=content_x[side]:
+                              _crop_marker(c, p, y, color, t, w, xbounds=xb))
             else:  # no alignment available at all: fall back to the section start
                 start = s[side]["start"]
                 page = start["page"]
@@ -437,7 +448,7 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 2
                     where[side] = ("boxes", shown)
                     how = "the same spot in the same picture" if spot else "aligned by surrounding text"
                     what[side] = (page, "aligned", lambda w, c=caches[side], p=page, y=y, t=f"Not in {name} - marker shows {how}",
-                                  b=spot: _crop_marker(c, p, y, color, t, w, b))
+                                  b=spot, xb=content_x[side]: _crop_marker(c, p, y, color, t, w, b, xbounds=xb))
         windows = _plan(where, line, page_h)
         if full_page:
             for side in what:
@@ -552,9 +563,11 @@ def _linked_view(links: list, line: dict) -> dict | None:
 
 
 def _crop_marker(pc: _PageCache, page: int, y: float, color, note: str, window: tuple[float, float],
-                 box: tuple | None = None) -> Image.Image:
+                 box: tuple | None = None, xbounds: tuple[float, float] | None = None) -> Image.Image:
     """Crop the window and draw a dashed marker line at the insertion point y - or, given the box
-    where the missing thing belongs, a dashed box there with the arrow pointing at it."""
+    where the missing thing belongs, a dashed box there with the arrow pointing at it. xbounds (pt):
+    the content column's own left/right, so the line spans only that - not a web page's left nav or
+    "on this page" panel, which share the same y-coordinates as the content next to them."""
     z = pc.zoom
     y0, y1 = window
     img, _ = _strip(pc, page, y0, y1)
@@ -570,7 +583,9 @@ def _crop_marker(pc: _PageCache, page: int, y: float, color, note: str, window: 
         my = int((t + b) / 2)
     else:
         my = int((y - 3 - y0) * z)
-        for x in range(0, img.width, 22):
+        x0 = int(xbounds[0] * z) if xbounds else 0
+        x1 = int(xbounds[1] * z) if xbounds else img.width
+        for x in range(x0, x1, 22):
             d.line([(x, my), (x + 12, my)], fill=color, width=4)
     d.polygon([(0, my - 10), (14, my), (0, my + 10)], fill=color)
     d.rectangle([0, 0, img.width, 30], fill=(30, 35, 48))

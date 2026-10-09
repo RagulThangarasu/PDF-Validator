@@ -497,6 +497,11 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
     path = out / "candidate_source.pdf"
     pdf.save(path, garbage=3, deflate=True)
     doc = _to_doc(data, cuts, str(path))
+    # body font size + per-page content-box left/right (same statistics extract.py uses for a real PDF):
+    # without it, every page's left/right stay the dataclass default (0, 0) - a report screenshot's
+    # marker line would then span the full browser-viewport width, crossing the left nav / "on this
+    # page" panel instead of only the content column next to them
+    _measure(doc)
     for e in nav_toc:  # where each entry shows on the stage PDF (the first page's slices)
         k = _slice_of(cuts, e["box"][1]) if e.get("box") else None
         e["toc_page"] = k if k is not None else -1
