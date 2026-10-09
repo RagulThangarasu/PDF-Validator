@@ -275,6 +275,21 @@ CHROME_JS = r"""
     if (o > 0.4 * Math.min(ra.width * ra.height, rc.width * rc.height) && o > 200)
       layout.push({ kind: 'overlap', text: txt(b).slice(0, 60), detail: `printed on top of “${txt(a).slice(0, 40)}”`, where: path(b), box: box(b) });
   }
+  // a numbered/bulleted step whose marker is typed text (not a real <li> counter) must hang-indent:
+  // once wrapped, line 2+ must start to the right of line 1 (clearing the marker), not flush beneath
+  // it - "1. Connect the cable... / port transmits..." must not print "port" directly under "1."
+  const MARKER = /^\s*(\d{1,2}[.)]|[•●○◦▪‣-])\s+\S/;
+  for (const b of blocks) {
+    if (!MARKER.test(txt(b))) continue;
+    const r = document.createRange(); r.selectNodeContents(b);
+    const lines = [...r.getClientRects()].filter(x => x.width > 2 && x.height > 2);
+    if (lines.length < 2) continue;
+    const gap = lines[1].left - lines[0].left;
+    if (gap < 8)
+      layout.push({ kind: 'hanging-indent', text: txt(b).slice(0, 60),
+                   detail: `the wrapped line starts ${Math.round(gap)}px from the marker's own line - not indented past it`,
+                   where: path(b), box: box(b) });
+  }
   if (breadcrumbGap !== null && breadcrumbGap < 0)
     layout.push({ kind: 'breadcrumb-overlap', text: txt(crumbs).slice(0, 60),
                  detail: `the H1 overlaps the breadcrumb by ${-breadcrumbGap}px`, where: path(h1El), box: box(h1El) });
@@ -513,12 +528,13 @@ GROUPS = [("nav", "Left navigation — whole TOC"), ("links", "Navigation links"
 LAYOUT_ISSUE = {"page-scroll": "Page scrolls sideways", "image-broken": "Picture not loaded", "image-collapsed": "Picture collapsed",
                 "image-overflow": "Picture outside its area", "image-stretched": "Picture stretched", "image-upscaled": "Picture enlarged (blurred)",
                 "block-overflow": "Content outside the page area", "overlap": "Content overlapping",
-                "breadcrumb-overlap": "Breadcrumb / H1 overlap", "empty-page": "Page has only a heading, no content"}
+                "breadcrumb-overlap": "Breadcrumb / H1 overlap", "empty-page": "Page has only a heading, no content",
+                "hanging-indent": "Wrapped line not indented under the text"}
 # kinds always checked (on the active validation list: broken / missing / pixelated images, table/content
 # breaking out of the page); "overlap" and "empty-page" are old checks, off by default - see [site]
 # check_overlap / check_empty_page. "breadcrumb-overlap" follows check_breadcrumb, on by default.
 CORE_LAYOUT_KINDS = {"page-scroll", "image-broken", "image-collapsed", "image-overflow", "image-stretched",
-                      "image-upscaled", "block-overflow"}
+                      "image-upscaled", "block-overflow", "hanging-indent"}
 _EXTRA_LAYOUT_TOGGLE = {"overlap": "check_overlap", "breadcrumb-overlap": "check_breadcrumb", "empty-page": "check_empty_page"}
 _EXTRA_LAYOUT_DEFAULT = {"overlap": False, "breadcrumb-overlap": True, "empty-page": False}
 

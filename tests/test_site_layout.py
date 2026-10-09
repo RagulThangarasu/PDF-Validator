@@ -61,3 +61,24 @@ def test_left_aligned_picture_fails_the_design_spec(tmp_path, serve):
     bad = rows(site, "layout")
     assert any(r["item"] == "Picture alignment (design spec)" and r["expected"] == "centred" and "left" in r["actual"] for r in bad)
 
+
+_STEP_TEXT = ("1. Connect the USB cable between the PC and the monitor via the upstream USB port. This "
+             "upstream USB port transmits data between the PC and the USB devices connected to the monitor.")
+
+
+def test_numbered_step_without_hanging_indent_is_reported(tmp_path, serve):
+    """A step number typed as plain text ("1. ...", not a real <li> counter) that wraps to a second line
+    must hang-indent: the wrapped line has to start to the right of the "1.", clearing it - not flush
+    beneath it, which prints the next line's text directly under the number instead of under the step's
+    own text."""
+    site = _site(tmp_path, serve, f'<p>{_STEP_TEXT}</p>')
+    bad = rows(site, "layout")
+    assert any(r["item"] == "Wrapped line not indented under the text" for r in bad), bad
+
+
+def test_numbered_step_with_hanging_indent_is_not_reported(tmp_path, serve):
+    """The same wrapped step, this time with the standard hanging-indent CSS trick (padding-left +
+    negative text-indent) applied: the wrapped line clears the marker, so nothing is reported."""
+    site = _site(tmp_path, serve, f'<p style="padding-left:1.5em;text-indent:-1.5em">{_STEP_TEXT}</p>')
+    assert not any(r["item"] == "Wrapped line not indented under the text" for r in rows(site, "layout"))
+
