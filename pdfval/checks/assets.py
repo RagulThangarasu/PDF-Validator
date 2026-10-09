@@ -142,12 +142,12 @@ def _drawn_pair_geometry(u, x: "Image", y: "Image", acfg: dict, icon_w: float) -
 
 def size_reported(rel_x: float, rel_y: float, acfg: dict) -> bool:
     """A size difference worth reporting: the stage picture grew or shrank by more than [assets]
-    size_ratio_tolerance (relative) or width_tolerance (as a fraction of the content box) - either
-    direction, not only a big shrink, so every real size change is captured with its exact numbers."""
+    size_ratio_tolerance (relative, default 5 %) or width_tolerance (as a fraction of the content box) -
+    either direction, not only a big shrink, so every real size change is captured with its exact numbers."""
     if rel_x <= 0:
         return False
     return abs(rel_x - rel_y) > acfg.get("width_tolerance", 0.10) or \
-        abs(rel_y / rel_x - 1) > acfg.get("size_ratio_tolerance", 0.2)
+        abs(rel_y / rel_x - 1) > acfg.get("size_ratio_tolerance", 0.05)
 
 
 def find_artwork(img_doc: Doc, im: Image, other: Doc, at, min_score: float, max_dist: float,
@@ -1412,7 +1412,7 @@ def check(u: Unit) -> list[Finding]:
         rel_x, rel_y = _rel_width(u.a, x), _rel_width(u.b, y)
         grow = rel_y / max(rel_x, 1e-6) - 1
         if similar and max(rel_x, rel_y) >= icon_w and (abs(rel_x - rel_y) > acfg["width_tolerance"]
-                                                        or abs(grow) > acfg.get("size_ratio_tolerance", 0.2)):
+                                                        or abs(grow) > acfg.get("size_ratio_tolerance", 0.05)):
             if not size_reported(rel_x, rel_y, acfg):
                 continue  # not a real size difference after all (within tolerance)
             wx, hx, wy, hy = x.bbox[2] - x.bbox[0], x.bbox[3] - x.bbox[1], y.bbox[2] - y.bbox[0], y.bbox[3] - y.bbox[1]

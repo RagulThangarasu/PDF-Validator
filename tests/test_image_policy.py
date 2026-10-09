@@ -48,11 +48,19 @@ def test_missing_artwork_is_reported(tmp_path, cfg):
 
 
 def test_size_difference_is_reported_either_direction(tmp_path, cfg):
-    """Any size change past [assets] size_ratio_tolerance (20 %) is reported, smaller or bigger - not
+    """Any size change past [assets] size_ratio_tolerance (5 %) is reported, smaller or bigger - not
     only a shrink past 50 %; a change within tolerance stays quiet."""
     a = g.make(tmp_path / "a.pdf", g.base())
     assert [f["types"] for f in _pictures(compare(a, _resized(tmp_path, 0.4), cfg))] == [["image smaller"]]
     assert [f["types"] for f in _pictures(compare(a, _resized(tmp_path, 0.6), cfg))] == [["image smaller"]]
     assert [f["types"] for f in _pictures(compare(a, _resized(tmp_path, 1.4), cfg))] == [["image bigger"]]
-    assert _pictures(compare(a, _resized(tmp_path, 0.95), cfg)) == []
+    assert _pictures(compare(a, _resized(tmp_path, 0.97), cfg)) == []
+
+
+def test_small_size_change_past_5_percent_is_now_reported(tmp_path, cfg):
+    """A size change just over 5 % (e.g. 8 % smaller) used to be inside the old 20 % tolerance and was
+    never reported at all - no pass, no fail, nothing. It must now be captured, not silently dropped."""
+    a = g.make(tmp_path / "a.pdf", g.base())
+    fs = _pictures(compare(a, _resized(tmp_path, 0.92), cfg))
+    assert [f["types"] for f in fs] == [["image smaller"]]
 

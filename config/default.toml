@@ -232,7 +232,8 @@ aspect_tolerance = 0.05       # 5 %
 distorted_tolerance = 0.25    # stage draws a picture >= 25 % out of its own pixel proportions (prod does not)
                               # = stretched / squashed (genuine)
 width_tolerance = 0.10        # 10 % of content width
-size_ratio_tolerance = 0.2    # or stage picture >= 20 % smaller / bigger than prod (image size differs)
+size_ratio_tolerance = 0.05   # or stage picture >= 5 % smaller / bigger than prod (image size differs) - either
+                              # direction, so nothing under 5 % is noise and nothing over 5 % is missed
 # The picture issues reported (every report): missing (or not loading), a different picture (not the same picture
 # with / without a red overlay or re-captured: "image marks" / "image version" are not reported), blacked out,
 # pixelated, distorted, duplicated, alignment (a complete move left <-> right only), a picture in the wrong section,
