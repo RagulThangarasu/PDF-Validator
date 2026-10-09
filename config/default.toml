@@ -15,6 +15,9 @@ ignore_patterns = [           # regexes; matching lines are ignored entirely
 [sections]
 source = "auto"               # outline | headings | auto (outline when the PDF has bookmarks)
 locate_threshold = 0.8        # fuzzy score to find a bookmark's heading text on its page
+locate_forward_pages = 60     # a bookmark's own page number can be wrong (pages added/removed after
+                              # authoring): how many pages past it to keep looking for the real heading
+                              # text before giving up - never past the next bookmark's own page either
 title_match_threshold = 0.85  # fuzzy score to pair baseline and candidate headings
 front_matter = false          # true = also validate content before the first section (cover page)
 page_scope = true             # web page vs PDF: validate only the top-level (L1) chapter(s) the page covers
@@ -268,6 +271,12 @@ raster_vs_vector_severity = "info"  # same artwork, bitmap on one side and vecto
 artwork_match_score = 0.6      # min cross-correlation when searching the other page for the same artwork
 check_alignment = true        # report image alignment differences (left/right/center/full width)
 ignore_center_alignment = true # suppress center alignment changes (only report left/right differences)
+check_vector_only_missing = true  # a prod picture drawn only as vectors (no embedded raster of its own)
+                               # with no stage picture anywhere near it at all: reported as missing, same
+                               # as any other dropped picture - the normal pairing only finds such a vector
+                               # drawing by searching backward from an existing stage picture, so a prod
+                               # illustration stage drops completely (nothing left to search backward from)
+                               # was never checked at all until this
 
 [report]
 full_page_shots = true        # PDF report screenshots: the whole prod page and the whole stage page (not a crop)

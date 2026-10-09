@@ -48,7 +48,16 @@ def _from_outline(doc: Doc, scfg: dict) -> list[Anchor]:
         norm = normalize.title(title)
         to_y = tos[n_entry] if n_entry < len(tos) else None
         best = None
-        for p in (page - 1, page):  # bookmark page, then next page as fallback
+        # the bookmark's own page number is occasionally wrong (pages inserted/removed after the PDF's
+        # bookmarks were authored): when nothing matches right there, keep looking forward - but never past
+        # the next bookmark's own page (or a configurable cap, for a very distant next bookmark), so this
+        # entry can't steal the heading that really belongs to it, and a run-away scan stays bounded
+        cap = scfg.get("locate_forward_pages", 60)
+        next_page = next((doc.outline[k][2] for k in range(n_entry + 1, len(doc.outline)) if doc.outline[k][2] >= 1),
+                         len(doc.pages))
+        search_pages = [page - 1, page] + list(range(page + 1, max(page + 1, min(next_page, page + 1 + cap))))
+
+        for p in search_pages:  # bookmark page, then next page, then forward to the next bookmark's own page
             for li in range(min_line, len(doc.lines)):
                 ln = doc.lines[li]
                 if ln.page < p:

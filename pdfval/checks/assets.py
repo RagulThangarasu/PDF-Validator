@@ -1188,6 +1188,61 @@ def _drawn_counterpart(img_doc: Doc, im: Image, other: Doc, page: int, claimed: 
     return best
 
 
+def _missing_vector_only(u: Unit, al: Aligner, ia: list, ib: list, used: set, claimed_a: list, acfg: dict, icon_w: float) -> list[Finding]:
+    """A prod picture drawn entirely as vector lines (no embedded raster image of its own) is invisible
+    to `section_images()` (raster images only): every other path above only ever discovers such a
+    drawing by starting FROM an existing stage picture and searching backward for its prod vector match
+    (`find_artwork` / `_plain_twin` / `_drawing_near`) - so a picture dropped completely in stage (no
+    stage picture left to even start that backward search from) was never looked at. This scans the
+    section's own vector-drawing clusters directly and, for one not already matched above, checks
+    whether stage has ANY picture at all near its aligned position - none there at all is a real missing
+    picture, reported the same way as any other ("missing image")."""
+    findings = []
+    if u.a_range[1] <= u.a_range[0]:
+        return findings
+    pages = sorted({u.a.words[i].page for i in range(*u.a_range)})
+    claimed_rects = [(p, pymupdf.Rect(r)) for p, r in claimed_a]
+    ia_rects = [(x.page, pymupdf.Rect(x.bbox)) for x in ia]
+    pdf = _DOCS.get(u.a.path) or _DOCS.setdefault(u.a.path, pymupdf.open(u.a.path))
+    for page in pages:
+        out = [pymupdf.Rect(r) for _, r in _outside(u.a, u.a_range, page)]
+        content_w = max(u.a.right(page) - u.a.left(page), 1e-6)
+        page_claimed = [cr for p, cr in claimed_rects + ia_rects if p == page]
+        try:
+            # drop drawing paths already claimed by another picture match FIRST, before clustering: two
+            # separate illustrations can sit close enough that cluster_drawings() (a plain proximity
+            # merge) joins them into one - if the first one's own paths are gone before clustering runs,
+            # the second one is free to form its own, separate cluster instead of being swallowed whole
+            all_drawings = pdf[page].get_drawings()
+            free = [d for d in all_drawings if not any(cr.contains(pymupdf.Rect(d["rect"])) for cr in page_claimed)]
+            clusters = pdf[page].cluster_drawings(drawings=free) if len(free) != len(all_drawings) else pdf[page].cluster_drawings()
+        except Exception:
+            continue
+        for r in clusters:
+            rect = pymupdf.Rect(r)
+            if rect.is_empty or rect.width < icon_w * content_w:
+                continue  # an icon-sized mark (bullet, rule, border): not a picture worth checking
+            if any(o.intersects(rect) for o in out):
+                continue  # belongs to the section before/after this one
+            if any(cr.intersects(rect) for cr in page_claimed):
+                continue  # already matched above (or a raster image handled separately)
+            if not _has_artwork(u.a, page, rect):
+                continue  # a table/box rule, not a drawn picture
+            ax = Aligner.word_at(u.a, u.a_range, page, rect.y0)
+            if ax is None:
+                continue
+            at = al.loc_in_b(ax)
+            if at is None or any(abs(y.page - at.page) <= 1 for n, y in enumerate(ib) if n not in used):
+                continue  # some stage picture is there (not already claimed by another prod picture) -
+                          # a mismatch, but not "missing" (handled elsewhere)
+            findings.append(Finding(
+                "assets", acfg.get("count_severity", "error"),
+                f"Image missing in candidate (prod p.{page + 1}, {100 * rect.width / content_w:.0f}% of content width)",
+                [Loc(page, tuple(rect))], [], {"kind": "missing", "icon": False, "vector_only": True},
+                candidate_at=at, critical=True))
+    return findings
+
+
 def check(u: Unit) -> list[Finding]:
     acfg = u.cfg["assets"]
     al = Aligner(u)
@@ -1669,6 +1724,8 @@ def check(u: Unit) -> list[Finding]:
         findings = _grid_repair(u, findings, acfg)
     if acfg.get("check_vertical_alignment", True):
         findings += _vertical_alignment(u, acfg)
+    if acfg.get("check_vector_only_missing", True):
+        findings += _missing_vector_only(u, al, ia, ib, used, claimed_a, acfg, icon_w)
     _annotate(u, findings)
     return findings
 
