@@ -7,7 +7,7 @@ import threading
 import pymupdf
 import pytest
 
-from pdfval import load_config
+from pdfval import load_config, site_nav
 from pdfval.engine import compare_url
 
 CHAPTERS = [("overview", "Product overview", ["Specifications", "Package contents"]),
@@ -182,6 +182,32 @@ def test_callout_title_not_upper_case_is_reported(tmp_path, serve):
     r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
     typo = failed(r["site"], "typography")
     assert any(row["item"] == "Callout title — case" and row["expected"] == "UPPER CASE" for row in typo)
+
+
+def test_opacity_zero_content_is_still_sampled(tmp_path, serve):
+    """A scroll-reveal element (opacity:0 until a reader scrolls to it - common on real sites) must still
+    be sampled for typography: a single evaluate() never scrolls the page first, so treating opacity:0 as
+    "invisible" silently sampled nothing for sites that use this pattern, validating nothing against the
+    design spec without ever reporting it (see site_nav.py's `visible()` - checkOpacity is not set)."""
+    extra = '<p><strong style="opacity:0">Important setting</strong> affects performance.</p>'
+    pdf = make_site(tmp_path, extra_body=extra)
+    r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
+    rows = [row for row in r["site"]["rows"] if row["group"] == "typography" and "overview" in row["page"]]
+    assert any(row["item"] == "Body strong" for row in rows), rows
+    assert not any("nothing found to sample" in (row.get("actual") or "") for row in rows)
+
+
+def test_empty_page_is_reported_not_silently_skipped(tmp_path):
+    """A page where nothing at all could be sampled (every CSS role came back null - a page that failed to
+    render, or whose content selector matched nothing) must produce an explicit warning, not look exactly
+    like a clean pass by contributing zero rows."""
+    make_pdf(pdf_path := tmp_path / "baseline.pdf")
+    site = {"pages": [{"url": "https://example.com/empty.html", "css": {}, "css_sampled": False}], "links": {}}
+    cfg = {"check_download": False, "check_pager": False, "check_otp": False, "check_breadcrumb": False,
+          "check_subtitle": False, "check_picture_alignment": False, "check_image_center": False}
+    r = site_nav.evaluate(site, str(pdf_path), cfg, {})
+    typo = [row for row in r["rows"] if row["group"] == "typography"]
+    assert any(row["status"] == "warn" and "nothing found to sample" in row["actual"] for row in typo), typo
 
 
 def test_breadcrumb_is_on_by_default_and_flags_a_broken_redirect(tmp_path, serve):

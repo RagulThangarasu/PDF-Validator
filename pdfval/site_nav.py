@@ -49,7 +49,13 @@ CHROME_JS = r"""
     return out;
   };
   const txt = el => (el ? (el.innerText || el.textContent || '') : '').replace(/\s+/g, ' ').trim();
-  const visible = el => !!el && (el.checkVisibility ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : el.offsetParent !== null);
+  // checkOpacity is deliberately NOT set: a scroll-reveal fade-in (common on real sites) sits at
+  // opacity:0 until the reader scrolls to it, and a single evaluate() here never scrolls through the
+  // page first - treating that as "invisible" silently found zero headings/content on some real guides
+  // (and so validated nothing at all against the Figma spec, without ever failing or reporting it).
+  // display:none / visibility:hidden / content-visibility:hidden (checkVisibilityCSS) still count as
+  // hidden - only the opacity snapshot is ignored, since a reader WILL see this content once it reveals.
+  const visible = el => !!el && (el.checkVisibility ? el.checkVisibility({ checkVisibilityCSS: true }) : el.offsetParent !== null);
   const box = el => { const r = el.getBoundingClientRect(); return [Math.round(r.left + scrollX), Math.round(r.top + scrollY), Math.round(r.right + scrollX), Math.round(r.bottom + scrollY)]; };
   const path = el => {  // short CSS path, so the report can say where a value is read from
     const out = [];
@@ -301,6 +307,10 @@ CHROME_JS = r"""
     callout_title: sample([...root.querySelectorAll('*')].find(e => visible(e) && !inPanels(e) && e.children.length === 0 &&
       /^(important|note|tip|warning)$/i.test(txt(e).trim()) && (+getComputedStyle(e).fontWeight || 400) >= 600)),
   };
+  // nothing at all could be sampled (every role null): the typography/spacing checks below would
+  // otherwise silently validate nothing and report nothing, looking exactly like a clean pass - this
+  // flag lets evaluate() say so instead (see "css_sampled" in the returned object, below)
+  const cssSampled = Object.values(css).some(v => v !== null);
   // ---- the vertical gap between adjacent content blocks (paragraph / table / image / callout), vs
   // config/typography.toml [typography.formats.html_web].block_gaps - headings are not in this list,
   // see heading_spacing (margins) above instead
@@ -336,7 +346,8 @@ CHROME_JS = r"""
     footer: footer ? txt(footer).slice(0, 400) : '', breadcrumb: crumbs ? txt(crumbs) : '', breadcrumb_gap: breadcrumbGap,
     breadcrumb_box: crumbs ? box(crumbs) : null, breadcrumb_items: crumbs ? items(crumbs) : [], headings: heads,
     layout: layout.slice(0, 200), images: images.slice(0, 400), content_width: Math.round(rb.width),
-    ids: [...document.querySelectorAll('[id]')].map(e => e.id).slice(0, 5000), css, gaps: gaps.slice(0, 300),
+    ids: [...document.querySelectorAll('[id]')].map(e => e.id).slice(0, 5000), css, css_sampled: cssSampled,
+    gaps: gaps.slice(0, 300),
   };
 }
 """
@@ -893,6 +904,15 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
 
     # ---- CSS vs the design spec (config/typography.toml [typography.formats.html_web]): on the active list
     if cfg.get("check_typography", True):
+        # nothing at all could be sampled on this page (every role in `css` came back null, e.g. a
+        # scroll-reveal animation, a broken root selector, a page that failed to render its content):
+        # say so loudly, instead of silently validating nothing and looking exactly like a clean pass
+        for p in pages:
+            if "css" in p and not p.get("css_sampled", True):
+                rows.append(_row("typography", "warn", "CSS vs design spec", "font/weight/size/spacing samples",
+                                 "nothing found to sample on this page", p["url"],
+                                 "No heading, paragraph, link or table element could be sampled - the page may not "
+                                 "have rendered its content yet when captured, or the content area selector is wrong"))
         rows += _css_rows(pages, typography_cfg or {})
         rows += _spacing_rows(pages, typography_cfg or {})
 
