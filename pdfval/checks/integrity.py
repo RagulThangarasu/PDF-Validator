@@ -149,19 +149,22 @@ def _in_any(box, rects) -> bool:
 
 
 def _linked_lines(doc: Doc, idx: list[int]) -> bool:
-    """Does any link on the words' pages sit on the lines those words are on? The same link can
-    cover more or fewer words on the other side ("Shipping contents on page 8" vs "see Shipping
-    contents", or a rectangle around two whole lines): the sentence is linked on both sides."""
+    """Does a link on the stage page actually cover the given words (or a wider box drawn around the
+    same sentence/lines, which the stage side sometimes uses instead of tight per-word quads) - not
+    just sit on the same page row somewhere else entirely? The link rect must horizontally overlap the
+    words' own span (padded a little), not merely share their y-band across the whole page width - an
+    unrelated link elsewhere on that same visual row must not falsely "credit" a different phrase as
+    linked and suppress a real missing-link finding."""
     for page in {doc.words[k].page for k in idx}:
         rects = [pymupdf.Rect(l["from"]) for l in links(doc, page) if _target(l)]
         if not rects:
             continue
-        for k in idx:
-            w = doc.words[k]
-            if w.page != page:
-                continue
-            ln = doc.lines[w.line].bbox
-            row = pymupdf.Rect(ln[0], w.bbox[1], ln[2], w.bbox[3])  # the word's line, full width
+        ws = [doc.words[k] for k in idx if doc.words[k].page == page]
+        if not ws:
+            continue
+        x0, x1 = min(w.bbox[0] for w in ws) - 4, max(w.bbox[2] for w in ws) + 4
+        for w in ws:
+            row = pymupdf.Rect(x0, w.bbox[1], x1, w.bbox[3])  # the words' own x-span, not the whole page width
             if any(r.intersects(row) and min(r.y1, row.y1) - max(r.y0, row.y0) > 0.4 * row.height for r in rects):
                 return True
     return False

@@ -82,6 +82,45 @@ def test_same_link_twice_on_a_page_highlights_both_places(tmp_path, cfg):
     assert len({(l["page"], tuple(l["bbox"])) for l in f[0]["baseline"]}) == 2
 
 
+def _unrelated_link_same_row_pdf(path, stage: bool):
+    """Two cross-references on the same text row: "Administrator guide" and, further right on the
+    same line, "Appendix B" - prod links both; stage keeps the "Appendix B" link but drops the
+    "Administrator guide" one (plain text). An unrelated link elsewhere on that row must not make the
+    missing one look linked."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 60), "Introduction", fontsize=18, fontname="hebo")
+    pre = "Administrators should refer to "
+    mid = "Administrator guide"
+    post = " for setup, or "
+    tail = "Appendix B"
+    end = " for advanced options."
+    x = 72
+    for seg in (pre, mid, post, tail, end):
+        p.insert_text((x, 100), seg, fontsize=10)
+        x += pymupdf.get_text_length(seg, fontsize=10)
+    x0 = 72 + pymupdf.get_text_length(pre, fontsize=10)
+    x1 = x0 + pymupdf.get_text_length(mid, fontsize=10)
+    x2 = 72 + pymupdf.get_text_length(pre + mid + post, fontsize=10)
+    x3 = x2 + pymupdf.get_text_length(tail, fontsize=10)
+    q = doc.new_page()
+    q.insert_text((72, 60), "Administrator guide", fontsize=18, fontname="hebo")
+    q.insert_text((72, 90), "System management and configuration.", fontsize=10)
+    doc[0].insert_link({"kind": pymupdf.LINK_GOTO, "page": 1, "from": pymupdf.Rect(x2, 90, x3, 103),
+                        "to": pymupdf.Point(72, 50)})  # "Appendix B": present on both sides
+    if not stage:
+        doc[0].insert_link({"kind": pymupdf.LINK_GOTO, "page": 1, "from": pymupdf.Rect(x0, 90, x1, 103),
+                            "to": pymupdf.Point(72, 50)})  # "Administrator guide": prod only
+    doc.save(path)
+    return str(path)
+
+
+def test_unrelated_link_on_same_row_does_not_hide_a_real_missing_link(tmp_path, cfg):
+    r = compare(_unrelated_link_same_row_pdf(tmp_path / "a.pdf", False), _unrelated_link_same_row_pdf(tmp_path / "b.pdf", True), cfg)
+    f = [x for x in found(r, "integrity") if x["detail"].get("kind") == "missing-link"]
+    assert f and "Administrator guide" in f[0]["message"], [x["message"] for x in f]
+
+
 def _styled_xref_pdf(path, clickable: bool):
     """“See Timing chart.” - the xref purple and underlined; a real link in prod, none in stage."""
     doc = pymupdf.open()
