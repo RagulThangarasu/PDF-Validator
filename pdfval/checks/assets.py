@@ -1208,6 +1208,7 @@ def _missing_vector_only(u: Unit, al: Aligner, ia: list, ib: list, used: set, cl
         out = [pymupdf.Rect(r) for _, r in _outside(u.a, u.a_range, page)]
         content_w = max(u.a.right(page) - u.a.left(page), 1e-6)
         page_claimed = [cr for p, cr in claimed_rects + ia_rects if p == page]
+        trimbox = pdf[page].trimbox
         try:
             # drop drawing paths already claimed by another picture match FIRST, before clustering: two
             # separate illustrations can sit close enough that cluster_drawings() (a plain proximity
@@ -1222,6 +1223,9 @@ def _missing_vector_only(u: Unit, al: Aligner, ia: list, ib: list, used: set, cl
             rect = pymupdf.Rect(r)
             if rect.is_empty or rect.width < icon_w * content_w:
                 continue  # an icon-sized mark (bullet, rule, border): not a picture worth checking
+            if (rect & trimbox).get_area() < 0.8 * rect.get_area():
+                continue  # mostly outside the trim box: print production marks (crop marks, registration
+                          # crosses, a colour calibration bar), never real body content to compare
             if any(o.intersects(rect) for o in out):
                 continue  # belongs to the section before/after this one
             if any(cr.intersects(rect) for cr in page_claimed):

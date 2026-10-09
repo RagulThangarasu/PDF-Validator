@@ -552,25 +552,7 @@ def _nav_section(c: "_Canvas", site: dict) -> None:
             _text(c, xs[2], y + 11 * j, line, colour, True)
         c.y = y + h
     c.y += 6
-    # ---- the rest of the chrome: links, download, pager, on this page, subtitle - one line each, not a match
-    rest = [r for r in rows if r["group"] != "nav" and r["status"] != "pass"]
-    if rest:
-        from ..site_nav import GROUPS as _site_groups
-        group_label = dict(_site_groups)
-        if not c.room(40):
-            c.new_page()
-        c.y += 6
-        c.runs([("Rest of the page chrome", "#1d2330", True), ("   navigation links, download, pager, on this page, subtitle", "#6a7282", False)], 12)
-        c.y += 4
-        for r in rest:
-            col = {"fail": "#d92d20", "warn": "#b45309", "info": "#2563eb"}.get(r["status"], "#6a7282")
-            text = f"{r['item']}: {r['expected']} → {r['actual']}" if r["expected"] or r["actual"] else r["item"]
-            lines = c.wrap(f"[{group_label.get(r['group'], r['group'])}] {text}" + (f" — {r['note']}" if r["note"] else ""), 8.5)
-            if not c.room(11 * len(lines) + 4):
-                c.new_page()
-            for j, line in enumerate(lines):
-                _text(c, c.M, c.y + 11 * j, line, col, j == 0)
-            c.y += 11 * len(lines) + 4
+
 
 
 def _missing_sections_row(result: dict) -> str:
