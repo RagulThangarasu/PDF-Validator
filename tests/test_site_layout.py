@@ -18,7 +18,9 @@ def _site(tmp_path, base, extra_html):
     page = tmp_path / "guide" / "overview.html"
     _png(tmp_path / "guide" / "pic.png", 200, 100)
     page.write_text(page.read_text().replace('<div class="pager">', extra_html + '<div class="pager">'))
-    return compare_url(str(pdf), base + "overview.html", str(tmp_path / "run"), load_config())["site"]
+    cfg = load_config()
+    cfg["site"]["check_otp"] = True  # otp is off by default (old check) - this file tests it directly
+    return compare_url(str(pdf), base + "overview.html", str(tmp_path / "run"), cfg)["site"]
 
 
 def rows(site, group, status="fail"):

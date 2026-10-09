@@ -69,7 +69,7 @@ CHROME_JS = r"""
       const active = a.getAttribute('aria-current') && a.getAttribute('aria-current') !== 'false' ||
                      ACTIVE.test(a.className || '') || (li && ACTIVE.test(li.className || '') && li.querySelector('a[href]') === a);
       const depth = minList < 99 && lists.some(n => n !== minList) ? lists[k] - minList : Math.round((xs[k] - minX) / 12) > 0 ? 1 : 0;
-      return { text: txt(a), href: a.href, raw: a.getAttribute('href'), depth, active: !!active, visible: visible(a), box: box(a) };
+      return { text: txt(a), href: a.href, raw: a.getAttribute('href'), depth, active: !!active, visible: visible(a), box: box(a), where: path(a) };
     });
   };
   // left navigation (table of contents)
@@ -97,7 +97,10 @@ CHROME_JS = r"""
   if (nav && otp && (nav.contains(otp) || otp.contains(nav))) otp = null;
   const panels = [nav, otp].filter(Boolean);
   const inPanels = el => panels.some(p => p.contains(el));
-  // next / previous topic
+  // next / previous topic. pagerBars: each link's own small wrapping container, excluded from content
+  // scans below only once BOTH next and prev are found - excluding it mid-search would also hide
+  // whichever of the two is searched second, since they usually share the same bar
+  const pagerBars = [];
   const pager = (s, re) => {
     let a = q(s);
     if (!a) {
@@ -115,9 +118,17 @@ CHROME_JS = r"""
         label = words(txt(e).replace(txt(link), '').replace(re, '').replace(/topic|[←→‹›«»<>]/gi, '').trim());
       }
     }
-    return { text: txt(link), label: label.slice(0, 200), href: link.href || '', where: path(link), visible: visible(link) };
+    // the pager bar itself (its small wrapping container) is chrome, not body content: it must not be
+    // sampled as a body paragraph/hyperlink, nor counted in the overlap/image scans below
+    for (let e = link, bar = link; e && e !== root; e = e.parentElement) {
+      bar = e;
+      if (e.querySelectorAll('a[href]').length > 2) { pagerBars.push(bar); break; }
+      if (e.parentElement === root) { pagerBars.push(bar); break; }
+    }
+    return { text: txt(link), label: label.slice(0, 200), href: link.href || '', where: path(link), visible: visible(link), box: box(link) };
   };
   const next = pager(sel.next, /\bnext\b/i), prev = pager(sel.prev, /\bprev(ious)?\b/i);
+  panels.push(...pagerBars);
   // download PDF
   const dl = (sel.download ? qa(sel.download) : qa('a[href], button, [role="button"]').filter(e =>
       /download/i.test(txt(e) + ' ' + (e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('title') || '')) ||
@@ -151,6 +162,7 @@ CHROME_JS = r"""
   }
   const footer = q(sel.footer) || qa('footer, [role="contentinfo"]').filter(visible).pop() || null;
   const crumbs = q(sel.breadcrumb) || qa('[aria-label*="breadcrumb" i], .breadcrumb, .breadcrumbs, [class*="breadcrumb"]')[0] || null;
+  if (crumbs) panels.push(crumbs);  // chrome, not content: never sampled as a body heading/paragraph/hyperlink
   const heads = [...root.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(h => visible(h) && txt(h) && !inPanels(h))
     .map(h => ({ level: +h.tagName[1], text: txt(h), id: h.id || (h.closest('[id]') && h.closest('[id]') !== root ? h.closest('[id]').id : '') ||
                  (h.querySelector('[id], a[name]') ? (h.querySelector('[id]')?.id || h.querySelector('a[name]').getAttribute('name')) : '') }));
@@ -168,13 +180,13 @@ CHROME_JS = r"""
   const layout = [];
   const doc = document.documentElement;
   if (doc.scrollWidth > doc.clientWidth + 4)
-    layout.push({ kind: 'page-scroll', text: 'The page scrolls sideways', detail: `content ${doc.scrollWidth}px wide in a ${doc.clientWidth}px window`, where: '' });
+    layout.push({ kind: 'page-scroll', text: 'The page scrolls sideways', detail: `content ${doc.scrollWidth}px wide in a ${doc.clientWidth}px window`, where: '', box: box(root) });
   // the page is only its H1 (or other headings), nothing else below: a topic with no body at all
   if (h1El) {
     const body = [...root.querySelectorAll('p, li, td, th, pre, blockquote, img, svg, table, figure, dl, [role="note"]')]
       .filter(e => visible(e) && !inPanels(e) && (e.tagName === 'IMG' || e.tagName === 'SVG' || e.tagName === 'TABLE' || e.tagName === 'FIGURE' || txt(e).trim()));
     if (!body.length)
-      layout.push({ kind: 'empty-page', text: txt(h1El), detail: 'Only the heading is on the page, no body content below it', where: path(h1El) });
+      layout.push({ kind: 'empty-page', text: txt(h1El), detail: 'Only the heading is on the page, no body content below it', where: path(h1El), box: box(h1El) });
   }
   const pics = [...root.querySelectorAll('img, svg, picture > img')].filter(e => !inPanels(e) && !(e.tagName === 'svg' && e.closest('a,button')));
   const images = [];
@@ -182,9 +194,9 @@ CHROME_JS = r"""
     const r = im.getBoundingClientRect();
     const isImg = im.tagName === 'IMG';
     const name = (isImg ? (im.getAttribute('alt') || (im.currentSrc || im.src || '').split('/').pop().split('?')[0]) : 'svg') || 'image';
-    if (isImg && im.complete && !im.naturalWidth) { layout.push({ kind: 'image-broken', text: name, detail: 'the picture did not load', where: path(im) }); continue; }
+    if (isImg && im.complete && !im.naturalWidth) { layout.push({ kind: 'image-broken', text: name, detail: 'the picture did not load', where: path(im), box: box(im) }); continue; }
     if (!visible(im) || r.width < 8 || r.height < 8) {
-      if (isImg && im.naturalWidth > 8 && visible(im.parentElement)) layout.push({ kind: 'image-collapsed', text: name, detail: `drawn ${Math.round(r.width)}×${Math.round(r.height)}px (its file is ${im.naturalWidth}×${im.naturalHeight}px)`, where: path(im) });
+      if (isImg && im.naturalWidth > 8 && visible(im.parentElement)) layout.push({ kind: 'image-collapsed', text: name, detail: `drawn ${Math.round(r.width)}×${Math.round(r.height)}px (its file is ${im.naturalWidth}×${im.naturalHeight}px)`, where: path(im), box: box(im.parentElement) });
       continue;
     }
     const left = r.left + scrollX, right = r.right + scrollX;
@@ -193,22 +205,22 @@ CHROME_JS = r"""
     while (boxEl && boxEl !== root && getComputedStyle(boxEl).display.startsWith('inline')) boxEl = boxEl.parentElement;
     const pb = (boxEl || root).getBoundingClientRect();
     if (right > R[1] + 3 || left < R[0] - 3)
-      layout.push({ kind: 'image-overflow', text: name, detail: `runs ${Math.round(Math.max(right - R[1], R[0] - left))}px outside the content area`, where: path(im) });
+      layout.push({ kind: 'image-overflow', text: name, detail: `runs ${Math.round(Math.max(right - R[1], R[0] - left))}px outside the content area`, where: path(im), box: box(im) });
     else if (r.width > pb.width + 3)
-      layout.push({ kind: 'image-overflow', text: name, detail: `${Math.round(r.width)}px wide in a ${Math.round(pb.width)}px box`, where: path(im) });
+      layout.push({ kind: 'image-overflow', text: name, detail: `${Math.round(r.width)}px wide in a ${Math.round(pb.width)}px box`, where: path(im), box: box(im) });
     if (isImg && im.naturalWidth && im.naturalHeight) {
       const drawn = r.width / r.height, own = im.naturalWidth / im.naturalHeight;
       const fit = getComputedStyle(im).objectFit;
       if (Math.abs(drawn / own - 1) > 0.06 && !['contain', 'cover', 'scale-down', 'none'].includes(fit))
-        layout.push({ kind: 'image-stretched', text: name, detail: `drawn ${Math.round(r.width)}×${Math.round(r.height)}px, its file is ${im.naturalWidth}×${im.naturalHeight}px (proportions changed)`, where: path(im) });
+        layout.push({ kind: 'image-stretched', text: name, detail: `drawn ${Math.round(r.width)}×${Math.round(r.height)}px, its file is ${im.naturalWidth}×${im.naturalHeight}px (proportions changed)`, where: path(im), box: box(im) });
       if (r.width > im.naturalWidth * 1.5 && r.width > 120 && !/\.svg(\?|$)/i.test(im.currentSrc || im.src || ''))
-        layout.push({ kind: 'image-upscaled', text: name, detail: `drawn ${Math.round(r.width)}px wide from a ${im.naturalWidth}px file: it will look blurred`, where: path(im) });
+        layout.push({ kind: 'image-upscaled', text: name, detail: `drawn ${Math.round(r.width)}px wide from a ${im.naturalWidth}px file: it will look blurred`, where: path(im), box: box(im) });
     }
     // where the picture sits in its box: left, centre or right (a picture as wide as its box is "full")
     const free = pb.width - r.width, off = r.left - pb.left;
     const align = free < 0.08 * pb.width ? 'full' : off < 0.2 * free ? 'left' : off > 0.8 * free ? 'right' : Math.abs(off - free / 2) < 0.15 * free ? 'center' : 'other';
     images.push({ name, width: Math.round(r.width), height: Math.round(r.height), natural: isImg ? [im.naturalWidth, im.naturalHeight] : null,
-                  share: Math.round(100 * r.width / Math.max(1, rb.width)), align, top: Math.round(r.top + scrollY), where: path(im) });
+                  share: Math.round(100 * r.width / Math.max(1, rb.width)), align, top: Math.round(r.top + scrollY), where: path(im), box: box(im) });
   }
   // blocks that run out of the content area: tables, code, wide boxes
   for (const e of root.querySelectorAll('table, pre, iframe, video, .table, [class*="col"], [class*="flex"], [class*="grid"]')) {
@@ -218,7 +230,7 @@ CHROME_JS = r"""
     const over = Math.max(r.right + scrollX - R[1], R[0] - (r.left + scrollX));
     const scrolls = /(auto|scroll)/.test(getComputedStyle(e.parentElement || e).overflowX);
     if (over > 4 && !scrolls)
-      layout.push({ kind: 'block-overflow', text: (e.tagName.toLowerCase() + (e.className && typeof e.className === 'string' ? '.' + e.className.trim().split(/\s+/)[0] : '')), detail: `runs ${Math.round(over)}px outside the content area: ${txt(e).slice(0, 60)}`, where: path(e) });
+      layout.push({ kind: 'block-overflow', text: (e.tagName.toLowerCase() + (e.className && typeof e.className === 'string' ? '.' + e.className.trim().split(/\s+/)[0] : '')), detail: `runs ${Math.round(over)}px outside the content area: ${txt(e).slice(0, 60)}`, where: path(e), box: box(e) });
   }
   // text run over by a picture, or two text blocks printed on top of each other
   const blocks = [...root.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, td, th, figcaption')].filter(e => visible(e) && !inPanels(e) && txt(e).length > 2 && !e.querySelector('p, li, table'));
@@ -234,7 +246,7 @@ CHROME_JS = r"""
       if (tr.width < 4 || tr.height < 4) continue;
       const a = cut(r, tr);
       if (a > 0.25 * Math.min(r.width * r.height, tr.width * tr.height) && a > 300) {
-        layout.push({ kind: 'overlap', text: txt(b).slice(0, 60), detail: 'a picture is drawn over this text', where: path(b) });
+        layout.push({ kind: 'overlap', text: txt(b).slice(0, 60), detail: 'a picture is drawn over this text', where: path(b), box: box(b) });
         break;
       }
     }
@@ -245,11 +257,11 @@ CHROME_JS = r"""
     const ra = rect(a), rc = rect(b);
     const o = cut(ra, rc);
     if (o > 0.4 * Math.min(ra.width * ra.height, rc.width * rc.height) && o > 200)
-      layout.push({ kind: 'overlap', text: txt(b).slice(0, 60), detail: `printed on top of “${txt(a).slice(0, 40)}”`, where: path(b) });
+      layout.push({ kind: 'overlap', text: txt(b).slice(0, 60), detail: `printed on top of “${txt(a).slice(0, 40)}”`, where: path(b), box: box(b) });
   }
   if (breadcrumbGap !== null && breadcrumbGap < 0)
     layout.push({ kind: 'breadcrumb-overlap', text: txt(crumbs).slice(0, 60),
-                 detail: `the H1 overlaps the breadcrumb by ${-breadcrumbGap}px`, where: path(h1El) });
+                 detail: `the H1 overlaps the breadcrumb by ${-breadcrumbGap}px`, where: path(h1El), box: box(h1El) });
   // what each #fragment of this page lands on
   const targets = {};
   for (const it of items(otp)) {
@@ -258,14 +270,61 @@ CHROME_JS = r"""
     const t = document.getElementById(f) || document.getElementsByName(f)[0];
     targets[f] = t ? (t.matches('h1,h2,h3,h4,h5,h6') ? txt(t) : txt(t.querySelector('h1,h2,h3,h4,h5,h6')) || txt(t).slice(0, 120)) : null;
   }
+  // ---- CSS vs the design spec (config/typography.toml [typography.formats.html_web]): one real sample
+  // per role, so Python can compare it against the spec's font / weight / size / line-height / colour
+  const toHex = c => { const m = (c || '').match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)/); return m ? '#' + [1, 2, 3].map(i => (+m[i]).toString(16).padStart(2, '0')).join('') : null; };
+  const sample = el => { if (!el) return null; const cs = getComputedStyle(el);
+    return { family: cs.fontFamily.split(',')[0].replace(/["']/g, '').trim(), weight: +cs.fontWeight || 400,
+             size: Math.round(parseFloat(cs.fontSize) || 0),
+             lineHeight: cs.lineHeight === 'normal' ? null : Math.round(parseFloat(cs.lineHeight) || 0),
+             color: toHex(cs.color), underline: cs.textDecorationLine.includes('underline'),
+             marginTop: Math.round(parseFloat(cs.marginTop) || 0), marginBottom: Math.round(parseFloat(cs.marginBottom) || 0),
+             text: txt(el).slice(0, 60), where: path(el), box: box(el) }; };
+  const firstOf = s => [...root.querySelectorAll(s)].find(e => visible(e) && !inPanels(e) && txt(e));
+  const css = {
+    h1: sample(firstOf('h1')), h2: sample(firstOf('h2')), h3: sample(firstOf('h3')),
+    body_default: sample(firstOf('p')), body_strong: sample(firstOf('strong, b')),
+    body_hyperlink: sample(firstOf('a[href]')), table_header: sample(firstOf('table th')),
+    table_default: sample(firstOf('table td')),
+    callout_title: sample([...root.querySelectorAll('*')].find(e => visible(e) && !inPanels(e) && e.children.length === 0 &&
+      /^(important|note|tip|warning)$/i.test(txt(e).trim()) && (+getComputedStyle(e).fontWeight || 400) >= 600)),
+  };
+  // ---- the vertical gap between adjacent content blocks (paragraph / table / image / callout), vs
+  // config/typography.toml [typography.formats.html_web].block_gaps - headings are not in this list,
+  // see heading_spacing (margins) above instead
+  const isCallout = e => /^(important|note|tip|warning)$/i.test(txt(e.firstElementChild || e).trim().slice(0, 20)) ||
+    /callout|note|tip|warning|important/i.test(e.className || '');
+  const blockKind = e => {
+    if (/^H[1-6]$/.test(e.tagName)) return 'heading';
+    if (e.tagName === 'TABLE') return 'table';
+    if (e.tagName === 'IMG' || e.tagName === 'FIGURE' || e.tagName === 'SVG') return 'image';
+    if (isCallout(e)) return 'callout';
+    return 'paragraph';
+  };
+  const contentBlocks = [...root.querySelectorAll('p, table, figure, img, svg, div, h1, h2, h3, h4, h5, h6')].filter(e => {
+    if (inPanels(e) || !visible(e)) return false;
+    if (e.tagName === 'IMG' && e.closest('figure')) return false;  // counted through its own <figure>
+    if (e.tagName === 'DIV') return isCallout(e) && !e.querySelector('p, table, figure, img, svg');
+    return !!txt(e).trim() || e.tagName === 'TABLE' || e.tagName === 'IMG' || e.tagName === 'FIGURE';
+  });
+  const gaps = [];
+  for (let i = 0; i + 1 < contentBlocks.length; i++) {
+    const a = contentBlocks[i], b = contentBlocks[i + 1];
+    if (a.contains(b) || b.contains(a)) continue;
+    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    const gap = Math.round(rb.top - ra.bottom);
+    if (gap < -2 || gap > 200) continue;  // overlapping, or the two are not really adjacent (a page break)
+    gaps.push({ from: blockKind(a), to: blockKind(b), gap, where: path(b) });
+  }
   return {
     url: location.href, title: document.title, h1: txt(root.querySelector('h1')),
     nav: nav ? { label: navLabel, where: path(nav), items: items(nav) } : null,
     otp: otp ? { label: otpLabel, where: path(otp), items: items(otp), targets } : null,
     next, prev, download: dl, subtitle, header: headTexts.map(({ text, where, size, weight }) => ({ text, where, size, weight })),
-    footer: footer ? txt(footer).slice(0, 400) : '', breadcrumb: crumbs ? txt(crumbs) : '', breadcrumb_gap: breadcrumbGap, headings: heads,
+    footer: footer ? txt(footer).slice(0, 400) : '', breadcrumb: crumbs ? txt(crumbs) : '', breadcrumb_gap: breadcrumbGap,
+    breadcrumb_box: crumbs ? box(crumbs) : null, breadcrumb_items: crumbs ? items(crumbs) : [], headings: heads,
     layout: layout.slice(0, 200), images: images.slice(0, 400), content_width: Math.round(rb.width),
-    ids: [...document.querySelectorAll('[id]')].map(e => e.id).slice(0, 5000),
+    ids: [...document.querySelectorAll('[id]')].map(e => e.id).slice(0, 5000), css, gaps: gaps.slice(0, 300),
   };
 }
 """
@@ -298,6 +357,9 @@ def probe(page, pages: list[dict], visited: dict, out: Path, report=None) -> dic
     for p in pages:
         for it in ((p.get("nav") or {}).get("items") or []):
             targets.setdefault(key(it["href"]), it["href"])
+        for it in (p.get("breadcrumb_items") or []):
+            if it.get("href"):
+                targets.setdefault(key(it["href"]), it["href"])
         for pg in (p.get("next"), p.get("prev")):
             if pg and pg.get("href"):
                 targets.setdefault(key(pg["href"]), pg["href"])
@@ -414,28 +476,141 @@ def _same(a: str, b: str, ratio: float = 0.9) -> bool:
 
 
 def _row(group: str, status: str, item: str, expected: str = "", actual: str = "", page: str = "", note: str = "",
-         where: str = "") -> dict:
-    return {"group": group, "status": status, "item": item, "expected": expected, "actual": actual,
-            "page": page, "note": note, "where": where}
+         where: str = "", shot: dict | None = None) -> dict:
+    r = {"group": group, "status": status, "item": item, "expected": expected, "actual": actual,
+         "page": page, "note": note, "where": where}
+    if shot:  # {"page_shot": "site-shots/<hash>.png", "box": [x0, y0, x1, y1]} - crops a screenshot for the report
+        r["shot"] = shot
+    return r
 
 
 GROUPS = [("nav", "Left navigation — whole TOC"), ("links", "Navigation links"), ("download", "Download PDF"),
           ("pager", "Next / previous topic"), ("otp", "On this page"), ("layout", "Page layout and pictures"),
-          ("subtitle", "Product subtitle")]
+          ("breadcrumb", "Breadcrumb"), ("subtitle", "Product subtitle"), ("typography", "CSS vs design spec (HTML Web)")]
 LAYOUT_ISSUE = {"page-scroll": "Page scrolls sideways", "image-broken": "Picture not loaded", "image-collapsed": "Picture collapsed",
                 "image-overflow": "Picture outside its area", "image-stretched": "Picture stretched", "image-upscaled": "Picture enlarged (blurred)",
                 "block-overflow": "Content outside the page area", "overlap": "Content overlapping",
                 "breadcrumb-overlap": "Breadcrumb / H1 overlap", "empty-page": "Page has only a heading, no content"}
+# kinds always checked (on the active validation list: broken / missing / pixelated images, table/content
+# breaking out of the page); "overlap" and "empty-page" are old checks, off by default - see [site]
+# check_overlap / check_empty_page. "breadcrumb-overlap" follows check_breadcrumb, on by default.
+CORE_LAYOUT_KINDS = {"page-scroll", "image-broken", "image-collapsed", "image-overflow", "image-stretched",
+                      "image-upscaled", "block-overflow"}
+_EXTRA_LAYOUT_TOGGLE = {"overlap": "check_overlap", "breadcrumb-overlap": "check_breadcrumb", "empty-page": "check_empty_page"}
+_EXTRA_LAYOUT_DEFAULT = {"overlap": False, "breadcrumb-overlap": True, "empty-page": False}
+
+_ROLE_LABEL = {"h1": "Headline 1", "h2": "Headline 2", "h3": "Headline 3", "body_default": "Body default",
+               "body_strong": "Body strong", "body_hyperlink": "Body hyperlink", "table_header": "Table header",
+               "table_default": "Table default", "callout_title": "Callout title", "p": "Paragraph"}
 
 
-def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
-    """Validate the captured chrome against the prod PDF. Returns {summary, groups, rows, pages}."""
+def _font_ok(family: str | None, want: str) -> bool:
+    return bool(family) and family.lower().replace(" ", "").startswith(want.lower().replace(" ", ""))
+
+
+def _css_rows(pages: list[dict], typography_cfg: dict) -> list[dict]:
+    """Every role's live CSS (site_nav's `css` sample) vs config/typography.toml [typography.formats.html_web]:
+    font family, weight (bold missing included), size, line height, colour, link underline - exact match,
+    no tolerance (the spec is the contract: "follow this only exactly")."""
+    t = typography_cfg or {}
+    styles = ((t.get("formats") or {}).get("html_web") or {}).get("styles") or {}
+    if not styles:
+        return []
+    fonts, weights = t.get("fonts") or {}, t.get("weights") or {}
+    rows, seen = [], set()
+    for p in pages:
+        css = p.get("css") or {}
+        for role, want in styles.items():
+            got = css.get(role)
+            if got is None or (role, p["url"]) in seen:
+                continue
+            seen.add((role, p["url"]))
+            label = _ROLE_LABEL.get(role, role)
+            want_family = fonts.get(want.get("font", ""), want.get("font", ""))
+            want_weight = weights.get(want.get("weight", "Regular"), 400)
+            bad = []
+            shot = {"page_shot": p["page_shot"], "box": got["box"]} if p.get("page_shot") and got.get("box") else None
+            if want_family and not _font_ok(got.get("family"), want_family):
+                bad.append(("font family", want_family, got.get("family") or "—"))
+            if got.get("weight") != want_weight:
+                prop = "bold missing" if want_weight >= 600 > got.get("weight", 400) else "font weight"
+                bad.append((prop, str(want_weight), str(got.get("weight"))))
+            if want.get("size") is not None and got.get("size") != want["size"]:
+                bad.append(("font size", f"{want['size']}px", f"{got.get('size')}px"))
+            if want.get("line_height") is not None and got.get("lineHeight") is not None and got["lineHeight"] != want["line_height"]:
+                bad.append(("line height", f"{want['line_height']}px", f"{got['lineHeight']}px"))
+            want_color = (want.get("color") or "").lower()
+            if want_color and want_color.startswith("#") and got.get("color") and got["color"].lower() != want_color:
+                bad.append(("colour", want_color, got["color"]))
+            if want.get("underline") and not got.get("underline"):
+                bad.append(("underline", "underlined", "not underlined"))
+            if bad:
+                for prop, exp, act in bad:
+                    rows.append(_row("typography", "fail", f"{label} — {prop}", exp, act, p["url"],
+                                     got.get("text", ""), got.get("where", ""), shot=shot))
+            else:
+                rows.append(_row("typography", "pass", label, "", "matches the design spec", p["url"],
+                                 where=got.get("where", ""), shot=shot))
+    return rows
+
+
+def _spacing_rows(pages: list[dict], typography_cfg: dict) -> list[dict]:
+    """Space vs config/typography.toml [typography.formats.html_web]: each heading's own margin-top /
+    margin-bottom (heading_spacing) and the vertical gap between adjacent content blocks - paragraph,
+    table, image, callout (block_gaps) - exact match, no tolerance."""
+    spec = ((typography_cfg or {}).get("formats") or {}).get("html_web") or {}
+    heading_spacing, block_gaps = spec.get("heading_spacing") or {}, spec.get("block_gaps") or {}
+    sizes, gap_rules = block_gaps.get("sizes") or {}, block_gaps.get("rules") or []
+    rows, seen = [], set()
+    for p in pages:
+        css = p.get("css") or {}
+        for role, want in heading_spacing.items():
+            got = css.get(role if role != "p" else "body_default")
+            if got is None or (role, p["url"]) in seen:
+                continue
+            seen.add((role, p["url"]))
+            label = _ROLE_LABEL.get(role, role.upper())
+            shot = {"page_shot": p["page_shot"], "box": got["box"]} if p.get("page_shot") and got.get("box") else None
+            bad = []
+            if want.get("margin_top") is not None and got.get("marginTop") != want["margin_top"]:
+                bad.append(("space above", f"{want['margin_top']}px", f"{got.get('marginTop')}px"))
+            if want.get("margin_bottom") is not None and got.get("marginBottom") != want["margin_bottom"]:
+                bad.append(("space below", f"{want['margin_bottom']}px", f"{got.get('marginBottom')}px"))
+            for prop, exp, act in bad:
+                rows.append(_row("typography", "fail", f"{label} — {prop}", exp, act, p["url"],
+                                 got.get("text", ""), got.get("where", ""), shot=shot))
+            if not bad:
+                rows.append(_row("typography", "pass", f"{label} spacing", "", "matches the design spec", p["url"],
+                                 where=got.get("where", ""), shot=shot))
+        for g in p.get("gaps") or []:
+            rule = next((r for r in gap_rules if r.get("from") == g["from"] and r.get("to") == g["to"]), None)
+            if not rule:
+                continue
+            want_gap = sizes.get(rule.get("size"))
+            if want_gap is None:
+                continue
+            item = f"Space: {g['from']} → {g['to']}"
+            if g["gap"] != want_gap:
+                rows.append(_row("typography", "fail", item, f"{want_gap}px", f"{g['gap']}px", p["url"],
+                                 where=g.get("where", "")))
+            else:
+                rows.append(_row("typography", "pass", item, "", "matches the design spec", p["url"], where=g.get("where", "")))
+    return rows
+
+
+def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg: dict | None = None) -> dict:
+    """Validate the captured chrome against the prod PDF. Returns {summary, groups, rows, pages}.
+    `typography_cfg` is the run's [typography] config (config/typography.toml), used to check the live
+    page's CSS against [typography.formats.html_web]."""
     import pymupdf
 
     cfg = cfg or {}
     pages = [p for p in site.get("pages") or [] if not p.get("error")]
     links = site.get("links") or {}
     rows: list[dict] = []
+    # a page's own screenshot (html_source.py) + one page element's box -> a crop for the report (site.pdf);
+    # None when either is missing (an issue about something that was never captured gets no crop, not a crash)
+    shot_of = lambda p, it: {"page_shot": p["page_shot"], "box": it["box"]} if p.get("page_shot") and (it or {}).get("box") else None
     prod = pymupdf.open(baseline)
     l1 = [t for lvl, t, _ in prod.get_toc() if lvl == 1]
     l1_source = "PDF bookmarks (level 1)"
@@ -481,8 +656,9 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
             counts[status] += 1
             sev = {"match": "pass", "order differs": "fail", "level differs": "warn", "title differs": "warn",
                   "missing in stage": "fail", "extra in stage": "info"}[status]
+            nav_item = items[j] if j is not None and j < len(items) else None
             rows.append(_row("nav", sev, (ea or eb).title, label(ea) if ea else "—", label(eb) if eb else "—",
-                             ref["url"], status if status != "match" else "", ref["nav"]["where"]))
+                             ref["url"], status if status != "match" else "", ref["nav"]["where"], shot=shot_of(ref, nav_item)))
         note = (f"{counts['match']} match · {counts['level differs']} level differs · {counts['title differs']} title differs · "
                f"{counts['order differs']} order differs · {counts['missing in stage']} missing in the navigation · "
                f"{counts['extra in stage']} in the navigation but not in the TOC")
@@ -508,7 +684,8 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
             if (k, it["text"]) in seen:
                 continue
             seen.add((k, it["text"]))
-            rows.append(_link_row("links", it["text"], it["href"], links, p["url"]))
+            rows.append(_link_row("links", it["text"], it["href"], links, p["url"],
+                                  shot={"page_shot": p["page_shot"], "box": it["box"]} if p.get("page_shot") and it.get("box") else None))
     for p in navs:
         act = [it for it in p["nav"]["items"] if it["active"]]
         own = [it for it in p["nav"]["items"] if key(it["href"]) == key(p["url"]) and "#" not in (it["raw"] or "")]
@@ -524,12 +701,13 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
         else:
             rows.append(_row("links", "pass", "Highlighted entry", own[0]["text"], act[0]["text"], p["url"]))
 
-    # ---- download PDF
+    # ---- download PDF (old check, not on the active list - off by default, [site] check_download = true to restore)
     dl = site.get("download") or {}
-    if not dl.get("found"):
+    if cfg.get("check_download", False):
+      if not dl.get("found"):
         rows.append(_row("download", "fail", "Download PDF button", "present", "not found", pages[0]["url"] if pages else "",
                          "Set [site] download = \"<css selector>\" if the site has one"))
-    else:
+      else:
         rows.append(_row("download", "pass", "Download PDF button", "present", dl["text"], dl["page"], where=dl["where"]))
         missing = [p["url"] for p in pages if not p.get("download")]
         for u in missing:
@@ -550,14 +728,15 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
                              dl.get("final_url", "")))
             rows += _same_document(prod, Path(site["dir"]) / dl["file"], dl["page"])
 
-    # ---- next / previous: the navigation's reading order
-    order = []
-    for it in (navs[0]["nav"]["items"] if navs else []):
+    # ---- next / previous: old check, not on the active list - off by default, [site] check_pager = true to restore
+    if cfg.get("check_pager", False):
+      order = []
+      for it in (navs[0]["nav"]["items"] if navs else []):
         k = key(it["href"])
         if "#" not in (it["raw"] or "") and k not in order:
             order.append(k)
-    titles = {key(p["url"]): _title(p) for p in pages}
-    for p in pages:
+      titles = {key(p["url"]): _title(p) for p in pages}
+      for p in pages:
         k = key(p["url"])
         i = order.index(k) if k in order else None
         for name, pg, step in (("Next topic", p.get("next"), 1), ("Previous topic", p.get("prev"), -1)):
@@ -565,7 +744,8 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
             exp_title = (titles.get(exp) or _nav_text(navs, exp)) if exp else ""
             if i is None:
                 if pg:
-                    rows.append(_link_row("pager", f"{name}: {pg['label'] or pg['text']}", pg["href"], links, p["url"]))
+                    rows.append(_link_row("pager", f"{name}: {pg['label'] or pg['text']}", pg["href"], links, p["url"],
+                                          shot={"page_shot": p["page_shot"], "box": pg["box"]} if p.get("page_shot") and pg.get("box") else None))
                 continue
             if not exp:
                 rows.append(_row("pager", "fail" if pg and pg.get("visible") else "pass", name,
@@ -588,16 +768,22 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
                 rows.append(_row("pager", "pass" if 0 < st < 400 else "fail", name, exp_title, pg["label"] or pg["text"], p["url"],
                                  "" if 0 < st < 400 else f"HTTP {st}", pg["where"]))
 
-    # ---- on this page: every sub-heading, each entry jumps to its heading
-    for p in pages:
-        heads = [h for h in p.get("headings") or [] if h["level"] >= 2]
-        if not p.get("otp"):
+    # ---- on this page: shown only when the page has H3/H4 sub-sections, and each entry must jump to the
+    # right one - on the active list (H1 = page title, H2 = the page's own section: neither needs this list)
+    if cfg.get("check_otp", True):
+      for p in pages:
+        heads = [h for h in p.get("headings") or [] if h["level"] >= 3]
+        if not p.get("otp") or not p["otp"]["items"]:
             if len(heads) >= 1:
-                rows.append(_row("otp", "fail", "On this page", f"{len(heads)} heading(s)", "not found", p["url"],
-                                 "The page has sub-headings but no “On this page” list"))
+                rows.append(_row("otp", "fail", "On this page", f"{len(heads)} sub-heading(s) (h3/h4)", "not found", p["url"],
+                                 "The page has h3/h4 sub-headings but no “On this page” list"))
+            continue
+        if not heads:
+            rows.append(_row("otp", "warn", "On this page", "hidden (no h3/h4 on the page)", "shown", p["url"],
+                             "No sub-heading to list: the “On this page” panel should be hidden", p["otp"]["where"]))
             continue
         its = [it for it in p["otp"]["items"] if "#" in it["href"]]
-        top = min((h["level"] for h in heads), default=2)
+        top = min((h["level"] for h in heads), default=3)
         # every sub-heading down to H4 belongs in the list ([site] on_this_page_max_level); deeper ones only as
         # far as the list itself goes
         deep = max(int((cfg or {}).get("on_this_page_max_level", 4)), top + max(it["depth"] for it in its or [{"depth": 0}]))
@@ -614,44 +800,69 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None) -> dict:
             landed = (p["otp"].get("targets") or {}).get(frag)
             if landed is None:
                 rows.append(_row("otp", "fail", it["text"], f"#{frag} on the page", "anchor not found", p["url"],
-                                 "The entry does not jump anywhere", p["otp"]["where"]))
+                                 "Clicking it does not jump to the section", p["otp"]["where"], shot=shot_of(p, it)))
             elif landed and not _same(landed, h["text"], 0.85) and not _same(landed, it["text"], 0.85):
                 rows.append(_row("otp", "fail", it["text"], h["text"], f"jumps to “{landed[:80]}”", p["url"],
-                                 "Jumps to the wrong heading", p["otp"]["where"]))
+                                 "Clicking it jumps to the wrong section", p["otp"]["where"], shot=shot_of(p, it)))
             else:
-                rows.append(_row("otp", "pass", it["text"], h["text"], it["text"], p["url"], where=p["otp"]["where"]))
+                rows.append(_row("otp", "pass", it["text"], h["text"], it["text"], p["url"], where=p["otp"]["where"], shot=shot_of(p, it)))
         for i, it in enumerate(its):
             if i not in used:
                 rows.append(_row("otp", "warn", it["text"], "", it["text"], p["url"], "Entry without a matching heading on the page",
                                  p["otp"]["where"]))
 
-    # ---- page layout and pictures: breaking issues on each page; pictures of one page at inconsistent alignment
+    # ---- page layout and pictures: broken / missing / pixelated images, table/content breaking out of the
+    # page (and scrollable where it should be) - on the active list, always checked. "empty page" is an old
+    # check, off by default: [site] check_empty_page = true to restore. Breadcrumb has its own group, below.
     for p in pages:
         issues = p.get("layout") or []
         for it in issues:
-            rows.append(_row("layout", "fail", LAYOUT_ISSUE.get(it["kind"], it["kind"]), "", it.get("text", ""), p["url"],
-                             it.get("detail", ""), it.get("where", "")))
-        pics = [im for im in p.get("images") or [] if im["width"] >= 60]  # icons aside
-        sides = {im["align"] for im in pics} & {"left", "center", "right"}
-        if len(sides) > 1 and len(pics) >= 2:
-            by = {a: [im for im in pics if im["align"] == a] for a in sides}
-            usual = max(by, key=lambda a: len(by[a]))
-            for a, ims in by.items():
-                if a != usual and len(ims) <= max(1, len(by[usual]) // 2):  # the odd ones out
-                    for im in ims:
-                        rows.append(_row("layout", "warn", "Picture alignment", f"{usual} (as the page's other pictures)", f"{im['name']}: {a}",
-                                         p["url"], f"{im['width']}×{im['height']}px, {im['share']}% of the content width", im["where"]))
-        if "layout" in p and not issues:
+            kind = it["kind"]
+            if kind not in CORE_LAYOUT_KINDS and not cfg.get(_EXTRA_LAYOUT_TOGGLE.get(kind, ""), _EXTRA_LAYOUT_DEFAULT.get(kind, False)):
+                continue
+            rows.append(_row("layout", "fail", LAYOUT_ISSUE.get(kind, kind), "", it.get("text", ""), p["url"],
+                             it.get("detail", ""), it.get("where", ""), shot=shot_of(p, it)))
+        if cfg.get("check_picture_alignment", True):
+            pics = [im for im in p.get("images") or [] if im["width"] >= 60]  # icons aside
+            sides = {im["align"] for im in pics} & {"left", "center", "right"}
+            if len(sides) > 1 and len(pics) >= 2:
+                by = {a: [im for im in pics if im["align"] == a] for a in sides}
+                usual = max(by, key=lambda a: len(by[a]))
+                for a, ims in by.items():
+                    if a != usual and len(ims) <= max(1, len(by[usual]) // 2):  # the odd ones out
+                        for im in ims:
+                            rows.append(_row("layout", "warn", "Picture alignment", f"{usual} (as the page's other pictures)", f"{im['name']}: {a}",
+                                             p["url"], f"{im['width']}×{im['height']}px, {im['share']}% of the content width", im["where"],
+                                             shot=shot_of(p, im)))
+        if "layout" in p and not [i for i in issues if i["kind"] in CORE_LAYOUT_KINDS]:
             rows.append(_row("layout", "pass", "Page layout", "", f"{len(p.get('images') or [])} picture(s) checked", p["url"]))
-        h1, gap = p.get("h1") or "", p.get("breadcrumb_gap")
-        if h1 and not p.get("breadcrumb"):
-            rows.append(_row("layout", "warn", "Breadcrumb above H1", "a breadcrumb trail", "not found", p["url"],
-                             "The page has an H1 but no breadcrumb above it"))
-        elif h1 and p.get("breadcrumb") and gap is not None and gap >= 0:
-            rows.append(_row("layout", "pass", "Space above H1 (breadcrumb)", "", f"{gap}px gap to the breadcrumb", p["url"]))
 
-    # ---- product subtitle
-    rows += _subtitle_rows(pages, prod, site.get("subtitle_source") or {}, baseline)
+    # ---- breadcrumb: present above the H1, each crumb's link opens (no broken link) and lands on the
+    # right page (no wrong redirect) - on the active list by default ([site] check_breadcrumb = false to drop)
+    if cfg.get("check_breadcrumb", True):
+        for p in pages:
+            h1, gap = p.get("h1") or "", p.get("breadcrumb_gap")
+            if h1 and not p.get("breadcrumb"):
+                rows.append(_row("breadcrumb", "warn", "Breadcrumb above H1", "a breadcrumb trail", "not found", p["url"],
+                                 "The page has an H1 but no breadcrumb above it"))
+                continue
+            if h1 and p.get("breadcrumb") and gap is not None and gap >= 0:
+                rows.append(_row("breadcrumb", "pass", "Space above H1 (breadcrumb)", "", f"{gap}px gap to the breadcrumb", p["url"]))
+            for it in p.get("breadcrumb_items") or []:
+                if not it.get("href"):
+                    continue
+                rows.append(_link_row("breadcrumb", it["text"], it["href"], links, p["url"], shot=shot_of(p, it), check_title=False))
+
+
+
+    # ---- CSS vs the design spec (config/typography.toml [typography.formats.html_web]): on the active list
+    if cfg.get("check_typography", True):
+        rows += _css_rows(pages, typography_cfg or {})
+        rows += _spacing_rows(pages, typography_cfg or {})
+
+    # ---- product subtitle: old check, not on the active list - off by default, [site] check_subtitle = true to restore
+    if cfg.get("check_subtitle", False):
+        rows += _subtitle_rows(pages, prod, site.get("subtitle_source") or {}, baseline)
     prod.close()
 
     counts = {g: {"pass": 0, "warn": 0, "fail": 0, "info": 0} for g, _ in GROUPS}
@@ -686,22 +897,25 @@ def _short(u: str) -> str:
     return urlsplit(u or "").path.rsplit("/", 1)[-1] or u
 
 
-def _link_row(group: str, text: str, href: str, links: dict, page: str) -> dict:
+def _link_row(group: str, text: str, href: str, links: dict, page: str, shot: dict | None = None,
+              check_title: bool = True) -> dict:
     k = key(href)
     st = links.get(k)
     frag = href.split("#", 1)[1] if "#" in href else ""
     if urlsplit(href).scheme not in ("http", "https"):
-        return _row(group, "warn", text, "a page link", href, page, "Not an http(s) link")
+        return _row(group, "warn", text, "a page link", href, page, "Not an http(s) link", shot=shot)
     if not st:
-        return _row(group, "warn", text, "opens", "not checked", page, href)
+        return _row(group, "warn", text, "opens", "not checked", page, href, shot=shot)
     if st.get("error") or not 0 < st.get("status", 0) < 400:
-        return _row(group, "fail", text, "HTTP 200", st.get("error") or f"HTTP {st['status']}", page, href)
+        return _row(group, "fail", text, "HTTP 200", st.get("error") or f"HTTP {st['status']}", page, href, shot=shot)
     landed = st.get("h1") or re.split(r"\s+[|–-]\s+", st.get("title") or "")[0]
     if frag and frag not in (st.get("ids") or []):
-        return _row(group, "fail", text, f"#{frag} on {_short(href)}", "anchor not found", page, href)
-    if landed and not _same(landed, text, 0.8) and not _same(st.get("title", ""), text, 0.8) and not frag:
-        return _row(group, "fail", text, text, f"opens “{landed}”", page, f"{href} → {st.get('url', '')}")
-    return _row(group, "pass", text, text, landed or f"HTTP {st['status']}", page, href)
+        return _row(group, "fail", text, f"#{frag} on {_short(href)}", "anchor not found", page, href, shot=shot)
+    # a left-nav / pager link's own text is the target page's title: it must match. A breadcrumb crumb's
+    # label ("Home", a category name) is not: check_title=False there - only that the link opens, not what it says
+    if check_title and landed and not _same(landed, text, 0.8) and not _same(st.get("title", ""), text, 0.8) and not frag:
+        return _row(group, "fail", text, text, f"opens “{landed}”", page, f"{href} → {st.get('url', '')}", shot=shot)
+    return _row(group, "pass", text, text, landed or f"HTTP {st['status']}", page, href, shot=shot)
 
 
 def _words(doc, limit: int = 0) -> set[str]:

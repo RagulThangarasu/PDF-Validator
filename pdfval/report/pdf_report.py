@@ -282,14 +282,16 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
     sec_cats = [*CATS, *[(c, c.title()) for c in
                          dict.fromkeys(c for s in result["sections"] for c in s.get("categories", {})) if c not in CAT_LABEL]]
     html += [] if not inc["sections"] else [
-        "<h2>Sections</h2><table class='grid'><tr><th>#</th><th>Section</th><th>Prod p.</th><th>Stage p.</th>"
+        "<h2>Sections</h2><table class='grid'><tr><th>#</th><th>L</th><th>Section</th><th>Prod p.</th><th>Stage p.</th>"
         "<th>Status</th><th>Content %</th><th>Missing / extra</th><th>Critical</th>"
         + "".join(f"<th>{label}</th>" for _, label in sec_cats) + "</tr>",
     ]
     for n, s in enumerate(result["sections"] if inc["sections"] else [], 1):
         status_cell = "" if s["status"] == "pass" else f"<b style='color:{STATUS_COLOR[s['status']]}'>{s['status']}</b>"
+        level = s.get("level") or 1
         html.append(
-            f"<tr><td>{n}</td><td>{escape(s['title'])}</td><td>{s['baseline']['start']['page'] + 1}</td>"
+            f"<tr><td>{n}</td><td>{level}</td>"
+            f"<td style='padding-left:{4 + 12 * (level - 1)}px'>{escape(s['title'])}</td><td>{s['baseline']['start']['page'] + 1}</td>"
             f"<td>{s['candidate']['start']['page'] + 1}</td>"
             f"<td>{status_cell}</td>"
             f"<td class='n'><b style='color:{PCT_COLOR[s['content']['status']]}'>{s['content']['match_pct']:.2f}%</b></td>"
@@ -910,13 +912,15 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
         imgs = {side: _jpeg_bytes(out / shots[side]) if shots.get(side) else None for side in ("baseline", "candidate")}
         img_h = max((min(col_w * im[1], max_h) for im in imgs.values() if im), default=0)
         text = f["description"] if f.get("genuine") and (opts.get("filter") or {}).get("genuine_only") else concise(f["message"])
-        # the issue in full, never shortened; several differences at one spot: one line each
+        # several differences at one spot: one line each
         parts = [p.strip() for block in text.split("\n\n") for p in block.split("  ·  ") if p.strip()]
         rows_txt = []
         for k, part in enumerate(parts, 1):
             head, *rest = part.split("\n")  # a design-spec issue: headline, "Figma: …", "Stage: …"
+            from ..genuine import one_line
+            head = one_line(head)  # one line per issue: a long block is named by how it starts
             rows_txt.append(("Issue", head, "#1d2330") if len(parts) == 1 else (f"Difference {k}", head, "#b42318"))
-            rows_txt += [(ln.split(": ", 1)[0], ln.split(": ", 1)[1], "#7c3aed" if ln.startswith("Figma") else "#2563eb" if ln.startswith("Prod") else "#0f766e")
+            rows_txt += [(ln.split(": ", 1)[0], one_line(ln.split(": ", 1)[1]), "#7c3aed" if ln.startswith("Figma") else "#2563eb" if ln.startswith("Prod") else "#0f766e")
                          for ln in rest if ln.startswith(("Figma: ", "Prod: ", "Stage: "))]
         # the issue as what prod has and what stage has - nothing else (its name and pages are in the line above);
         # an issue that cannot be put that way keeps its one-line description

@@ -1023,7 +1023,14 @@ class Pairs:
                 if hits:
                     # the guide's language first (W2720i_FR_… for …/w2720i/fr/…), among every folder of the product;
                     # else the exact name, else the nearest
-                    hit = next((p for p in hits if want and want.search(p)), hits[0])
+                    # (an exact name always before a near one: "pd2732u-timing" is PD2732U_timing_V0, not the
+                    # manual PD2732U_EN_V0 that merely starts the same and happens to carry the language)
+                    # A library name that only starts the guide's name (pd2732u for pd2732utiming) is a more general
+                    # product: taken only when nothing else matches. One that goes on after it (w2720ifr for
+                    # w2720i) is a variant of the same product - a language - and competes with the exact name.
+                    variants = exact + [p for p in loose if norm[p].startswith(nk)]
+                    tier = variants or loose
+                    hit = next((p for p in tier if want and want.search(p)), tier[0])
                     f = main[hit]
                     return {"prod": f["path"], "name": f["name"], "size": f["size"], "library_product": hit,
                             "via": "Excel" if row and n_k < 2 else "name", "product": name, "lang": lang,

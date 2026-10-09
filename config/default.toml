@@ -288,13 +288,15 @@ concurrency = 6               # pages fetched at once (separate browser tabs) on
 # What a web page run reports - only these kinds of issue (a web guide is not validated like a stage PDF).
 # [] = everything a PDF run reports.
 report_types = [
-  # content missing, extra or changed; a whole section missing / extra; content twice
-  "missing text", "extra text", "changed text", "missing section", "extra section", "duplicate content",
+  # content: whether it is there at all is still checked (a whole answer / paragraph / topic missing from the
+  # page, or one the PDF does not have) - not how it is worded (a changed word, spacing, case, punctuation,
+  # the same content twice): that is not checked for a web guide, its text comes from the live DOM
+  "missing text", "extra text", "missing section", "extra section",
   # links: not working, missing, going somewhere else
   "broken link", "missing link", "link to wrong section", "link target differs", "link lands elsewhere",
-  # pictures: missing, broken, extra, another picture, size, alignment / placement
+  # pictures: missing, broken, extra, another picture, size, pixelated, alignment / placement
   "missing image", "broken image", "extra image", "image changed", "image smaller", "image bigger",
-  "image alignment", "placement", "image outside box", "image distorted", "image order",
+  "image pixelated", "image alignment", "placement", "image outside box", "image distorted", "image order",
   # icons: missing, another icon, broken / low resolution, in text and in table rows
   "icon missing inline", "icon differs", "icon pixelated", "icon missing", "icon extra", "icon order", "icon above text",
   # tables: a table, header, row or cell missing, merged or split
@@ -304,11 +306,34 @@ report_types = [
   "stacked to columns", "row alignment", "caption row",
   # a picture grid laid out differently; list numbers of one list not at one left edge; list markers
   "picture row", "list alignment", "bullet", "bullet marker", "numbering style", "numbering format", "numbering sequence",
+  # bold / italic: words bold in prod and plain on the site, or the reverse
+  "emphasis",
 ]
 
 [site]                        # web page runs: the chrome around the content (see pdfval/site_nav.py)
 enabled = true                # left navigation vs the PDF's L1 TOC, its links, Download PDF, next / previous
                               # topic, "On this page", product subtitle
+# The active validation list for a site run: left navigation (whole TOC) + its links (broken links),
+# missing/extra section and content (checks/structure.py, checks/content.py - always on, not a [site] key),
+# images (missing / broken / pixelated / overflow / misaligned), tables breaking out of the page (scrollable
+# instead), next/previous topic (every page but the last must have "next", every page but the first must have
+# no "previous", the last page must have no "next"), "On this page" (shown only when the page has h3/h4
+# sub-headings, hidden otherwise; each entry jumps to its own section), breadcrumb (present above the H1,
+# every crumb's link opens and lands on the right page - no broken link, no wrong redirect), and the page's
+# live CSS vs config/typography.toml [typography.formats.html_web] (font, weight incl. bold missing, size,
+# line height, colour). Every fail/warn row with a page screenshot gets a cropped image of the issue in
+# site.pdf. Everything below is an older check, not on that list: off by default, flip to true to bring any
+# back (no code removed, just not run).
+check_download = false        # the Download PDF button / file
+check_pager = true            # next / previous topic links (first page: no "previous"; last page: no "next")
+check_otp = true               # "On this page": shown only with h3/h4 on the page, each entry jumps to it
+check_subtitle = false        # product subtitle in the header
+check_picture_alignment = true   # pictures on one page at inconsistent left/center/right alignment
+check_breadcrumb = true        # breadcrumb present above the H1, its links open and land on the right page
+check_empty_page = false      # a page with only its heading, no body content
+check_overlap = false         # a picture or text block printed on top of another
+check_typography = true       # the page's CSS vs [typography.formats.html_web] - font, weight, size,
+                              # line height, colour; exact match, no tolerance
 # CSS selectors, only when the labels ("Table of contents", "On this page", "Next topic", "Download PDF")
 # do not find the element on a site; empty = found automatically
 nav = ""                      # the left navigation (table of contents)

@@ -427,7 +427,7 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                                           width=width, creds=creds, session_state=session_state, own=own,
                                           root=root, exclude=exclude, wait_ms=wait_ms, slice_h=slice_h,
                                           timeout=timeout, site=site, concurrency=concurrency, report=report,
-                                          timing=timing)
+                                          timing=timing, out_dir=out)
                     continue
                 if crawl:
                     found = _nav_children(page, site or {}, root) if nav_led else [(l, "") for l in _guide_links(page, url)]
@@ -441,6 +441,7 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                 if site is not None:
                     ch = site_nav.read_chrome(page, site, root)
                     chromes.append(ch)
+                    _site_shot(page, ch, out)
                     visited[site_nav.key(u)] = visited[site_nav.key(page.url)] = {
                         "status": 200, "url": page.url, "title": ch.get("title", ""), "h1": ch.get("h1", ""),
                         "ids": ch.get("ids") or [], "crawled": True}
@@ -608,8 +609,25 @@ def _full_nav_order(page, cfg: dict, root: str, start_href: str) -> list[tuple[s
     return out if len(out) > 1 else None
 
 
+def _site_shot(page, ch: dict | None, out: Path) -> None:
+    """One full-page screenshot per page, saved under out/site-shots - named by the page's own URL, so a
+    broken link, a missing/misaligned picture or a layout break (site_nav findings, each carrying its own
+    element box) can be cropped out of it for the site report, instead of just described in words."""
+    if not ch or ch.get("error"):
+        return
+    import hashlib
+    shots = out / "site-shots"
+    shots.mkdir(parents=True, exist_ok=True)
+    name = hashlib.sha1((ch.get("url") or "").encode()).hexdigest()[:16] + ".png"
+    try:
+        page.screenshot(path=str(shots / name), full_page=True, timeout=15_000)
+        ch["page_shot"] = f"site-shots/{name}"
+    except Exception:  # a page screenshot is a bonus for the report: never fail the crawl over it
+        pass
+
+
 def _visit_in_tab(page, u: str, root: str, exclude: str, wait_ms: int, slice_h: int, timeout: int,
-                  site: dict | None, report=lambda f, m: None, frac: float = 0.5) -> dict:
+                  site: dict | None, report=lambda f, m: None, frac: float = 0.5, out_dir: Path | None = None) -> dict:
     """Load and read one page in an already-open tab: the same per-page work the serial crawl does (retry a
     gateway hiccup once, skip a login wall or an HTTP error), returned instead of appended straight to the
     document so a parallel worker's tab can run this with no other state to share."""
@@ -624,12 +642,14 @@ def _visit_in_tab(page, u: str, root: str, exclude: str, wait_ms: int, slice_h: 
     out = {"data": data, "slices": slices, "url": page.url}
     if site is not None:
         out["chrome"] = site_nav.read_chrome(page, site, root)
+        if out_dir is not None:
+            _site_shot(page, out["chrome"], out_dir)
     return out
 
 
 def _visit_many(urls: list[tuple[str, str]], *, width: int, creds, session_state: dict, own: str, root: str,
                 exclude: str, wait_ms: int, slice_h: int, timeout: int, site: dict | None,
-                on_page=lambda u, t, r: None) -> list[tuple[str, str, dict]]:
+                on_page=lambda u, t, r: None, out_dir: Path | None = None) -> list[tuple[str, str, dict]]:
     """One worker's share of the queue: its own Playwright and browser (sync Playwright is not safe to share
     across threads), visited one page after another in its own tab. Returns [(url, title, result), ...], one
     per url, in the order given. session_state: the first page's cookies (set by its login form, if it had
@@ -646,7 +666,7 @@ def _visit_many(urls: list[tuple[str, str]], *, width: int, creds, session_state
                                     http_credentials=creds, storage_state=session_state or None)
             page.route("**/*", lambda route: _filter_request(route, own))
             for u, t in urls:
-                r = _visit_in_tab(page, u, root, exclude, wait_ms, slice_h, timeout, site)
+                r = _visit_in_tab(page, u, root, exclude, wait_ms, slice_h, timeout, site, out_dir=out_dir)
                 out.append((u, t, r))
                 on_page(u, t, r)
         finally:
@@ -657,7 +677,7 @@ def _visit_many(urls: list[tuple[str, str]], *, width: int, creds, session_state
 def _dispatch_parallel(queue: list[str], titles: dict[str, str], k: int, max_pages: int, captured: list,
                        chromes: list, visited: dict, skipped: list, *, width: int, creds, session_state: dict,
                        own: str, root: str, exclude: str, wait_ms: int, slice_h: int, timeout: int,
-                       site: dict | None, concurrency: int, report, timing: dict) -> int:
+                       site: dict | None, concurrency: int, report, timing: dict, out_dir: Path | None = None) -> int:
     """The rest of the queue (page 0 is already read, on the caller's own tab), fetched by several workers
     at once instead of one page after another; `captured` / `chromes` / `visited` / `skipped` are filled in
     queue order, exactly as the one-page-at-a-time loop would have left them. Returns the new `k`: the end of
@@ -690,7 +710,7 @@ def _dispatch_parallel(queue: list[str], titles: dict[str, str], k: int, max_pag
             futs = [ex.submit(_visit_many, [(u, titles.get(_page_key(u), "")) for u in chunk],
                               width=width, creds=creds, session_state=session_state, own=own, root=root,
                               exclude=exclude, wait_ms=wait_ms, slice_h=slice_h, timeout=timeout, site=site,
-                              on_page=on_page) for chunk in chunks if chunk]
+                              on_page=on_page, out_dir=out_dir) for chunk in chunks if chunk]
             for fut in as_completed(futs):
                 fut.result()  # surfaces a worker's exception here rather than losing it silently
         for u in rest:

@@ -34,3 +34,16 @@ def test_another_product(lib):
 def test_unknown_product_finds_nothing(lib):
     r = lib.prod_for_url("https://docs.example.com/manual/unknown-thing/en/index.html")
     assert r["prod"] == "" and r["product"] == "unknown-thing"
+
+
+def test_a_timing_guide_takes_its_own_prod_pdf_not_the_manual(tmp_path, monkeypatch):
+    """…/pd2732u-timing/en/… is PD2732U_timing_V0, not the manual PD2732U_EN_V0 whose name it starts with."""
+    for rel in ("FM/PD2732U_EN_V0/PD2732U_EN_V0/PD2732U-en.pdf", "FM/PD2732U_timing_V0/PD2732U_timing_V0/Vertical_screenresolution-PD2732U-en.pdf"):
+        f = tmp_path / "pdfs" / rel
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(server, "LIBRARY", server.Library(tmp_path / "src", tmp_path / "pdfs"))
+    monkeypatch.setattr(metadata, "load_sheet", lambda *_: [])
+    pairs = server.Pairs(tmp_path / "stage")
+    assert pairs.prod_for_url("http://aem:4502/content/guide/consumer/monitor/pd2732u-timing/en/preset-display-modes.html")["name"] == "Vertical_screenresolution-PD2732U-en.pdf"
+    assert pairs.prod_for_url("http://aem:4502/content/guide/consumer/monitor/pd2732u/en/x.html")["name"] == "PD2732U-en.pdf"

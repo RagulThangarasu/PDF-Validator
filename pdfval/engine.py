@@ -244,7 +244,14 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 units.remove(u)  # no intro text on either side
 
     if not units:  # no heading matched on both sides: compare the documents as one whole section
-        units.append(Unit("000-whole-document", "Whole document", A, B, (0, len(A.words)), (0, len(B.words)),
+        a0 = 0
+        if B.raw_tables is not None and len(A.pages) >= 3:
+            # a web guide has no cover: prod's cover page (a title page of a few words - "LCD Monitor User
+            # Manual") is not part of the comparison
+            cover = [k for k, w in enumerate(A.words) if w.page == 0]
+            if len(cover) <= cfg["sections"].get("cover_max_words", 60) and len(cover) < len(A.words):
+                a0 = (cover[-1] + 1) if cover else 0
+        units.append(Unit("000-whole-document", "Whole document", A, B, (a0, len(A.words)), (0, len(B.words)),
                           None, None, cfg))
 
     # --- structural findings (unmatched / relevelled headings) attach to the unit containing them
@@ -1130,6 +1137,10 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
     # (list bullets and numbers are drawn by the browser; the capture reads them as words - html_source - so the
     # list checks compare them with the PDF's printed "•" / "1." like any other marker)
     cfg["layout"]["check_placement"] = cfg.get("site", {}).get("check_placement", True)
+    # bold and italic are compared (bold in prod, plain on the site, or the reverse); a site's fonts have other
+    # weight steps than the print fonts (Medium, Semi-bold), so only bold vs plain counts, not every step
+    cfg["style"]["check_emphasis"] = True
+    cfg["style"]["emphasis_any_weight"] = False
     cfg["sections"]["front_matter"] = False  # a web page has no cover / printed front matter
     cfg["content"]["spacing_mode"] = "presence"  # browsers collapse repeated spaces: only gap vs no gap is visible
     for k, v in cfg.get("html", {}).items():  # [html] overrides in the config file
@@ -1145,7 +1156,7 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
     if site:  # left navigation, download PDF, next/previous, on this page, product subtitle
         from . import site_nav
         try:
-            result["site"] = site_nav.evaluate(site, baseline, cfg.get("site", {}))
+            result["site"] = site_nav.evaluate(site, baseline, cfg.get("site", {}), cfg.get("typography", {}))
             result["summary"]["site"] = {k: result["site"]["summary"][k] for k in ("status", "fail", "warn", "pass")}
         except Exception as e:  # the content result stands on its own
             result["site"] = {"error": f"{type(e).__name__}: {e}"}

@@ -2270,7 +2270,25 @@ _PROD_STAGE = [
 ]
 
 
+def one_line(text: str, limit: int = 130) -> str:
+    """A report line: at most `limit` characters, cut at a word, with the number of words left out - a missing
+    block of 600 words is named by how it starts, not printed in full (the screenshots and the CSV show the rest)."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:")
+    more = len(text[len(cut):].split())
+    quote = "”" if cut.count("“") > cut.count("”") else ""
+    return f"{cut} …{quote} (+{more} more words)"
+
+
 def prod_stage(f: dict) -> tuple[str, str] | None:
+    """What prod has and what stage has, one line each (prod_stage_full gives the whole text)."""
+    ps = prod_stage_full(f)
+    return (one_line(ps[0]), one_line(ps[1])) if ps else None
+
+
+def prod_stage_full(f: dict) -> tuple[str, str] | None:
     """The issue as two statements - what prod has, what stage has - and nothing else (no explanation, no page
     numbers: the report's heading has them). None when the issue cannot be put that way: the report then shows
     its one-line description."""

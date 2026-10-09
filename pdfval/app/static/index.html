@@ -1062,6 +1062,8 @@ async function viewRun(id, qs) {
             title="Only picture issues, each shown as the prod and the stage picture side by side">⬇ Image report${im ? ` — FAIL (${im.issues})` : ''}</a>`; })()}
         <a class="btn" href="${base}side-by-side.pdf?download=${encodeURIComponent('side-by-side-report-' + id + '.pdf')}"
            title="Page by page: each prod page beside the matching stage page, the issues boxed and numbered on both, with their full description">⬇ Side-by-side report</a>
+        ${s.site ? `<a class="btn ${s.site.fail ? 'danger' : ''}" href="${base}site.pdf?download=${encodeURIComponent('site-report-' + id + '.pdf')}"
+           title="Left navigation, links, pager, page layout / pictures and CSS vs the design spec - every row, one expectation per line">⬇ Site report${s.site.fail ? ` — FAIL (${s.site.fail})` : ''}</a>` : ''}
       </div></div>
     ${job.warning ? `<div class="warnbox" role="alert"><b>⚠ Same file compared twice.</b> ${esc(job.warning)}
        <a class="btn sm" href="#/new?from=${id}">Pick another candidate</a></div>` : ''}

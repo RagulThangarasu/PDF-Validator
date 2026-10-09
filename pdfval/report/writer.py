@@ -133,6 +133,8 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
     if (result.get("site") or {}).get("rows"):
         from ..site_nav import write_csv
         write_csv(result["site"], out / "site-navigation.csv")
+        from . import site_report
+        site_report.build(result, out)
     (out / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
     (out / "junit.xml").write_text(junit(result))
     (out / "summary.md").write_text(markdown(result))

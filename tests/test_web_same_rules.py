@@ -77,3 +77,21 @@ def test_the_same_page_has_no_issue(tmp_path):
 def test_repeated_points_and_missing_text_are_reported_as_in_pdf(tmp_path):
     fs = _run(tmp_path, STEPS + [STEPS[1], STEPS[2]], with_p2=False)
     assert sorted(t[0] for t, _ in fs) == ["duplicate content", "missing text"]
+
+
+def test_bold_on_the_site_that_prod_does_not_have_is_reported(tmp_path):
+    """Words plain in prod and bold on the web page (or the reverse) are a difference the reader sees: reported on a site run."""
+    cfg = engine.load_config()
+    cfg["typography"]["enabled"] = False
+    cfg.setdefault("site", {})["enabled"] = False
+    page = tmp_path / "page.html"
+    _page(page, STEPS)
+    page.write_text(page.read_text().replace("Clean the housing with a soft dry cloth", "Clean the housing with a <b>soft dry cloth</b>"), encoding="utf-8")
+    try:
+        r = engine.compare_url(_prod(tmp_path / "prod.pdf"), "file://" + str(page), str(tmp_path / "run"), cfg, html={"crawl": False})
+    except Exception as e:
+        if "playwright" in f"{type(e).__module__} {e}".lower() or "executable" in str(e).lower():
+            pytest.skip(f"web capture not available: {e}")
+        raise
+    bold = [f for s in r["sections"] for f in s["findings"] if "emphasis" in (f["types"] or [])]
+    assert bold and bold[0]["genuine"] and "plain in prod → bold in stage" in bold[0]["message"], [(f["types"], f["message"]) for s in r["sections"] for f in s["findings"]]

@@ -139,3 +139,32 @@ body_hyperlink = { font = "default", weight = "Regular", size = 16, line_height 
 table_header  = { font = "default",  weight = "Medium",  size = 14, line_height = 16, color = "#FFFFFF" }
 table_default = { font = "default",  weight = "Regular", size = 14, line_height = 16, color = "#000000" }
 table_note    = { font = "default",  weight = "Regular", size = 12, line_height = 16, color = "#757575" }
+# margin-top / margin-bottom of each heading role, and paragraph spacing (margin-bottom) - "0" means flush
+# against whatever comes before/after it (H1 right under the breadcrumb, no extra air above/below it)
+[typography.formats.html_web.heading_spacing]
+h1 = { margin_top = 0,  margin_bottom = 0 }
+h2 = { margin_top = 24, margin_bottom = 16 }
+h3 = { margin_top = 16, margin_bottom = 8 }
+p  = { margin_bottom = 16 }
+# the vertical gap between two adjacent content blocks (not headings - see heading_spacing above),
+# by the kind of block on each side - small/medium/large resolved via [sizes]
+[typography.formats.html_web.block_gaps]
+sizes = { small = 8, medium = 16, large = 20 }
+rules = [
+  { from = "paragraph", to = "paragraph", size = "medium" },
+  { from = "paragraph", to = "table",     size = "medium" },
+  { from = "paragraph", to = "image",     size = "medium" },
+  { from = "paragraph", to = "callout",   size = "medium" },
+  { from = "table",     to = "table",     size = "large" },
+  { from = "table",     to = "image",     size = "large" },
+  { from = "table",     to = "callout",   size = "large" },
+  { from = "image",     to = "table",     size = "large" },
+  { from = "image",     to = "image",     size = "large" },
+  { from = "image",     to = "callout",   size = "large" },
+  { from = "callout",   to = "table",     size = "large" },
+  { from = "callout",   to = "image",     size = "large" },
+  { from = "callout",   to = "callout",   size = "large" },
+  { from = "table",     to = "paragraph", size = "large" },
+  { from = "image",     to = "paragraph", size = "small" },
+  { from = "callout",   to = "paragraph", size = "medium" },
+]
