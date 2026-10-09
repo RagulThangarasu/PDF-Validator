@@ -866,13 +866,12 @@ async function start() {
   const go = $('#go'), st = $('#go-status');
   go.disabled = true; st.classList.remove('err');
   try {
-    // log in to AEM first: the run looks up each GUID's topic file, so the links in every report work
+    // an AEM login only resolves GUIDs to their topic file (nicer links in the report) - optional, and
+    // never a reason to block the comparison itself: a failed/declined login just runs without those links
     if (MODE === 'pdf' && (AEM.author || $('#n-aem-author').value.trim())) {
       const typed = $('#n-aem-user').value.trim() || $('#n-aem-pass').value;
       if (typed || AEM.ok) {
-        if (!(await aemLogin(false))) { st.textContent = 'AEM login failed — fix it, or clear the AEM fields to run without links to the files.'; st.classList.add('err'); go.disabled = false; return; }
-      } else if (!confirm('Run without an AEM login?\n\nIssues will show their topic GUID, but the GUID links can only open the AEM editor, not the exact topic file.')) {
-        go.disabled = false; $('#n-aem-user').focus(); return;
+        if (!(await aemLogin(false))) st.textContent = 'AEM login failed — running without links to the topic files.';
       }
     }
     const paths = {};
