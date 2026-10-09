@@ -36,7 +36,7 @@ def make_pdf(path):
 
 
 def make_site(root, *, drop_nav=None, wrong_next=None, broken_anchor=None, subtitle=None, bad_h1_css=False,
-              breadcrumb_broken=False):
+              breadcrumb_broken=False, breadcrumb_gap=0):
     """One page per chapter in root/guide, with the chrome of the BenQ guide."""
     site = root / "guide"
     site.mkdir()
@@ -66,7 +66,7 @@ a{{font-family:Roboto,sans-serif;font-weight:400;font-size:16px;line-height:24px
 <a href="manual.pdf">Download PDF</a></div></header>
 <div style="display:flex"><nav style="width:220px"><p>Table of Contents</p><ul>
 {nav.replace(f'href="{slug}.html"', f'href="{slug}.html" aria-current="page"')}</ul></nav>
-<main style="width:700px"><nav class="breadcrumb" style="margin:0 0 24px 0"><a href="overview.html">Home</a> &gt; 
+<main style="width:700px"><nav class="breadcrumb" style="margin:0 0 {breadcrumb_gap}px 0"><a href="overview.html">Home</a> &gt; 
 <a href="{'nope.html' if breadcrumb_broken else slug + '.html'}">{title}</a></nav><h1>{title}</h1>{body}<div class="pager">{pager}</div></main>
 <aside style="width:220px"><p>On this page</p><ul>{otp}</ul></aside></div>
 <footer>SX1000 Series user manual</footer></body></html>""")
@@ -167,15 +167,27 @@ def test_css_not_matching_the_design_spec_is_reported(tmp_path, serve):
 
 
 def test_breadcrumb_is_on_by_default_and_flags_a_broken_redirect(tmp_path, serve):
-    """Breadcrumb: on the active list by default. Present above the H1 with a positive gap -> pass; a
-    crumb whose link goes nowhere (404) is a fail, with a screenshot crop of that crumb."""
+    """Breadcrumb: on the active list by default. Present above the H1 with a gap matching the design
+    spec (0px, flush) -> pass; a crumb whose link goes nowhere (404) is a fail, with a screenshot crop
+    of that crumb."""
     run_dir = tmp_path / "run"
     pdf = make_site(tmp_path, breadcrumb_broken=True)
     r = compare_url(str(pdf), serve + "overview.html", str(run_dir), load_config())
     site = r["site"]
     assert any(row["item"] == "Space above H1 (breadcrumb)" and row["status"] == "pass" for row in site["rows"] if row["group"] == "breadcrumb")
-    broken = [row for row in site["rows"] if row["group"] == "breadcrumb" and row["status"] == "fail"]
+    broken = [row for row in site["rows"] if row["group"] == "breadcrumb" and row["status"] == "fail" and row["item"] != "Space above H1 (breadcrumb)"]
     assert broken and broken[0].get("shot")
+
+
+def test_breadcrumb_gap_not_matching_spec_is_reported(tmp_path, serve):
+    """The spec (config/typography.toml heading_spacing.h1.margin_top) wants the H1 flush against the
+    breadcrumb (0px). A page with extra air between them must fail with the exact expected/actual px,
+    not silently pass just because a breadcrumb exists above the H1."""
+    pdf = make_site(tmp_path, breadcrumb_gap=24)
+    r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
+    site = r["site"]
+    bad = [row for row in site["rows"] if row["group"] == "breadcrumb" and row["item"] == "Space above H1 (breadcrumb)"]
+    assert any(row["status"] == "fail" and row["expected"] == "0px" and row["actual"] == "24px" for row in bad)
 
 
 def test_typography_sampling_skips_breadcrumb_and_pager_links(tmp_path, serve):

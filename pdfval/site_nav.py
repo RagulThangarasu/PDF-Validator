@@ -848,8 +848,12 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
             rows.append(_row("layout", "pass", "Page layout", "", f"{len(p.get('images') or [])} picture(s) checked", p["url"]))
 
     # ---- breadcrumb: present above the H1, each crumb's link opens (no broken link) and lands on the
-    # right page (no wrong redirect) - on the active list by default ([site] check_breadcrumb = false to drop)
+    # right page (no wrong redirect), and the gap above the H1 matches the spec (config/typography.toml
+    # [typography.formats.html_web].heading_spacing.h1.margin_top: the H1 sits right under the breadcrumb,
+    # with no extra/missing air) - on the active list by default ([site] check_breadcrumb = false to drop)
     if cfg.get("check_breadcrumb", True):
+        want_gap = (((typography_cfg or {}).get("formats") or {}).get("html_web") or {}).get(
+            "heading_spacing", {}).get("h1", {}).get("margin_top")
         for p in pages:
             h1, gap = p.get("h1") or "", p.get("breadcrumb_gap")
             if h1 and not p.get("breadcrumb"):
@@ -857,7 +861,11 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
                                  "The page has an H1 but no breadcrumb above it"))
                 continue
             if h1 and p.get("breadcrumb") and gap is not None and gap >= 0:
-                rows.append(_row("breadcrumb", "pass", "Space above H1 (breadcrumb)", "", f"{gap}px gap to the breadcrumb", p["url"]))
+                if want_gap is not None and gap != want_gap:
+                    rows.append(_row("breadcrumb", "fail", "Space above H1 (breadcrumb)", f"{want_gap}px",
+                                     f"{gap}px", p["url"], "The gap between the breadcrumb and the H1 does not match the design spec"))
+                else:
+                    rows.append(_row("breadcrumb", "pass", "Space above H1 (breadcrumb)", "", f"{gap}px gap to the breadcrumb", p["url"]))
             for it in p.get("breadcrumb_items") or []:
                 if not it.get("href"):
                     continue
