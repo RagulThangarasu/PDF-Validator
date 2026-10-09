@@ -368,7 +368,16 @@ class Jobs:
             if job["status"] == "stopped" or jid in self.stopping:
                 return
             if job["status"] in ("queued", "running"):  # the worker died without reporting
-                tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [f"exit code {r.returncode}"]
+                # the crash is usually a native fatal error with little in the traceback itself - keep the
+                # full combined output on disk so it can be inspected after the fact, not just the 1-line
+                # summary below (the previous behaviour discarded everything but that last line)
+                try:
+                    (self.path(jid) / "worker-crash.log").write_text(
+                        f"exit code {r.returncode}\n\n--- stderr ---\n{r.stderr or ''}\n\n--- stdout ---\n{r.stdout or ''}")
+                except OSError:
+                    pass
+                lines = (r.stderr or r.stdout or "").strip().splitlines()
+                tail = lines[-1:] or [f"exit code {r.returncode}"]
                 self.update(jid, status="error", message=f"Worker stopped: {tail[0][:300]}")
 
     def execute(self, jid: str) -> None:
