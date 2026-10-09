@@ -1066,9 +1066,24 @@ def _doc_meta(d: Doc, anchors: list[Anchor]) -> dict:
         "margins": {"odd": [d.pages[0].left, round(d.pages[0].right, 1)],
                     "even": [d.pages[min(1, len(d.pages) - 1)].left, round(d.pages[min(1, len(d.pages) - 1)].right, 1)]},
         "removed_header_footer_lines": d.removed_lines,
+        "non_latin_script": _non_latin_script(d),
         # glyphs of fonts without a Unicode map, read back from the page (OCR + shape)
         **({"decoded_glyphs": d.decoded} if getattr(d, "decoded", None) else {}),
     }
+
+
+_NON_LATIN_SCRIPT_RE = re.compile(
+    "[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7a3"
+    "\u0e00-\u0e7f\u0600-\u06ff\u0750-\u077f\u0590-\u05ff\u0900-\u097f]")
+
+
+def _non_latin_script(d: Doc) -> bool:
+    """True when the document's own text is mostly a dense non-Latin script (CJK, Thai, Arabic,
+    Hebrew, Devanagari, ...): the viewer's bordered highlight boxes get cramped and hard to read
+    character by character on such scripts, so it draws an underline there instead of a full box."""
+    sample = "".join(w.text for w in d.words[:4000])
+    return len(sample) >= 20 and len(_NON_LATIN_SCRIPT_RE.findall(sample)) > 0.3 * len(sample)
+
 
 
 def _toc_l1(baseline: str, cfg: dict) -> list[str]:

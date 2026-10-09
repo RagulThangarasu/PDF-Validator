@@ -69,6 +69,10 @@
   .crit { background: #b42318; color: #fff; border-radius: 999px; font-size: 9px; font-weight: 700; padding: 0 6px; text-transform: uppercase; }
   .hl.structure { border-color: var(--c-structure); background: rgb(37 99 235 / .10); }
   .hl.at { border-width: 0; border-top: 3px dashed; background: none; height: 0 !important; }
+  /* dense non-Latin scripts (CJK, Thai, Arabic, ...): a full box per character is cramped and hard to
+     read - an underline marks the same span without covering the glyphs (.at markers stay untouched,
+     they are already a thin line, not a box) */
+  .pane.non-latin .hl:not(.at) { border-width: 0 0 2px 0 !important; border-radius: 0; background: none !important; }
   .hl.focus { outline: 3px solid #facc15; outline-offset: 2px; animation: pulse 1s ease 2; z-index: 3; }
   /* the issue's description written beside its box, on both PDFs (same number on both sides) */
   .note { position: absolute; z-index: 4; max-width: 340px; font: 10.5px/1.35 system-ui, sans-serif; color: #111;
@@ -277,6 +281,9 @@ class Pane {
 const SCOPE = DATA.meta.baseline.scope;  // web page run: the chapter of the PDF the page covers
 const A = new Pane($('#pane-a'), 'baseline.pdf', SCOPE ? SCOPE.pages : null);
 const B = new Pane($('#pane-b'), 'candidate.pdf');
+// dense non-Latin scripts (CJK, Thai, Arabic, ...): bordered boxes get cramped - underline instead
+A.el.classList.toggle('non-latin', !!DATA.meta.baseline.non_latin_script);
+B.el.classList.toggle('non-latin', !!DATA.meta.candidate.non_latin_script);
 
 // ---- synchronised scrolling ------------------------------------------------
 // DATA.sync = [[prod page, y, stage page, y], ...]: line starts whose text matched

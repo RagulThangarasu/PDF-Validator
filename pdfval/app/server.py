@@ -349,6 +349,12 @@ class Jobs:
             for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS",
                        "NUMEXPR_NUM_THREADS"):
                 env.setdefault(var, "1")
+            # belt-and-suspenders beside the explicit encoding="utf-8" on every report write_text/open():
+            # forces Python's own default text encoding to UTF-8 in the worker regardless of the OS locale,
+            # so a legacy-codepage Windows machine (cp1252, cp950, ...) can't hit UnicodeEncodeError on a
+            # report that contains non-ASCII characters (arrows, CJK, accents) even from code that forgets
+            # to pass encoding= explicitly
+            env["PYTHONUTF8"] = "1"
             o = job.get("options", {})
             if o.get("mode") == "html":
                 env["PDFVAL_HTML_PASSWORD"] = self.passwords.get((urlparse(job["candidate"]).netloc, o.get("html_user", "")), "")
