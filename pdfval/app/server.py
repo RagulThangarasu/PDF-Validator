@@ -363,10 +363,16 @@ class Jobs:
             if o.get("mode") == "html":
                 env["PDFVAL_HTML_PASSWORD"] = self.passwords.get((urlparse(job["candidate"]).netloc, o.get("html_user", "")), "")
             self.update(jid, status="running", message="Starting")
-            # its own process group: Stop ends the worker and everything it started (browsers, OCR)
+            # its own process group: Stop ends the worker and everything it started (browsers, OCR). stdin is
+            # explicitly closed, not inherited: a server that has outlived the terminal/session that started it
+            # (see _launch_hint in html_source.py) can have its own stdin already invalid, and a new Python
+            # interpreter fails at startup trying to wrap that fd as sys.stdin ("Fatal Python error:
+            # init_sys_streams ... Bad file descriptor", reported here as "Worker stopped: <no Python frame>")
+            # - every worker run hit this the same way regardless of what changed, since it happens before any
+            # of the worker's own code (or any of pdfval's) ever runs
             proc = subprocess.Popen([sys.executable, "-m", "pdfval.app.worker", str(self.dir), jid], env=env,
-                                    cwd=str(PROJECT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                    start_new_session=True)
+                                    cwd=str(PROJECT), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, start_new_session=True)
             self.procs[jid] = proc
             out, err = proc.communicate()
             self.procs.pop(jid, None)
@@ -387,9 +393,17 @@ class Jobs:
                         encoding="utf-8")
                 except OSError:
                     pass
-                lines = (r.stderr or r.stdout or "").strip().splitlines()
-                tail = lines[-1:] or [f"exit code {r.returncode}"]
-                self.update(jid, status="error", message=f"Worker stopped: {tail[0][:300]}")
+                combined = (r.stderr or "") + (r.stdout or "")
+                if "init_sys_streams" in combined or "Bad file descriptor" in combined:
+                    msg = ("Worker could not start: this UI server has lost its own session (it outlived the "
+                          "terminal that started it, or runs in a sandbox) and a new worker process could not "
+                          "set up its standard streams. Restart the UI server from a Terminal window (./start.sh) "
+                          "and run again.")
+                else:
+                    lines = combined.strip().splitlines()
+                    tail = lines[-1:] or [f"exit code {r.returncode}"]
+                    msg = f"Worker stopped: {tail[0][:300]}"
+                self.update(jid, status="error", message=msg)
 
     def execute(self, jid: str) -> None:
         """The comparison itself (in the worker process)."""
@@ -551,7 +565,7 @@ def _keychain_get(user: str) -> str:
         return ""
     try:
         r = subprocess.run(["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", user, "-w"],
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
         return r.stdout.rstrip("\n") if r.returncode == 0 else ""
     except Exception:
         return ""
@@ -565,7 +579,7 @@ def _keychain_set(user: str, password: str) -> None:
         return
     try:
         subprocess.run(["security", "add-generic-password", "-U", "-s", _KEYCHAIN_SERVICE, "-a", user, "-w", password],
-                       capture_output=True, timeout=10)
+                       capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
     except Exception:
         pass
 
@@ -902,7 +916,7 @@ class Library:
             out = self._target(a)
             out.mkdir(parents=True, exist_ok=True)
             r = subprocess.run(["7z", "x", str(a), f"-o{out}", "-r", "-y", "-aoa", "*.pdf", "*.PDF"],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, stdin=subprocess.DEVNULL)
             if r.returncode in (0, 1):  # 1 = warnings only
                 (out / ".done").write_text(a.name, encoding="utf-8")
             else:
