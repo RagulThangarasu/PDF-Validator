@@ -180,7 +180,7 @@ def _saved_aem_settings() -> dict:
     """AEM user / author / products saved from the web UI."""
     import json
     try:
-        return json.loads((Path(__file__).resolve().parents[1] / "runs" / "aem-settings.json").read_text())
+        return json.loads((Path(__file__).resolve().parents[1] / "runs" / "aem-settings.json").read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError):
         return {}
 

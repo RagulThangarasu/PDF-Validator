@@ -135,9 +135,9 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
         write_csv(result["site"], out / "site-navigation.csv")
         from . import site_report
         site_report.build(result, out)
-    (out / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
-    (out / "junit.xml").write_text(junit(result))
-    (out / "summary.md").write_text(markdown(result))
+    (out / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
+    (out / "junit.xml").write_text(junit(result), encoding="utf-8")
+    (out / "summary.md").write_text(markdown(result), encoding="utf-8")
     for name, meta in (("baseline.pdf", result["meta"]["baseline"]), ("candidate.pdf", result["meta"]["candidate"])):
         _link_or_copy(meta["path"], out / name)
     return write_viewer(result, out)
@@ -146,7 +146,7 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
 def build_deferred(run_dir: str | Path, name: str) -> Path:
     """A report a batch run left out (DEFERRED): render the screenshots it needs, then build it."""
     out = Path(run_dir)
-    result = json.loads((out / "results.json").read_text())
+    result = json.loads((out / "results.json").read_text(encoding="utf-8"))
     shotmod.render(result, out, "all")
     for n in result["meta"].get("deferred", []):
         if n == "report.pdf":
@@ -155,14 +155,14 @@ def build_deferred(run_dir: str | Path, name: str) -> Path:
             pdf_report.build(result, out, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
     result["meta"]["deferred"] = []
     result["meta"]["screenshots"] = "all"
-    (out / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
+    (out / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
     write_viewer(result, out)
     return out / name
 
 
 def write_viewer(result: dict, out: Path) -> Path:
     data = json.dumps(result, ensure_ascii=False).replace("</", "<\\/")
-    (out / "index.html").write_text(VIEWER.read_text().replace("/*__DATA__*/", data))
+    (out / "index.html").write_text(VIEWER.read_text(encoding="utf-8").replace("/*__DATA__*/", data), encoding="utf-8")
     return out / "index.html"
 
 

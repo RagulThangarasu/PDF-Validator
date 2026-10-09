@@ -39,7 +39,7 @@ def _images(job: dict, run_dir: Path) -> dict | None:
         return img
     try:
         from .writer import image_summary
-        return image_summary(json.loads((run_dir / "results.json").read_text()))
+        return image_summary(json.loads((run_dir / "results.json").read_text(encoding="utf-8")))
     except Exception:
         return None
 
@@ -239,5 +239,5 @@ def build(batch: str, jobs: list[dict], runs_dir: str | Path, out_dir: str | Pat
     out_dir.mkdir(parents=True, exist_ok=True)
     pdf = build_pdf(batch, rs, out_dir / f"{batch}-consolidated.pdf")
     csv_ = write_csv(rs, out_dir / f"{batch}-consolidated.csv")
-    (out_dir / f"{batch}-consolidated.json").write_text(json.dumps({"totals": totals(rs), "rows": rs}, indent=1))
+    (out_dir / f"{batch}-consolidated.json").write_text(json.dumps({"totals": totals(rs), "rows": rs}, indent=1), encoding="utf-8")
     return pdf, csv_

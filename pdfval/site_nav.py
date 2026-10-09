@@ -38,6 +38,16 @@ CHROME_JS = r"""
   const root = (rootSel && document.querySelector(rootSel)) || document.querySelector('main') ||
                document.querySelector('article') || document.body;
   const W = document.documentElement.clientWidth || 1280;
+  // some components (icon/illustration widgets especially) render their real <img>/<svg> inside a
+  // shadow root, which plain querySelectorAll never sees - walk open shadow roots too so pictures
+  // placed that way are still found, instead of silently reporting "0 picture(s) checked"
+  const deepQueryAll = (node, selector) => {
+    const out = [...node.querySelectorAll(selector)];
+    for (const el of node.querySelectorAll('*')) {
+      if (el.shadowRoot) out.push(...deepQueryAll(el.shadowRoot, selector));
+    }
+    return out;
+  };
   const txt = el => (el ? (el.innerText || el.textContent || '') : '').replace(/\s+/g, ' ').trim();
   const visible = el => !!el && (el.checkVisibility ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : el.offsetParent !== null);
   const box = el => { const r = el.getBoundingClientRect(); return [Math.round(r.left + scrollX), Math.round(r.top + scrollY), Math.round(r.right + scrollX), Math.round(r.bottom + scrollY)]; };
@@ -188,7 +198,7 @@ CHROME_JS = r"""
     if (!body.length)
       layout.push({ kind: 'empty-page', text: txt(h1El), detail: 'Only the heading is on the page, no body content below it', where: path(h1El), box: box(h1El) });
   }
-  const pics = [...root.querySelectorAll('img, svg, picture > img')].filter(e => !inPanels(e) && !(e.tagName === 'svg' && e.closest('a,button')));
+  const pics = deepQueryAll(root, 'img, svg, picture > img').filter(e => !inPanels(e) && !(e.tagName === 'svg' && e.closest('a,button')));
   const images = [];
   for (const im of pics) {
     const r = im.getBoundingClientRect();

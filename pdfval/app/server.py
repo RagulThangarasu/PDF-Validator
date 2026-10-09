@@ -70,7 +70,7 @@ class Jobs:
         return self.dir / jid
 
     def get(self, jid: str) -> dict:
-        return json.loads((self.path(jid) / "job.json").read_text())
+        return json.loads((self.path(jid) / "job.json").read_text(encoding="utf-8"))
 
     def update(self, jid: str, **kw) -> dict:
         with self.lock:
@@ -83,7 +83,7 @@ class Jobs:
         jobs = []
         for p in self.dir.glob("*/job.json"):
             try:
-                jobs.append(json.loads(p.read_text()))
+                jobs.append(json.loads(p.read_text(encoding="utf-8")))
             except (OSError, json.JSONDecodeError):
                 pass
         return sorted(jobs, key=lambda j: j["created"], reverse=True)
@@ -134,7 +134,7 @@ class Jobs:
                "created": datetime.now().isoformat(timespec="seconds"), "baseline": baseline, "candidate": candidate,
                "options": options, "mode": options.get("mode", "pdf"), "status": "queued", "progress": 0.0,
                "message": "Queued", "summary": None, **({"batch": batch} if batch else {})}
-        (self.path(jid) / "job.json").write_text(json.dumps(job, indent=1))
+        (self.path(jid) / "job.json").write_text(json.dumps(job, indent=1), encoding="utf-8")
         threading.Thread(target=self._run, args=(jid,), daemon=True).start()
         return job
 
@@ -192,7 +192,7 @@ class Jobs:
     def aem_settings(self) -> dict:
         """AEM link settings saved from the UI (author URL, link template, DAM folder per ditamap)."""
         try:
-            return json.loads((self.dir / "aem-settings.json").read_text())
+            return json.loads((self.dir / "aem-settings.json").read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError):
             return {}
 
@@ -229,13 +229,13 @@ class Jobs:
         """Apply the current AEM settings to a finished run: results.json, the CSV and the genuine-issues PDF."""
         from ..report import pdf_report
         run_dir = self.path(jid)
-        result = json.loads((run_dir / "results.json").read_text())
+        result = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
         acfg = self.aem_config()
         if not result.get("aem") and Path(result["meta"]["candidate"].get("path", "")).is_file():
             aem.annotate(result, {"aem": acfg})  # a run made before GUIDs were traced
         if aem.relink(result, acfg):
             self._learn_product(result)
-            (run_dir / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
+            (run_dir / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
             writer.write_genuine_csv(result, run_dir / "genuine-issues.csv")
             writer.write_viewer(result, run_dir)
             writer.write_pdf_report(result, run_dir)
@@ -373,7 +373,8 @@ class Jobs:
                 # summary below (the previous behaviour discarded everything but that last line)
                 try:
                     (self.path(jid) / "worker-crash.log").write_text(
-                        f"exit code {r.returncode}\n\n--- stderr ---\n{r.stderr or ''}\n\n--- stdout ---\n{r.stdout or ''}")
+                        f"exit code {r.returncode}\n\n--- stderr ---\n{r.stderr or ''}\n\n--- stdout ---\n{r.stdout or ''}",
+                        encoding="utf-8")
                 except OSError:
                     pass
                 lines = (r.stderr or r.stdout or "").strip().splitlines()
@@ -474,7 +475,7 @@ def _batch_zip(jobs: Jobs, bid: str) -> Path:
             # made before the image report / its verdict existed
             if (run_dir / "results.json").exists() and (not img.exists() or "images" not in (j.get("summary") or {})):
                 try:
-                    writer.write_image_report(json.loads((run_dir / "results.json").read_text()), run_dir)
+                    writer.write_image_report(json.loads((run_dir / "results.json").read_text(encoding="utf-8")), run_dir)
                 except Exception:
                     traceback.print_exc()
             if not src.exists() and not img.exists():
@@ -492,7 +493,7 @@ def _batch_zip(jobs: Jobs, bid: str) -> Path:
                     from ..report import docx_report
                     code = max(Path(docx_report.__file__).stat().st_mtime, Path(writer.__file__).stat().st_mtime)
                     if (run_dir / "results.json").exists() and (not word.exists() or word.stat().st_mtime < code):
-                        res = json.loads((run_dir / "results.json").read_text())
+                        res = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
                         writer.assign_bug_ids(res)
                         writer.write_docx_report(res, run_dir)
                 except Exception:
@@ -516,7 +517,7 @@ def _batch_consolidated(jobs: Jobs, bid: str) -> tuple[Path, Path]:
 
 def _write_atomic(path: Path, text: str) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(text)
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -716,11 +717,11 @@ def make_handler(jobs: Jobs, root: Path):
                     if target.name == "side-by-side.pdf" and not target.exists() and (base / "results.json").exists():
                         # the side-by-side page report: built on first download
                         from ..report import page_report as _sp
-                        _sp.build(json.loads((base / "results.json").read_text()), base)
+                        _sp.build(json.loads((base / "results.json").read_text(encoding="utf-8")), base)
                     if target.name == "image-issues.pdf" and not target.exists() and (base / "results.json").exists():
                         # a run finished before the image report existed: build it on first download
                         # (nothing is built when its images PASS: the file stays missing -> 404)
-                        writer.write_image_report(json.loads((base / "results.json").read_text()), base)
+                        writer.write_image_report(json.loads((base / "results.json").read_text(encoding="utf-8")), base)
                     return self._file(target, download=dl)
                 return self._json({"error": "not found"}, 404)
             except (KeyError, FileNotFoundError):
@@ -806,7 +807,7 @@ def make_handler(jobs: Jobs, root: Path):
             """Build a PDF report with the chosen parts and issue filter, send it, delete it."""
             from ..report import pdf_report
             run_dir = jobs.path(jid)
-            result = json.loads((run_dir / "results.json").read_text())
+            result = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
             label = re.sub(r"[^\w.-]+", "-", opts.get("label") or "custom").strip("-")[:40] or "custom"
             if opts.get("format") == "csv":  # the same selection as a spreadsheet
                 from ..report import writer
@@ -893,7 +894,7 @@ class Library:
             r = subprocess.run(["7z", "x", str(a), f"-o{out}", "-r", "-y", "-aoa", "*.pdf", "*.PDF"],
                                capture_output=True, text=True)
             if r.returncode in (0, 1):  # 1 = warnings only
-                (out / ".done").write_text(a.name)
+                (out / ".done").write_text(a.name, encoding="utf-8")
             else:
                 self.state["errors"].append(f"{a.name}: {(r.stderr or r.stdout).strip().splitlines()[-1:] or ['failed']}")
             self.state["done"] += 1
@@ -1082,7 +1083,7 @@ class MetadataCheck:
 
     def status(self) -> dict:
         try:
-            last = json.loads((self.dir / "metadata.json").read_text())
+            last = json.loads((self.dir / "metadata.json").read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError):
             last = None
         return {**self.state, "sheets": self.sheets(), "result": last}

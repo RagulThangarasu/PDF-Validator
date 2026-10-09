@@ -524,10 +524,10 @@ def run(cfg: dict, out_dir: str | Path, sheet: str | Path | None = None, lang: s
     res = validate(cfg, sheet, lang, progress)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "metadata.json").write_text(json.dumps(res, indent=1, ensure_ascii=False))
+    (out_dir / "metadata.json").write_text(json.dumps(res, indent=1, ensure_ascii=False), encoding="utf-8")
     build_pdf(res, out_dir / "metadata-report.pdf")
     write_csv(res, out_dir / "metadata-report.csv")
     rows = sheet_rows(res)
     res["excel"], res["excel_rows"] = _summary(rows, res), rows
-    (out_dir / "metadata.json").write_text(json.dumps(res, indent=1, ensure_ascii=False))
+    (out_dir / "metadata.json").write_text(json.dumps(res, indent=1, ensure_ascii=False), encoding="utf-8")
     return res

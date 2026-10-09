@@ -302,6 +302,11 @@ def _plain_twin(u, y: Image, at: Loc, claimed: list, acfg: dict) -> tuple | None
     except Exception:
         return None
     thr = acfg.get("visual_match_threshold", 0.25)
+    # the dHash alone is too coarse for simple line-art icons: two unrelated diagrams (a USB connector,
+    # a headphone jack) made of similar thin outlines/circles can still land under `thr` by chance - a
+    # real second signal (actual pixel correlation) is required too, or "twin" quietly pairs the wrong
+    # picture and reports a bogus size difference instead of leaving it alone
+    pix_min = acfg.get("twin_pixel_similarity", 0.35)
     wy = y.bbox[2] - y.bbox[0]
     span = acfg.get("twin_reach", 160)
     best = None
@@ -315,6 +320,9 @@ def _plain_twin(u, y: Image, at: Loc, claimed: list, acfg: dict) -> tuple | None
             continue
         d = visual_distance(u.b, y, u.a, Image(at.page, r))
         if d <= thr and (best is None or d < best[0]):
+            cand = Image(at.page, r)
+            if pixel_compare(u.a, cand, u.b, y)[0] < pix_min:
+                continue
             best = (d, r)
     return best[1] if best else None
 

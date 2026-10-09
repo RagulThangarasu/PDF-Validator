@@ -95,7 +95,7 @@ def run(cfg: dict, out: str | Path, lang: str | None = "en", all_versions: bool 
     with ThreadPoolExecutor(6) as ex:
         recs = list(ex.map(one, maps))
     out.mkdir(parents=True, exist_ok=True)
-    (out / "index.json").write_text(json.dumps(recs, indent=1, ensure_ascii=False))
+    (out / "index.json").write_text(json.dumps(recs, indent=1, ensure_ascii=False), encoding="utf-8")
     return recs
 
 
@@ -197,7 +197,7 @@ def generate(cfg: dict, out: str | Path, lang: str | None = None, parallel: int 
     with ThreadPoolExecutor(parallel) as ex:
         recs = list(ex.map(one, maps))
     out.mkdir(parents=True, exist_ok=True)
-    (out / "generated.json").write_text(json.dumps(recs, indent=1, ensure_ascii=False))
+    (out / "generated.json").write_text(json.dumps(recs, indent=1, ensure_ascii=False), encoding="utf-8")
     return recs
 
 
