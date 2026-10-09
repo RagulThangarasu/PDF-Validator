@@ -41,3 +41,39 @@ def test_wrong_bookmark_page_still_locates_the_real_heading(tmp_path):
     gamutduo = next(a for a in anchors if "gamutduo" in a.norm and "navigating" not in a.norm)
     assert gamutduo.located, "the real heading text must be found, not just planted on the wrong bookmarked page"
     assert gamutduo.page == 5, f"expected page 5 (0-based), got {gamutduo.page}"
+
+
+def _unlisted_heading_pdf(path):
+    """"Typographics" (an icon/symbol legend) sits on the same page as "General warranty information",
+    right before the next bookmarked section - styled like a heading (bold, bigger than body text) but
+    never given its own PDF bookmark, exactly the real production case that was swallowed whole into
+    "General warranty information"'s word range and reported as that section's text missing in stage."""
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 100), "PD30 Series", fontsize=28)
+    p2 = doc.new_page()
+    p2.insert_text((72, 60), "Servicing", fontsize=16, fontname="hebo")
+    p2.insert_text((72, 100), "Contact an authorised service centre for repairs.", fontsize=10)
+    p2.insert_text((72, 140), "General warranty information", fontsize=16, fontname="hebo")
+    p2.insert_text((72, 180), "Please use the original accessories with the device.", fontsize=10)
+    p2.insert_text((72, 220), "Typographics", fontsize=14, fontname="hebo")  # unbookmarked, heading-styled
+    p2.insert_text((72, 250), "Warning Information mainly to prevent damage.", fontsize=10)
+    p3 = doc.new_page()
+    p3.insert_text((72, 60), "Cleaning the LCD screen", fontsize=18, fontname="hebo")
+    p3.insert_text((72, 100), "Use a microfibre cloth to clean the screen.", fontsize=10)
+    doc.set_toc([[1, "Servicing", 2], [1, "General warranty information", 2], [1, "Cleaning the LCD screen", 3]])
+    doc.save(path)
+    return str(path)
+
+
+def test_unlisted_heading_becomes_its_own_section(tmp_path):
+    path = _unlisted_heading_pdf(tmp_path / "a.pdf")
+    cfg = load_config()
+    doc = extract.load(path, "baseline", cfg)
+    anchors = build_anchors(doc, cfg)
+    warranty = next(a for a in anchors if "general warranty" in a.norm)
+    typo = next((a for a in anchors if "typographics" in a.norm), None)
+    cleaning = next(a for a in anchors if "cleaning" in a.norm)
+    assert typo is not None, "an unbookmarked but heading-styled line must become its own anchor"
+    assert typo.located
+    assert warranty.word < typo.word < cleaning.word, "must sit between the two real sections, not merge into either"
+    assert typo.level == warranty.level + 1, "one level deeper than the bookmarked section it was found inside"

@@ -13,6 +13,8 @@ def build_anchors(doc: Doc, cfg: dict) -> list[Anchor]:
     source = scfg.get("source", "auto")
     if source == "outline" or (source == "auto" and len(doc.outline) >= 3):
         anchors = _from_outline(doc, scfg)
+        if scfg.get("unlisted_headings", True):
+            anchors = _inject_unlisted_headings(doc, anchors)
     else:
         anchors = _from_headings(doc)
     skip = [re.compile(p, re.I) for p in scfg.get("skip", [])]
@@ -35,6 +37,41 @@ def _drop_cover(doc: Doc, anchors: list[Anchor], max_words: int) -> list[Anchor]
     if any(ln.page == 0 and abs(ln.size - doc.body_size) <= 0.6 and len(ln.text.split()) >= 5 for ln in doc.lines):
         return anchors
     return later
+
+
+def _inject_unlisted_headings(doc: Doc, anchors: list[Anchor]) -> list[Anchor]:
+    """A heading styled like one (bold, noticeably larger than body text) but never given its own PDF
+    bookmark - e.g. a "Typographics" callout sitting on the same page as "General warranty information" -
+    would otherwise be swallowed into whatever bookmarked section's word range happens to span that part
+    of the page, and reported as that section's text missing from the matching stage page. Scan the gap
+    between each pair of consecutive outline anchors for such lines and add them as unlisted anchors, one
+    level deeper than the anchor whose gap they were found in, so they get matched (or reported missing)
+    as sections of their own."""
+    if not anchors:
+        return anchors
+    located = sorted((a for a in anchors if a.located), key=lambda a: a.word)
+    out = list(anchors)
+    seen_lines = {doc.words[a.word].line for a in located if 0 <= a.word < len(doc.words)}
+    bounds = [(a.word, doc.words[a.word].line if 0 <= a.word < len(doc.words) else -1) for a in located]
+    bounds.append((len(doc.words), len(doc.lines)))
+    for k, a in enumerate(located):
+        start_line, end_line = bounds[k][1] + 1, bounds[k + 1][1]
+        for li in range(max(0, start_line), min(end_line, len(doc.lines))):
+            if li in seen_lines:
+                continue
+            ln = doc.lines[li]
+            if ln.size < doc.body_size + 1.5 or len(ln.text.split()) > 15 or ln.text.strip().isdigit():
+                continue
+            if ln.first_word < 0 or ln.first_word >= len(doc.words):
+                continue
+            w = doc.words[ln.first_word]
+            if w.style.weight < 600:
+                continue  # noticeably larger alone also catches body lines in a bigger running font
+            title = ln.text.strip()
+            out.append(Anchor(title, normalize.title(title), a.level + 1, ln.page, ln.bbox[1], ln.first_word))
+            seen_lines.add(li)
+    out.sort(key=lambda a: a.word)
+    return out
 
 
 def _from_outline(doc: Doc, scfg: dict) -> list[Anchor]:
