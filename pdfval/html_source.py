@@ -468,8 +468,18 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
         finally:
             browser.close()
     if not captured:
+        # a specific reason (HTTP 403, a login form) is far more useful than the generic message below;
+        # "no text" is this same failure restated, not a reason, so it is left out of that list. Otherwise,
+        # if the page did open (no error, no login form) but still had nothing to read, point at its own
+        # screenshot - a blank capture there means a session/network problem, not a wrong selector
+        reasons = dict.fromkeys(s["reason"] for s in skipped if s.get("reason") and s["reason"] != "no text")
+        shot = chromes[0].get("page_shot") if chromes else None
+        hint = f" (the page was skipped: {', '.join(reasons)})" if reasons else (
+            f" (the page opened with no error; its screenshot was saved to {out / shot} - "
+            "open it to see what the browser rendered)" if shot else "")
         raise RuntimeError("No text found on the web page" + (f" inside “{root}”" if root else "")
-                           + " - check the URL, the content root selector and that the page loads without a login")
+                           + " - check the URL, the content root selector and that the page loads without a login"
+                           + hint)
 
     report(0.9, "Building the document")
     t_build = _time.monotonic()

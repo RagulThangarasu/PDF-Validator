@@ -291,3 +291,16 @@ def test_crawl_follows_navigation_links_to_the_repository_path():
                     "https://site/content/dam/edu/tey1c/en/manual.pdf"]                 # a download
     assert _guide_links(Page(), "https://site/edu/tey1c/en/package-contents.html") == [
         "https://site/edu/tey1c/en/port-overview.html", "https://site/edu/tey1c/en/safety.html"]
+
+
+def test_blank_page_error_points_at_its_screenshot(tmp_path, serve):
+    """A page that opens fine (no HTTP error, no login form) but has no text anywhere on it must not just
+    say "no text found" - it must point at the screenshot captured for it, so the blank capture itself (a
+    session / login / network problem, not a selector problem) can be seen right away, instead of someone
+    having to dig through runs/<id>/site-shots/ by hand to discover the page rendered empty."""
+    pdf = tmp_path / "baseline.pdf"
+    make_pdf(pdf)
+    (tmp_path / "guide").mkdir(exist_ok=True)
+    (tmp_path / "guide" / "blank.html").write_text("<!doctype html><html><body></body></html>")
+    with pytest.raises(RuntimeError, match="screenshot was saved to"):
+        compare_url(str(pdf), serve + "blank.html", str(tmp_path / "run"), load_config())
