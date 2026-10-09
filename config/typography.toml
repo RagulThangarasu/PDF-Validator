@@ -139,6 +139,9 @@ body_hyperlink = { font = "default", weight = "Regular", size = 16, line_height 
 table_header  = { font = "default",  weight = "Medium",  size = 14, line_height = 16, color = "#FFFFFF" }
 table_default = { font = "default",  weight = "Regular", size = 14, line_height = 16, color = "#000000" }
 table_note    = { font = "default",  weight = "Regular", size = 12, line_height = 16, color = "#757575" }
+# the callout's bold title (IMPORTANT / NOTE / TIP / WARNING): printed in upper case - #333333 is the
+# same dark grey already used for it in the a4_view / a5_print formats above (Figma "900-dark-gray" token)
+callout_title = { font = "default",  weight = "Bold",    size = 12, color = "#333333", uppercase = true }
 # margin-top / margin-bottom of each heading role, and paragraph spacing (margin-bottom) - "0" means flush
 # against whatever comes before/after it (H1 right under the breadcrumb, no extra air above/below it)
 [typography.formats.html_web.heading_spacing]

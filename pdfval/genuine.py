@@ -2140,7 +2140,8 @@ _WHY = {
     "spec bullet": ("Bullet off the design spec", "An unordered list does not use the black circle bullet."),
     "spec pagination": ("Page break off the design spec", "A heading at a page bottom, a callout split over pages, or a table header alone / not repeated."),
     "spec page structure": ("Print page structure off the design spec", "The Print version has a cover, Q&A index or TOC, or the first page header is missing or repeated."),
-    "table header alignment": ("Table header not centred", "A table header cell's text is not centred in its column (design spec: header text centred)."),
+    "table header alignment": ("Table header not left-aligned", "A table header cell's text is not left-aligned in its column (design spec: table headers are always left-aligned)."),
+    "single column alignment": ("Single-column table cell not centred", "A one-column table's cell text is not centred (design spec: a single-column table's text is always centred)."),
     "row background": ("Table row background differs", "Rows that one side shades (group rows between the data rows) are plain on the other."),
     "spec text-align": ("Text not left-aligned", "Body text is centred or right-aligned; the design spec left-aligns all content."),
     "size / aspect": ("Image size differs", "The picture is shown at another width or aspect ratio in stage."),
@@ -2254,7 +2255,8 @@ _PROD_STAGE = [
      r"\1 goes to \2", r"\1 goes to \3"),
     (r"Tables merged in stage: (\d+) prod tables are one table in stage", r"\1 separate tables", "One table"),
     (r"Table split in stage: prod table .*? is (\d+) tables in stage", "One table", r"\1 tables"),
-    (r"Table header not centred in stage \(\d+ cells?\): (.+?)(?: —|$)", "Header text centred in its column", r"\1"),
+    (r"Table header not left-aligned in stage \(\d+ cells?\): (.+?)(?: —|$)", "Header text left-aligned in its column", r"\1"),
+    (r"Single-column table cell not centred in stage \(\d+ cells?\): (.+?)(?: —|$)", "Cell text centred in its column", r"\1"),
     (r"Bold label joined with its text in stage: (“.+?”) is on its own line in prod with (“.+?”) on the next line",
      r"\1 on its own line, \2 on the next line", r"\1 and \2 run into one line"),
     (r"Page reference “on page 0” in stage", "A page number in the cross-reference", "“on page 0”"),
@@ -2473,7 +2475,7 @@ def concise(msg: str) -> str:
       - explanatory brackets (“(space between marker and text)”, “(re-captured or edited)”) are dropped;
         brackets with pages, numbers or counts stay, and quoted document text is never touched
       - an explanatory tail (“ - the cross-reference's page number was not resolved …”,
-        “ — header text must be centred in its column”) and the style role tag (“[text-10pt] ”) are dropped
+        “ — table headers must be left-aligned (design spec)”) and the style role tag (“[text-10pt] ”) are dropped
       - a phrase repeated before every place (“prod has a space stage does not — ”) is said once
       - a long list of examples keeps its first three"""
     parts = []

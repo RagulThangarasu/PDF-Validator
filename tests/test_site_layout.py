@@ -47,5 +47,17 @@ def test_picture_and_layout_breaks_are_reported(tmp_path, serve):
 
 
 def test_clean_page_has_no_layout_failure(tmp_path, serve):
-    site = _site(tmp_path, serve, '<p>Picture:</p><img src="pic.png" alt="ok" width="200" height="100">')
+    # centred (design spec: every picture is centred) - an un-styled inline <img> would otherwise sit left,
+    # which is exactly what check_image_center now correctly flags; this test is about a genuinely clean page
+    site = _site(tmp_path, serve, '<p>Picture:</p><img src="pic.png" alt="ok" width="200" height="100" style="display:block;margin:0 auto">')
     assert not rows(site, "layout") and rows(site, "layout", "pass")
+
+
+def test_left_aligned_picture_fails_the_design_spec(tmp_path, serve):
+    """Design spec ("Image rules": Alignment = Center): a picture left in its column is reported even
+    though it is the only picture on the page (check_picture_alignment's relative/majority check would
+    see nothing to disagree with - this is the separate, absolute check_image_center)."""
+    site = _site(tmp_path, serve, '<p>Picture:</p><img src="pic.png" alt="left" width="200" height="100">')
+    bad = rows(site, "layout")
+    assert any(r["item"] == "Picture alignment (design spec)" and r["expected"] == "centred" and "left" in r["actual"] for r in bad)
+

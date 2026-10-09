@@ -36,7 +36,7 @@ def make_pdf(path):
 
 
 def make_site(root, *, drop_nav=None, wrong_next=None, broken_anchor=None, subtitle=None, bad_h1_css=False,
-              breadcrumb_broken=False, breadcrumb_gap=0):
+              breadcrumb_broken=False, breadcrumb_gap=0, extra_body=""):
     """One page per chapter in root/guide, with the chrome of the BenQ guide."""
     site = root / "guide"
     site.mkdir()
@@ -67,7 +67,7 @@ a{{font-family:Roboto,sans-serif;font-weight:400;font-size:16px;line-height:24px
 <div style="display:flex"><nav style="width:220px"><p>Table of Contents</p><ul>
 {nav.replace(f'href="{slug}.html"', f'href="{slug}.html" aria-current="page"')}</ul></nav>
 <main style="width:700px"><nav class="breadcrumb" style="margin:0 0 {breadcrumb_gap}px 0"><a href="overview.html">Home</a> &gt; 
-<a href="{'nope.html' if breadcrumb_broken else slug + '.html'}">{title}</a></nav><h1>{title}</h1>{body}<div class="pager">{pager}</div></main>
+<a href="{'nope.html' if breadcrumb_broken else slug + '.html'}">{title}</a></nav><h1>{title}</h1>{body}{extra_body if slug == "overview" else ""}<div class="pager">{pager}</div></main>
 <aside style="width:220px"><p>On this page</p><ul>{otp}</ul></aside></div>
 <footer>SX1000 Series user manual</footer></body></html>""")
     return site / "manual.pdf"
@@ -164,6 +164,24 @@ def test_css_not_matching_the_design_spec_is_reported(tmp_path, serve):
     assert any(row["item"] == "Headline 1 — bold missing" for row in typo)
     assert any(row["item"] == "Headline 1 — font size" for row in typo)
     assert any(row["item"] == "Headline 1 — colour" for row in typo)
+
+
+def test_table_header_centred_is_reported_not_left_aligned(tmp_path, serve):
+    """Design spec: table headers are always left-aligned. A centred <th> must fail, a left-aligned one passes."""
+    extra = '<table><thead><tr><th style="text-align:center">Spec</th></tr></thead><tbody><tr><td>12V</td></tr></tbody></table>'
+    pdf = make_site(tmp_path, extra_body=extra)
+    r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
+    typo = failed(r["site"], "typography")
+    assert any(row["item"] == "Table header — alignment" and row["expected"] == "left" and row["actual"] == "center" for row in typo)
+
+
+def test_callout_title_not_upper_case_is_reported(tmp_path, serve):
+    """Design spec: callout titles (IMPORTANT/NOTE/TIP/WARNING) are printed in upper case."""
+    extra = '<p><b style="font-weight:700">note</b> Keep the device dry.</p>'
+    pdf = make_site(tmp_path, extra_body=extra)
+    r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
+    typo = failed(r["site"], "typography")
+    assert any(row["item"] == "Callout title — case" and row["expected"] == "UPPER CASE" for row in typo)
 
 
 def test_breadcrumb_is_on_by_default_and_flags_a_broken_redirect(tmp_path, serve):

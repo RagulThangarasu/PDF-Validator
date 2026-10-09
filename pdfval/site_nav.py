@@ -289,6 +289,8 @@ CHROME_JS = r"""
              lineHeight: cs.lineHeight === 'normal' ? null : Math.round(parseFloat(cs.lineHeight) || 0),
              color: toHex(cs.color), underline: cs.textDecorationLine.includes('underline'),
              marginTop: Math.round(parseFloat(cs.marginTop) || 0), marginBottom: Math.round(parseFloat(cs.marginBottom) || 0),
+             align: cs.textAlign === 'start' ? 'left' : cs.textAlign,
+             uppercase: cs.textTransform === 'uppercase' || txt(el) === txt(el).toUpperCase(),
              text: txt(el).slice(0, 60), where: path(el), box: box(el) }; };
   const firstOf = s => [...root.querySelectorAll(s)].find(e => visible(e) && !inPanels(e) && txt(e));
   const css = {
@@ -554,6 +556,12 @@ def _css_rows(pages: list[dict], typography_cfg: dict) -> list[dict]:
                 bad.append(("colour", want_color, got["color"]))
             if want.get("underline") and not got.get("underline"):
                 bad.append(("underline", "underlined", "not underlined"))
+            if want.get("uppercase") and not got.get("uppercase"):
+                bad.append(("case", "UPPER CASE", got.get("text", "")[:20] or "not upper case"))
+            # table headers are always left-aligned (design spec), never centred / right-aligned -
+            # independent of the per-style spec table above, so it applies even without a "styles" entry
+            if role == "table_header" and got.get("align") not in (None, "left"):
+                bad.append(("alignment", "left", got["align"]))
             if bad:
                 for prop, exp, act in bad:
                     rows.append(_row("typography", "fail", f"{label} — {prop}", exp, act, p["url"],
@@ -844,6 +852,16 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
                             rows.append(_row("layout", "warn", "Picture alignment", f"{usual} (as the page's other pictures)", f"{im['name']}: {a}",
                                              p["url"], f"{im['width']}×{im['height']}px, {im['share']}% of the content width", im["where"],
                                              shot=shot_of(p, im)))
+        if cfg.get("check_image_center", True):
+            # design spec ("Image rules": Alignment = Center, every format): independent of what the page's
+            # other pictures do - a picture left- or right-aligned is wrong even when every picture on the
+            # page agrees with it (the relative check above only catches one picture disagreeing with the rest)
+            for im in p.get("images") or []:
+                if im["width"] < 60 or im["align"] in ("center", "full"):
+                    continue
+                rows.append(_row("layout", "fail", "Picture alignment (design spec)", "centred", f"{im['name']}: {im['align']}",
+                                 p["url"], f"{im['width']}×{im['height']}px, {im['share']}% of the content width", im["where"],
+                                 shot=shot_of(p, im)))
         if "layout" in p and not [i for i in issues if i["kind"] in CORE_LAYOUT_KINDS]:
             rows.append(_row("layout", "pass", "Page layout", "", f"{len(p.get('images') or [])} picture(s) checked", p["url"]))
 

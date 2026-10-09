@@ -110,9 +110,15 @@ row_background_severity = "warning"
 border_severity = "error"     # a prod table border missing in stage
 border_color_tolerance = 150  # euclidean RGB distance: border colour differs (black -> light grey), not anti-aliasing
 border_color_severity = "warning"   # text in a stage table that runs across its cell border (not in prod)
-check_header_align = true     # stage table header cells (dark header bar): text centred in its column (design spec)
+check_header_align = true     # table header cells (dark header bar): text must be left-aligned in its column
+                              # (design spec) - flags centred / right-aligned / indented headers
 header_align_tolerance = 4.0  # pt the text may sit off the column centre
 header_align_severity = "error"
+check_single_column_center = true  # a table with only one column (not a multi-column data table - a key /
+                              # single-field layout): its cell text (header and data) must be centred, not
+                              # left-aligned - the opposite rule from a normal multi-column table's header
+single_column_tolerance = 4.0  # pt the text may sit off the column centre
+single_column_severity = "error"
 
 [integrity]
 glyphs = true                 # broken glyphs in stage (U+FFFD, private-use, NUL) -> critical
@@ -309,7 +315,7 @@ report_types = [
   # icons: missing, another icon, broken / low resolution, in text and in table rows
   "icon missing inline", "icon differs", "icon pixelated", "icon missing", "icon extra", "icon order", "icon above text",
   # tables: a table, header, row or cell missing, merged or split
-  "missing table", "missing header", "missing row", "rows merged", "row split", "cells merged", "cells split",
+  "missing table", "missing header", "table header alignment", "single column alignment", "missing row", "rows merged", "row split", "cells merged", "cells split",
   "tables merged", "cell differs",
   # layout structure: text stacked in prod set in columns (or the other way), items of a row not level
   "stacked to columns", "row alignment", "caption row",
@@ -330,14 +336,17 @@ enabled = true                # left navigation vs the PDF's L1 TOC, its links, 
 # sub-headings, hidden otherwise; each entry jumps to its own section), breadcrumb (present above the H1,
 # every crumb's link opens and lands on the right page - no broken link, no wrong redirect), and the page's
 # live CSS vs config/typography.toml [typography.formats.html_web] (font, weight incl. bold missing, size,
-# line height, colour). Every fail/warn row with a page screenshot gets a cropped image of the issue in
-# site.pdf. Everything below is an older check, not on that list: off by default, flip to true to bring any
-# back (no code removed, just not run).
+# line height, colour, table header alignment, callout title upper case), and pictures centred (design spec:
+# "Image rules" - alignment is always centre, on every format). Every fail/warn row with a page screenshot
+# gets a cropped image of the issue in site.pdf. Everything below is an older check, not on that list: off by
+# default, flip to true to bring any back (no code removed, just not run).
 check_download = false        # the Download PDF button / file
 check_pager = true            # next / previous topic links (first page: no "previous"; last page: no "next")
 check_otp = true               # "On this page": shown only with h3/h4 on the page, each entry jumps to it
 check_subtitle = false        # product subtitle in the header
 check_picture_alignment = true   # pictures on one page at inconsistent left/center/right alignment
+check_image_center = true      # design spec: every picture is centred - independent of what the rest of the
+                              # page's pictures do (check_picture_alignment above only catches inconsistency)
 check_breadcrumb = true        # breadcrumb present above the H1, its links open and land on the right page
 check_empty_page = false      # a page with only its heading, no body content
 check_overlap = false         # a picture or text block printed on top of another
@@ -399,8 +408,8 @@ types = [
   "stacked to columns",   # a list broken into columns: text stacked in prod, side by side in stage
   "list alignment",       # the numbers of one numbered list at one left edge in prod, at different indents in stage
   "picture row",          # a picture grid laid out differently: side by side in prod, stacked in stage (or the reverse)
-  # tables: header (missing / not centred as in prod), rows and cells merged or split
-  "missing header", "rows merged", "row split", "cells merged", "cells split",
+  # tables: header (missing / not left-aligned), rows and cells merged or split
+  "missing header", "table header alignment", "single column alignment", "rows merged", "row split", "cells merged", "cells split",
   "missing row", "missing table", "tables merged", "cell differs",
   "icon missing inline", "icon differs", "icon pixelated",   # icons inside a sentence: missing, another icon, low resolution
   "caption row",                            # captions of one row of pictures: level in prod, not in stage
@@ -445,9 +454,6 @@ types = [
   "case", "punctuation", "case + punctuation",  # uppercase/lowercase and punctuation-only wording differences
   "callout style",                          # a note drawn another way throughout (bar vs filled box): house style
   "order differs",                          # a section moved to another position: its content is still there
-  "table header alignment",                 # a table header cell not centred: confirmed real (narrow / numeric
-                                             # columns, e.g. "No.") but the site's own template issue, not
-                                             # reported per table
 ]
 in_table_cells = ["paragraph break", "line-wrap",   # text wrapping inside table cells
                   "emphasis", "indent", "text-align", "spec text-align"]  # table layout: header weight, alignment

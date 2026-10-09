@@ -865,6 +865,8 @@ def check(u: Unit) -> list[Finding]:
         findings += _row_background(u, tb_pages)
     if tcfg.get("check_header_align", True):
         findings += _header_align(u, tb_pages)
+    if tcfg.get("check_single_column_center", True):
+        findings += _single_column_center(u)
     return findings
 
 
@@ -936,30 +938,11 @@ def _is_header_bar(doc: Doc, row: TRow) -> bool:
     return (r + g + b) / 3 < 110
 
 
-def _centred_in_prod(A: Doc, idx: list[int], tol: float) -> bool:
-    """The prod header cell holding these words has them centred in its column (False when the cell or
-    its table cannot be found: nothing to compare with)."""
-    if not idx:
-        return False
-    w0 = A.words[idx[0]]
-    cx = (w0.bbox[0] + w0.bbox[2]) / 2
-    for _, box, _, grid in _raw(A, w0.page):
-        if not (box[0] - 1 <= cx <= box[2] + 1 and box[1] - 1 <= w0.bbox[1] <= box[3] + 1):
-            continue
-        col = next(((x0, x1) for x0, x1 in grid if x0 - 1 <= cx <= x1 + 1), None)
-        if not col:
-            return False
-        line = [i for i in idx if A.words[i].line == w0.line]
-        left = min(A.words[i].bbox[0] for i in line) - col[0]
-        right = col[1] - max(A.words[i].bbox[2] for i in line)
-        return left >= 0 and right >= 0 and abs(left - right) / 2 <= tol
-    return False
-
-
 def _header_align(u: Unit, tb: list) -> list[Finding]:
-    """Table header cells: each line of header text is centred in its column (design spec, stage only).
-    A header that is left / right aligned, or off centre by more than header_align_tolerance pt, is reported
-    with the prod header at the same words."""
+    """Table header cells: each line of header text is left-aligned in its column (design spec: table
+    headers are always left-aligned, never centred or right-aligned - an absolute rule, not judged
+    against what prod happens to do). A header off the left edge by more than header_align_tolerance pt
+    is reported, named by how it is actually aligned instead (centred / right-aligned / indented)."""
     tol = u.cfg["tables"].get("header_align_tolerance", 4.0)
     sev = u.cfg["tables"].get("header_align_severity", "error")
     A, B = u.a, u.b
@@ -986,14 +969,10 @@ def _header_align(u: Unit, tb: list) -> list[Finding]:
             for ln, ws in by_line.items():
                 left = min(B.words[i].bbox[0] for i in ws) - x0
                 right = x1 - max(B.words[i].bbox[2] for i in ws)
-                if left < 0 or right < 0:
-                    continue  # text wider than the column: nothing to centre
-                off = (left - right) / 2
-                if abs(off) > tol:
-                    hows.append("left-aligned" if off < 0 and left < 2 * tol + 4 else "right-aligned" if off > 0 and right < 2 * tol + 4
-                                else f"off centre by {abs(off):.0f}pt")
-            if hows and not _centred_in_prod(A, [b2a[j] for j in words if j in b2a], tol):
-                continue  # judged against prod: only a header prod centres has to be centred in stage
+                if left < 0 or left <= tol:
+                    continue  # at (or past) the column's left edge: left-aligned, as the spec requires
+                hows.append("centred" if right >= 0 and abs(left - right) <= 2 * tol else "right-aligned" if 0 <= right <= tol
+                            else f"indented {left:.0f}pt from the left edge")
             if hows:  # one entry per header cell, however many lines it wraps to
                 bad.append((sorted(words, key=lambda i: (B.words[i].line, B.words[i].bbox[0])), hows[0]))
         if not bad:
@@ -1003,11 +982,68 @@ def _header_align(u: Unit, tb: list) -> list[Finding]:
         a_idx = [b2a[j] for j in idx if j in b2a]
         out.append(Finding(
             "tables", sev,
-            f"Table header not centred in stage ({len(bad)} cell{'s' if len(bad) > 1 else ''}): {names}"
-            + " — centred in its column in prod",
+            f"Table header not left-aligned in stage ({len(bad)} cell{'s' if len(bad) > 1 else ''}): {names}"
+            + " — table headers must be left-aligned (design spec)",
             locs(A, a_idx, rcfg["max_locs"]) if a_idx else [], locs(B, idx, rcfg["max_locs"]),
             {"kind": "table header alignment", "cells": len(bad)}, types=["table header alignment"]))
     return out
+
+
+def _single_column_center(u: Unit) -> list[Finding]:
+    """A table with only one column (a key / single-field layout, not a multi-column data table): every
+    cell's text, header and data alike, must be centred in that one column - the opposite rule from a
+    normal multi-column table's header (left-aligned, see _header_align). `tables()` itself only ever
+    builds a TTable for >= 2 grid columns (a 1-column grid would not be a "data table" by that measure),
+    so this reads the raw per-page grid directly instead of the shared TTable list."""
+    B = u.b
+    if B.raw_tables is None:
+        return []
+    A = u.a
+    tol = u.cfg["tables"].get("single_column_tolerance", 4.0)
+    sev = u.cfg["tables"].get("single_column_severity", "error")
+    b2a = {j: i for i, j in u.pairs}
+    rcfg = u.cfg["report"]
+    out = []
+    for p in sorted({B.words[i].page for i in range(*u.b_range)}):
+        figures = diagram_boxes(B, p)
+        for _, tbox, rows, grid in _raw(B, p):
+            if len(grid) != 1 or len(rows) < 2 or tuple(tbox) in figures:
+                continue
+            x0, x1 = grid[0]
+            row_boxes = [(tbox[0], box[1], tbox[2], box[3]) for box, _ in rows]
+            row_words = [[i for i in _inside(B, u.b_range, p, box) if B.words[i].norm] for box in row_boxes]
+            # a note / tip / warning box the detector framed as a one-column grid: not a real table
+            if any(B.words[i].norm.startswith("<label:") or _CALLOUT_LABEL.match(B.words[i].text.strip())
+                  for words in row_words for i in words[:2]):
+                continue
+            bad = []
+            for words in row_words:
+                if not words:
+                    continue
+                by_line: dict[int, list[int]] = defaultdict(list)
+                for i in words:
+                    by_line[B.words[i].line].append(i)
+                for ln, ws in by_line.items():
+                    left = min(B.words[i].bbox[0] for i in ws) - x0
+                    right = x1 - max(B.words[i].bbox[2] for i in ws)
+                    if left < 0 or right < 0 or abs(left - right) <= tol:
+                        continue  # already centred (within tolerance), or wider than the column: nothing to centre
+                    how = ("left-aligned" if left <= tol else "right-aligned" if right <= tol
+                          else f"off-centre by {abs(left - right) / 2:.0f}pt")
+                    bad.append((sorted(ws, key=lambda i: B.words[i].bbox[0]), how))
+            if not bad:
+                continue
+            idx = [i for ws, _ in bad for i in ws]
+            names = "; ".join(f"“{' '.join(B.words[i].text for i in ws)}” {how}" for ws, how in bad[:6])
+            a_idx = [b2a[j] for j in idx if j in b2a]
+            out.append(Finding(
+                "tables", sev,
+                f"Single-column table cell not centred in stage ({len(bad)} cell{'s' if len(bad) > 1 else ''}): {names}"
+                + " — a single-column table's text must be centred (design spec)",
+                locs(A, a_idx, rcfg["max_locs"]) if a_idx else [], locs(B, idx, rcfg["max_locs"]),
+                {"kind": "single column alignment", "cells": len(bad)}, types=["single column alignment"]))
+    return out
+
 
 
 _BG: "OrderedDict[tuple, tuple]" = None  # (path, page) -> (RGB samples, width, height) of the page at 1 px/pt
