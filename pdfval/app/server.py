@@ -122,6 +122,10 @@ class Jobs:
             if cu.netloc == urlparse(acfg.get("author") or "").netloc and cu.path.startswith("/content/") \
                     and "wcmmode" not in cu.query:
                 candidate += ("&" if cu.query else "?") + "wcmmode=disabled"
+            # "Add ?wcmmode=disabled" checkbox: the host above is only guessed from the configured AEM author -
+            # this covers every other URL (another AEM instance, a host not recognised as "author", ...)
+            if options.get("wcmmode_disabled") and "wcmmode" not in urlparse(candidate).query:
+                candidate += ("&" if urlparse(candidate).query else "?") + "wcmmode=disabled"
             if options["html_user"] and password:
                 self.passwords[(urlparse(candidate).netloc, options["html_user"])] = password
         elif options.get("aem_map"):  # stage PDF generated in AEM Guides at the start of the run

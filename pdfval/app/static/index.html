@@ -573,6 +573,8 @@ async function viewNew(qs) {
         <div id="aem-map-info" class="small muted" style="margin-top:6px">Templates by the map's folder: Zowie · Education (BenQ Edu) · Infra · BenQ / Business. Needs the AEM login below.</div>` : `
         <div class="role">Web page · candidate</div><h2 style="margin-top:4px">HTML page URL</h2>
         <input type="url" id="url" placeholder="https://docs.example.com/manual/sl04" value="${esc(prev?.mode === 'html' ? prev.candidate : '')}" aria-label="Web page URL">
+        <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="o-wcmmode_disabled" ${o.wcmmode_disabled ? 'checked' : ''}>
+          <span>Add <code>?wcmmode=disabled</code> to the URL – the published view of an AEM author page, without the editing frame (an AEM author URL under <code>/content/</code> gets this automatically either way).</span></label>
         <p class="small muted" style="margin:8px 0 0">The page is opened in a headless browser and read from its structure (headings, text, tables, images, links).
           Its headings are matched to the PDF's table of contents and every section is validated. Enter a Sites folder instead of a page (e.g. <code>…/sites.html/content/guide</code>) and the English guide of the selected prod PDF's product is searched under it and validated.</p>
         <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="o-html_crawl" ${o.html_crawl === false ? '' : 'checked'}>
