@@ -119,7 +119,8 @@ def _drawn_pair_geometry(u, x: "Image", y: "Image", acfg: dict, icon_w: float) -
         out.append(Finding(
             "assets", acfg.get("geometry_severity", "warning"),
             f"Image {'smaller' if grow < 0 else 'bigger'} in stage by {abs(grow):.0%} (prod p.{x.page + 1} ↔ stage p.{y.page + 1}): "
-            f"{wx:.0f}×{hx:.0f} pt → {wy:.0f}×{hy:.0f} pt, width {rel_x:.0%} → {rel_y:.0%} of content box",
+            f"{wx:.0f}×{hx:.0f} pt → {wy:.0f}×{hy:.0f} pt, width {rel_x:.0%} → {rel_y:.0%} of content box"
+            f"{_size_note(wx, wy, grow, web)}",
             [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
             {"kind": "size", "baseline_width": round(rel_x, 3), "candidate_width": round(rel_y, 3), "drawn_in_prod": True},
             types=["image smaller" if grow < 0 else "image bigger"]))
@@ -148,6 +149,16 @@ def size_reported(rel_x: float, rel_y: float, acfg: dict) -> bool:
         return False
     return abs(rel_x - rel_y) > acfg.get("width_tolerance", 0.10) or \
         abs(rel_y / rel_x - 1) > acfg.get("size_ratio_tolerance", 0.05)
+
+
+def _size_note(wx: float, wy: float, grow: float, web: bool) -> str:
+    """"Smaller"/"bigger" (grow) is decided by share of content width, not points - a print page and a web
+    page's content column are different widths, so a picture can take a smaller share of a wider stage
+    column while still being drawn at more points (or the reverse). Without this note, the headline would
+    flatly contradict the very point sizes printed right next to it (e.g. "smaller" next to "42pt -> 61pt")."""
+    if not web or abs(wy - wx) < 0.5 or (grow < 0) != (wy > wx):
+        return ""
+    return " - drawn in a wider web content column, not a smaller picture"
 
 
 def find_artwork(img_doc: Doc, im: Image, other: Doc, at, min_score: float, max_dist: float,
@@ -460,9 +471,11 @@ def _outside(doc: Doc, rng: tuple[int, int], page: int) -> list[tuple[int, tuple
 
 
 def _stacked_drawings(doc: Doc, rng: tuple[int, int], at, claimed: list, pic: Image, reach: float = 320) -> list | None:
-    """Two or three drawings of this section, one under the other (their x ranges overlap), near the spot `at`
-    and not claimed yet, that together have the shape of the picture `pic` (width : height within 12 %): the
-    parts prod draws separately of what stage shows as one picture."""
+    """Two or three drawings of this section, not claimed yet and near the spot `at`, that together have
+    the shape of the picture `pic` (width : height within 12 %): the parts prod draws separately of what
+    stage shows as one picture - one under the other (two side views of the monitor) OR side by side (a
+    before/after pair of silhouettes next to each other) - either arrangement is the same picture, not an
+    extra one."""
     from .tables import _figure_rects
     out = [o for _, o in _outside(doc, rng, at.page)]
     rects = []
@@ -475,24 +488,37 @@ def _stacked_drawings(doc: Doc, rng: tuple[int, int], at, claimed: list, pic: Im
         if abs((r[1] + r[3]) / 2 - (at.bbox[1] + at.bbox[3]) / 2) > reach:
             continue
         rects.append(tuple(r))
-    rects.sort(key=lambda r: r[1])
     shape = (pic.bbox[2] - pic.bbox[0]) / max(pic.bbox[3] - pic.bbox[1], 1)
     best = None
-    for i in range(len(rects)):
-        for n in (2, 3):
-            group = rects[i:i + n]
-            if len(group) < n:
-                continue
-            if not all(min(a[2], b[2]) - max(a[0], b[0]) > 0.5 * min(a[2] - a[0], b[2] - b[0]) for a, b in zip(group, group[1:])):
-                continue  # not one under the other
-            if any(b[1] - a[3] > 0.5 * max(a[3] - a[1], b[3] - b[1]) for a, b in zip(group, group[1:])):
-                continue  # too far apart to be one picture
-            w = max(r[2] for r in group) - min(r[0] for r in group)
-            h = max(r[3] for r in group) - min(r[1] for r in group)
-            d = abs((w / max(h, 1)) / shape - 1)
-            if d <= 0.12 and (best is None or d < best[0]):
-                best = (d, group)
+
+    def scan(sort_key, cross_ok, along_ok):
+        nonlocal best
+        ordered = sorted(rects, key=sort_key)
+        for i in range(len(ordered)):
+            for n in (2, 3):
+                group = ordered[i:i + n]
+                if len(group) < n:
+                    continue
+                if not all(cross_ok(a, b) for a, b in zip(group, group[1:])):
+                    continue  # not aligned on the cross axis: not one picture
+                if not all(along_ok(a, b) for a, b in zip(group, group[1:])):
+                    continue  # too far apart on the axis they are arranged on
+                w = max(r[2] for r in group) - min(r[0] for r in group)
+                h = max(r[3] for r in group) - min(r[1] for r in group)
+                d = abs((w / max(h, 1)) / shape - 1)
+                if d <= 0.12 and (best is None or d < best[0]):
+                    best = (d, group)
+
+    # one under the other: aligned in x (overlap), close in y (small gap)
+    scan(lambda r: r[1],
+        lambda a, b: min(a[2], b[2]) - max(a[0], b[0]) > 0.5 * min(a[2] - a[0], b[2] - b[0]),
+        lambda a, b: b[1] - a[3] <= 0.5 * max(a[3] - a[1], b[3] - b[1]))
+    # side by side: aligned in y (overlap), close in x (small gap)
+    scan(lambda r: r[0],
+        lambda a, b: min(a[3], b[3]) - max(a[1], b[1]) > 0.5 * min(a[3] - a[1], b[3] - b[1]),
+        lambda a, b: b[0] - a[2] <= 0.5 * max(a[2] - a[0], b[2] - b[0]))
     return list(best[1]) if best else None
+
 
 
 _ROW_ART: dict = {}
@@ -1252,6 +1278,9 @@ def check(u: Unit) -> list[Finding]:
     al = Aligner(u)
     icon_w = acfg.get("icon_max_width", 0.08)
     window = acfg.get("match_window_words", 80)
+    web = u.b.raw_tables is not None  # a web candidate's content column is another width than the printed
+                                      # page, so a "smaller/bigger" size verdict (share of content width) can
+                                      # disagree with the absolute point size shown beside it (_size_note)
     ia, ib = section_images(u.a, u.a_range), section_images(u.b, u.b_range)
 
     def anchor(doc: Doc, rng, im: Image) -> int:
@@ -1420,7 +1449,7 @@ def check(u: Unit) -> list[Finding]:
                 "assets", acfg.get("size_severity", "warning"),
                 f"Image {'bigger' if grow > 0 else 'smaller'} in stage by {abs(grow):.0%}: the same picture "
                 f"(prod p.{x.page + 1} ↔ stage p.{y.page + 1}): {wx:.0f}×{hx:.0f} pt → {wy:.0f}×{hy:.0f} pt, "
-                f"width {rel_x:.0%} → {rel_y:.0%} of content box",
+                f"width {rel_x:.0%} → {rel_y:.0%} of content box{_size_note(wx, wy, grow, web)}",
                 [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)],
                 {"kind": "size", "baseline_width": round(rel_x, 3), "candidate_width": round(rel_y, 3),
                  "visual_distance": round(vis, 3)}, types=["image smaller" if grow < 0 else "image bigger"]))
@@ -1527,9 +1556,13 @@ def check(u: Unit) -> list[Finding]:
                     [Loc(at.page, twin)], [Loc(y.page, y.bbox)], {"kind": "size"},
                     types=["image smaller" if grow < 0 else "image bigger"]))
             continue
-        # prod draws the picture as two or three drawings one under the other (two side views of the monitor),
-        # stage shows them as one picture: together they have the picture's shape - the same picture, not an extra
-        parts = _stacked_drawings(u.a, u.a_range, at, claimed_a, y) if not icon and at is not None else None
+        # prod draws the picture as two or three separate drawings - one under the other, or side by side
+        # (two side views of the monitor) - stage shows them as one picture: together they have the
+        # picture's shape - the same picture, not an extra one. Not gated on `icon`: the COMBINED prod
+        # shape is often a real illustration even when the single stage picture alone measures as icon-
+        # sized (a wide web content column makes the same picture a smaller share of it than in print) -
+        # _drawn_pair_geometry still drops it if BOTH sides turn out to be genuinely icon-sized
+        parts = _stacked_drawings(u.a, u.a_range, at, claimed_a, y) if at is not None else None
         if parts:
             box = parts[0]
             for r in parts[1:]:
@@ -1704,7 +1737,7 @@ def check(u: Unit) -> list[Finding]:
             wx, hx = x.bbox[2] - x.bbox[0], x.bbox[3] - x.bbox[1]
             wy, hy = y.bbox[2] - y.bbox[0], y.bbox[3] - y.bbox[1]
             problems.insert(0, f"{wx:.0f}×{hx:.0f} pt → {wy:.0f}×{hy:.0f} pt, "
-                               f"width {rel_x:.0%} → {rel_y:.0%} of content box")
+                               f"width {rel_x:.0%} → {rel_y:.0%} of content box{_size_note(wx, wy, grow, web)}")
         if problems:
             # stretched = stage draws the picture out of its own pixel proportions and prod does not
             # (a different measured aspect alone is usually another crop or frame of the same picture)
