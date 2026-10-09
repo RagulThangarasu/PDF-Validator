@@ -184,6 +184,19 @@ def test_callout_title_not_upper_case_is_reported(tmp_path, serve):
     assert any(row["item"] == "Callout title — case" and row["expected"] == "UPPER CASE" for row in typo)
 
 
+def test_every_paragraph_gets_its_own_typography_status_not_one_sample(tmp_path, serve):
+    """Every visible instance of a role is checked, not one sample standing in for the whole page: a
+    page with a correctly-styled paragraph AND a mis-styled one must report BOTH - one pass, one fail -
+    not just the first paragraph found (which would silently hide the second one's real problem)."""
+    extra = ('<p>A correctly styled paragraph about the SX1000.</p>'
+            '<p style="font-size:11px">A second paragraph with the wrong font size.</p>')
+    pdf = make_site(tmp_path, extra_body=extra)
+    r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
+    rows = [row for row in r["site"]["rows"] if row["group"] == "typography" and "overview" in row["page"]
+           and row["item"].startswith("Body default")]
+    assert any(row["status"] == "pass" for row in rows), rows
+    assert any(row["status"] == "fail" and "wrong font size" in row["note"] for row in rows), rows
+
 def test_opacity_zero_content_is_still_sampled(tmp_path, serve):
     """A scroll-reveal element (opacity:0 until a reader scrolls to it - common on real sites) must still
     be sampled for typography: a single evaluate() never scrolls the page first, so treating opacity:0 as
@@ -193,7 +206,7 @@ def test_opacity_zero_content_is_still_sampled(tmp_path, serve):
     pdf = make_site(tmp_path, extra_body=extra)
     r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
     rows = [row for row in r["site"]["rows"] if row["group"] == "typography" and "overview" in row["page"]]
-    assert any(row["item"] == "Body strong" for row in rows), rows
+    assert any(row["item"].startswith("Body strong") for row in rows), rows
     assert not any("nothing found to sample" in (row.get("actual") or "") for row in rows)
 
 
@@ -252,7 +265,7 @@ def test_typography_sampling_skips_breadcrumb_and_pager_links(tmp_path, serve):
     page.write_text(html)
     r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
     site = r["site"]
-    hyperlink_rows = [row for row in site["rows"] if row["group"] == "typography" and row["item"] == "Body hyperlink"]
+    hyperlink_rows = [row for row in site["rows"] if row["group"] == "typography" and row["item"].startswith("Body hyperlink")]
     assert hyperlink_rows and hyperlink_rows[0]["status"] == "pass", hyperlink_rows
 
 

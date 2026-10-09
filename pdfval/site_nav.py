@@ -301,8 +301,9 @@ CHROME_JS = r"""
     const t = document.getElementById(f) || document.getElementsByName(f)[0];
     targets[f] = t ? (t.matches('h1,h2,h3,h4,h5,h6') ? txt(t) : txt(t.querySelector('h1,h2,h3,h4,h5,h6')) || txt(t).slice(0, 120)) : null;
   }
-  // ---- CSS vs the design spec (config/typography.toml [typography.formats.html_web]): one real sample
-  // per role, so Python can compare it against the spec's font / weight / size / line-height / colour
+  // ---- CSS vs the design spec (config/typography.toml [typography.formats.html_web]): every visible
+  // instance of each role, so Python can compare each one against the spec's font / weight / size /
+  // line-height / colour - not just one sample standing in for the whole page
   const toHex = c => { const m = (c || '').match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)/); return m ? '#' + [1, 2, 3].map(i => (+m[i]).toString(16).padStart(2, '0')).join('') : null; };
   const sample = el => { if (!el) return null; const cs = getComputedStyle(el);
     return { family: cs.fontFamily.split(',')[0].replace(/["']/g, '').trim(), weight: +cs.fontWeight || 400,
@@ -313,19 +314,23 @@ CHROME_JS = r"""
              align: cs.textAlign === 'start' ? 'left' : cs.textAlign,
              uppercase: cs.textTransform === 'uppercase' || txt(el) === txt(el).toUpperCase(),
              text: txt(el).slice(0, 60), where: path(el), box: box(el) }; };
-  const firstOf = s => [...root.querySelectorAll(s)].find(e => visible(e) && !inPanels(e) && txt(e));
+  // every visible instance of the role, not just the first one: a page with 6 paragraphs gets 6 checked,
+  // not 1 sample standing in for all of them (capped per role/page so one huge table can't blow up the
+  // report - a real page rarely has anywhere near this many genuinely distinct headings/paragraphs)
+  const allOf = s => [...root.querySelectorAll(s)].filter(e => visible(e) && !inPanels(e) && txt(e)).slice(0, 50);
   const css = {
-    h1: sample(firstOf('h1')), h2: sample(firstOf('h2')), h3: sample(firstOf('h3')),
-    body_default: sample(firstOf('p')), body_strong: sample(firstOf('strong, b')),
-    body_hyperlink: sample(firstOf('a[href]')), table_header: sample(firstOf('table th')),
-    table_default: sample(firstOf('table td')),
-    callout_title: sample([...root.querySelectorAll('*')].find(e => visible(e) && !inPanels(e) && e.children.length === 0 &&
-      /^(important|note|tip|warning)$/i.test(txt(e).trim()) && (+getComputedStyle(e).fontWeight || 400) >= 600)),
+    h1: allOf('h1').map(sample), h2: allOf('h2').map(sample), h3: allOf('h3').map(sample),
+    body_default: allOf('p').map(sample), body_strong: allOf('strong, b').map(sample),
+    body_hyperlink: allOf('a[href]').map(sample), table_header: allOf('table th').map(sample),
+    table_default: allOf('table td').map(sample),
+    callout_title: [...root.querySelectorAll('*')].filter(e => visible(e) && !inPanels(e) && e.children.length === 0 &&
+      /^(important|note|tip|warning)$/i.test(txt(e).trim()) && (+getComputedStyle(e).fontWeight || 400) >= 600)
+      .slice(0, 50).map(sample),
   };
-  // nothing at all could be sampled (every role null): the typography/spacing checks below would
+  // nothing at all could be sampled (every role empty): the typography/spacing checks below would
   // otherwise silently validate nothing and report nothing, looking exactly like a clean pass - this
   // flag lets evaluate() say so instead (see "css_sampled" in the returned object, below)
-  const cssSampled = Object.values(css).some(v => v !== null);
+  const cssSampled = Object.values(css).some(arr => arr && arr.length > 0);
   // ---- the vertical gap between adjacent content blocks (paragraph / table / image / callout), vs
   // config/typography.toml [typography.formats.html_web].block_gaps - headings are not in this list,
   // see heading_spacing (margins) above instead
@@ -548,9 +553,11 @@ def _font_ok(family: str | None, want: str) -> bool:
 
 
 def _css_rows(pages: list[dict], typography_cfg: dict) -> list[dict]:
-    """Every role's live CSS (site_nav's `css` sample) vs config/typography.toml [typography.formats.html_web]:
-    font family, weight (bold missing included), size, line height, colour, link underline - exact match,
-    no tolerance (the spec is the contract: "follow this only exactly")."""
+    """Every VISIBLE INSTANCE of every role's live CSS (site_nav's `css` sample, one entry per role per
+    actual heading/paragraph/link/etc. found - not one sample standing in for the whole page) vs
+    config/typography.toml [typography.formats.html_web]: font family, weight (bold missing included),
+    size, line height, colour, link underline - exact match, no tolerance (the spec is the contract:
+    "follow this only exactly")."""
     t = typography_cfg or {}
     styles = ((t.get("formats") or {}).get("html_web") or {}).get("styles") or {}
     if not styles:
@@ -560,42 +567,47 @@ def _css_rows(pages: list[dict], typography_cfg: dict) -> list[dict]:
     for p in pages:
         css = p.get("css") or {}
         for role, want in styles.items():
-            got = css.get(role)
-            if got is None or (role, p["url"]) in seen:
-                continue
-            seen.add((role, p["url"]))
             label = _ROLE_LABEL.get(role, role)
             want_family = fonts.get(want.get("font", ""), want.get("font", ""))
             want_weight = weights.get(want.get("weight", "Regular"), 400)
-            bad = []
-            shot = {"page_shot": p["page_shot"], "box": got["box"]} if p.get("page_shot") and got.get("box") else None
-            if want_family and not _font_ok(got.get("family"), want_family):
-                bad.append(("font family", want_family, got.get("family") or "—"))
-            if got.get("weight") != want_weight:
-                prop = "bold missing" if want_weight >= 600 > got.get("weight", 400) else "font weight"
-                bad.append((prop, str(want_weight), str(got.get("weight"))))
-            if want.get("size") is not None and got.get("size") != want["size"]:
-                bad.append(("font size", f"{want['size']}px", f"{got.get('size')}px"))
-            if want.get("line_height") is not None and got.get("lineHeight") is not None and got["lineHeight"] != want["line_height"]:
-                bad.append(("line height", f"{want['line_height']}px", f"{got['lineHeight']}px"))
-            want_color = (want.get("color") or "").lower()
-            if want_color and want_color.startswith("#") and got.get("color") and got["color"].lower() != want_color:
-                bad.append(("colour", want_color, got["color"]))
-            if want.get("underline") and not got.get("underline"):
-                bad.append(("underline", "underlined", "not underlined"))
-            if want.get("uppercase") and not got.get("uppercase"):
-                bad.append(("case", "UPPER CASE", got.get("text", "")[:20] or "not upper case"))
-            # table headers are always left-aligned (design spec), never centred / right-aligned -
-            # independent of the per-style spec table above, so it applies even without a "styles" entry
-            if role == "table_header" and got.get("align") not in (None, "left"):
-                bad.append(("alignment", "left", got["align"]))
-            if bad:
-                for prop, exp, act in bad:
-                    rows.append(_row("typography", "fail", f"{label} — {prop}", exp, act, p["url"],
-                                     got.get("text", ""), got.get("where", ""), shot=shot))
-            else:
-                rows.append(_row("typography", "pass", label, "", "matches the design spec", p["url"],
-                                 where=got.get("where", ""), shot=shot))
+            for got in css.get(role) or []:
+                key = (role, p["url"], got.get("where"), got.get("text"))
+                if key in seen:
+                    continue  # the same element matched twice (e.g. a nested selector overlap)
+                seen.add(key)
+                bad = []
+                shot = {"page_shot": p["page_shot"], "box": got["box"]} if p.get("page_shot") and got.get("box") else None
+                if want_family and not _font_ok(got.get("family"), want_family):
+                    bad.append(("font family", want_family, got.get("family") or "—"))
+                if got.get("weight") != want_weight:
+                    prop = "bold missing" if want_weight >= 600 > got.get("weight", 400) else "font weight"
+                    bad.append((prop, str(want_weight), str(got.get("weight"))))
+                if want.get("size") is not None and got.get("size") != want["size"]:
+                    bad.append(("font size", f"{want['size']}px", f"{got.get('size')}px"))
+                if want.get("line_height") is not None and got.get("lineHeight") is not None and got["lineHeight"] != want["line_height"]:
+                    bad.append(("line height", f"{want['line_height']}px", f"{got['lineHeight']}px"))
+                want_color = (want.get("color") or "").lower()
+                if want_color and want_color.startswith("#") and got.get("color") and got["color"].lower() != want_color:
+                    bad.append(("colour", want_color, got["color"]))
+                if want.get("underline") and not got.get("underline"):
+                    bad.append(("underline", "underlined", "not underlined"))
+                if want.get("uppercase") and not got.get("uppercase"):
+                    bad.append(("case", "UPPER CASE", got.get("text", "")[:20] or "not upper case"))
+                # table headers are always left-aligned (design spec), never centred / right-aligned -
+                # independent of the per-style spec table above, so it applies even without a "styles" entry
+                if role == "table_header" and got.get("align") not in (None, "left"):
+                    bad.append(("alignment", "left", got["align"]))
+                if bad:
+                    for prop, exp, act in bad:
+                        rows.append(_row("typography", "fail", f"{label} — {prop}", exp, act, p["url"],
+                                         got.get("text", ""), got.get("where", ""), shot=shot))
+                else:
+                    # several instances of the same role can all pass on one page (every paragraph on a
+                    # page, say) - the snippet tells them apart; a bare fail item doesn't need it, the
+                    # text is already in the row's own note (got["text"] above)
+                    pass_item = f"{label} — “{got.get('text', '')[:40]}”" if got.get("text") else label
+                    rows.append(_row("typography", "pass", pass_item, "", "matches the design spec", p["url"],
+                                     where=got.get("where", ""), shot=shot))
     return rows
 
 
@@ -610,23 +622,25 @@ def _spacing_rows(pages: list[dict], typography_cfg: dict) -> list[dict]:
     for p in pages:
         css = p.get("css") or {}
         for role, want in heading_spacing.items():
-            got = css.get(role if role != "p" else "body_default")
-            if got is None or (role, p["url"]) in seen:
-                continue
-            seen.add((role, p["url"]))
             label = _ROLE_LABEL.get(role, role.upper())
-            shot = {"page_shot": p["page_shot"], "box": got["box"]} if p.get("page_shot") and got.get("box") else None
-            bad = []
-            if want.get("margin_top") is not None and got.get("marginTop") != want["margin_top"]:
-                bad.append(("space above", f"{want['margin_top']}px", f"{got.get('marginTop')}px"))
-            if want.get("margin_bottom") is not None and got.get("marginBottom") != want["margin_bottom"]:
-                bad.append(("space below", f"{want['margin_bottom']}px", f"{got.get('marginBottom')}px"))
-            for prop, exp, act in bad:
-                rows.append(_row("typography", "fail", f"{label} — {prop}", exp, act, p["url"],
-                                 got.get("text", ""), got.get("where", ""), shot=shot))
-            if not bad:
-                rows.append(_row("typography", "pass", f"{label} spacing", "", "matches the design spec", p["url"],
-                                 where=got.get("where", ""), shot=shot))
+            for got in css.get(role if role != "p" else "body_default") or []:
+                key = (role, p["url"], got.get("where"), got.get("text"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                shot = {"page_shot": p["page_shot"], "box": got["box"]} if p.get("page_shot") and got.get("box") else None
+                bad = []
+                if want.get("margin_top") is not None and got.get("marginTop") != want["margin_top"]:
+                    bad.append(("space above", f"{want['margin_top']}px", f"{got.get('marginTop')}px"))
+                if want.get("margin_bottom") is not None and got.get("marginBottom") != want["margin_bottom"]:
+                    bad.append(("space below", f"{want['margin_bottom']}px", f"{got.get('marginBottom')}px"))
+                for prop, exp, act in bad:
+                    rows.append(_row("typography", "fail", f"{label} — {prop}", exp, act, p["url"],
+                                     got.get("text", ""), got.get("where", ""), shot=shot))
+                if not bad:
+                    pass_item = f"{label} — “{got.get('text', '')[:40]}”" if got.get("text") else label
+                    rows.append(_row("typography", "pass", f"{pass_item} spacing", "", "matches the design spec", p["url"],
+                                     where=got.get("where", ""), shot=shot))
         for g in p.get("gaps") or []:
             rule = next((r for r in gap_rules if r.get("from") == g["from"] and r.get("to") == g["to"]), None)
             if not rule:
