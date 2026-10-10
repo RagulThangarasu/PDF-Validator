@@ -97,6 +97,12 @@ def _line_words(line, decode: dict | None = None) -> list[tuple[str, list[float]
             else:
                 glue = cur is not None and not single and not normalize.nospace_char(cur[0][-1])
             if glue:
+                if cur[2] != st and not any(ch.isalnum() for ch in cur[0]):
+                    # the word so far is only leading punctuation (an opening quote, a bracket) glued
+                    # from a different span than the word itself ("“Pairing", quote in Regular, "Pairing"
+                    # in Bold): its style must be the word's own, not the punctuation's, or a bold/plain
+                    # difference on the word is missed (or wrongly reported) by whatever glued onto its front
+                    cur[2] = st
                 cur[0] += c
                 cur[4] += pos
                 b = cur[1]
@@ -547,13 +553,33 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
                     words[last].norm = ""
 
     if ccfg.get("dehyphenate", True):
-        for i in range(len(words) - 1):
-            w, n = words[i], words[i + 1]
-            if (w.norm.endswith("-") and len(w.norm) > 1 and n.line_start
-                    and n.norm[:1].islower()):
-                # keep the hyphen: right for compounds ("third-party"); a pure line-break
-                # hyphen ("config-uration") is recognised by the content check as a match
-                w.norm, n.norm = w.norm + n.norm, ""
+        # A word cut at a line break continues at the left of ITS OWN column on a later line - not simply
+        # at the next word in reading order. Across a table (or any two-column page) a "line" runs through
+        # every cell of the row, so the next word in the stream belongs to the cell beside it: joining
+        # blindly both leaves the real halves apart ("con-" | "nect") and glues a neighbour's word onto the
+        # stub ("pass-" + "cannot" -> "pass-cannot"). The sentence then matches nothing on the web page,
+        # which writes it whole, and a table cell that IS on the page is reported as data missing.
+        last_on_line: dict[int, int] = {}
+        for i, w in enumerate(words):
+            last_on_line[w.line] = i
+        for i, w in enumerate(words):
+            # only a hyphen the line break itself put there: the word has to end its own line
+            if not (w.norm.endswith("-") and len(w.norm) > 1 and last_on_line.get(w.line) == i):
+                continue
+            reach = 4 * max(1.0, w.bbox[3] - w.bbox[1])  # a few lines down, no further
+            for k in range(i + 1, len(words)):
+                n = words[k]
+                if n.page != w.page or n.bbox[1] - w.bbox[1] > reach:
+                    break
+                if not n.norm or n.bbox[1] <= w.bbox[1]:
+                    continue  # beside the break, not below it: another cell of the same row
+                # the rest of the word starts the next line of the same column, so it can never begin
+                # further right than the point the line broke at
+                if n.line_start and n.bbox[0] <= w.bbox[0] and n.norm[:1].islower():
+                    # keep the hyphen: right for compounds ("third-party"); a pure line-break
+                    # hyphen ("config-uration") is recognised by the content check as a match
+                    w.norm, n.norm = w.norm + n.norm, ""
+                    break
 
     doc = Doc(path, label, pages, words, lines, images,
               [(lvl, t, p) for lvl, t, p in pdf.get_toc(simple=True)],

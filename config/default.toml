@@ -46,7 +46,7 @@ critical_missing_words = 8    # a missing block of >= N prod words is flagged CR
 case_sensitive = true
 ignore_quote_style = true     # true = ’ ‘ “ ” are the same as ' " (haven’t = haven't): not reported
 normalize_typography = true   # true = also treat – — as - ("steps 2-4" = "steps 2–4": dash style is not reported)
-check_spacing = true          # double / missing spaces between words on the same line
+check_spacing = false         # double / missing spaces between words on the same line
 ignore_superscript_spacing = true  # the space before / after a superscript (® ™ ¹, a raised footnote mark) is not reported
 ignore_footnote_marks = true  # "button" vs "button¹": a raised footnote number on one side only is not a changed word
 ignore_relocated = true       # a missing/extra block whose words all exist unmatched on the other side
@@ -90,6 +90,12 @@ graphic_text_max_words = 12   # only for missing pieces up to this many words
 graphic_text_score = 0.72     # match needed (normalised cross-correlation of the rendered text, 0..1)
 graphic_text_edge_score = 0.65  # ... and of the letter strokes at the hit: badge (A) is not badge (B)
 graphic_text_severity = "warning"
+
+[highlights]                  # text left highlighted on the web page (see pdfval/checks/highlights.py)
+enabled = true
+severity = "error"
+max_words = 40                # a coloured run longer than this is treated as a design background, not residue
+ignore_colors = []            # highlight colours that are part of the design, e.g. ["#fff3cd"]
 
 [tables]
 enabled = true
@@ -304,26 +310,17 @@ concurrency = 6               # pages fetched at once (separate browser tabs) on
 # What a web page run reports - only these kinds of issue (a web guide is not validated like a stage PDF).
 # [] = everything a PDF run reports.
 report_types = [
-  # content: whether it is there at all is still checked (a whole answer / paragraph / topic missing from the
-  # page, or one the PDF does not have) - not how it is worded (a changed word, spacing, case, punctuation,
-  # the same content twice): that is not checked for a web guide, its text comes from the live DOM
+  # content: whether it is there at all - a whole answer / paragraph / topic missing from the page, or one
+  # the PDF does not have. Not how it is worded (a changed word, spacing, case, punctuation, the same
+  # content twice): that is not checked for a web guide, its text comes from the live DOM
   "missing text", "extra text", "missing section", "extra section",
-  # links: not working, missing, going somewhere else
-  "broken link", "missing link", "link to wrong section", "link target differs", "link lands elsewhere",
-  # pictures: missing, broken, extra, another picture, size, pixelated, alignment / placement
-  "missing image", "broken image", "extra image", "image changed", "image smaller", "image bigger",
-  "image pixelated", "image alignment", "placement", "image outside box", "image distorted", "image order",
-  # icons: missing, another icon, broken / low resolution, in text and in table rows
-  "icon missing inline", "icon differs", "icon pixelated", "icon missing", "icon extra", "icon order", "icon above text",
-  # tables: a table, header, row or cell missing, merged or split
-  "missing table", "missing header", "table header alignment", "single column alignment", "missing row", "rows merged", "row split", "cells merged", "cells split",
-  "tables merged", "cell differs",
-  # layout structure: text stacked in prod set in columns (or the other way), items of a row not level
-  "stacked to columns", "row alignment", "caption row",
-  # a picture grid laid out differently; list numbers of one list not at one left edge; list markers
-  "picture row", "list alignment", "bullet", "bullet marker", "numbering style", "numbering format", "numbering sequence",
-  # bold / italic: words bold in prod and plain on the site, or the reverse
-  "emphasis",
+  # pictures: gone from the page, or shown under a different heading than in the PDF
+  "missing image", "image in wrong section",
+  # pictures rendered at another size than the same picture in the PDF (oversized / tiny)
+  "image bigger", "image smaller",
+  # pictures sitting differently in the text column (left / centred / right / full width), and an icon
+  # centred on its paragraph on one side but at its first line on the other
+  "image alignment", "image vertical alignment",
 ]
 
 [site]                        # web page runs: the chrome around the content (see pdfval/site_nav.py)
@@ -335,10 +332,13 @@ enabled = true                # left navigation vs the PDF's L1 TOC, its links, 
 # instead), next/previous topic (every page but the last must have "next", every page but the first must have
 # no "previous", the last page must have no "next"), "On this page" (shown only when the page has h3/h4
 # sub-headings, hidden otherwise; each entry jumps to its own section), breadcrumb (present above the H1,
-# every crumb's link opens and lands on the right page - no broken link, no wrong redirect), and the page's
+# every crumb's link opens and lands on the right page - no broken link, no wrong redirect, and the
+# first crumb names the product), and the page's
 # live CSS vs config/typography.toml [typography.formats.html_web] (font, weight incl. bold missing, size,
 # line height, colour, table header alignment, callout title upper case), and pictures centred (design spec:
-# "Image rules" - alignment is always centre, on every format). Every fail/warn row with a page screenshot
+# "Image rules" - alignment is always centre, on every format), the table component's style
+# ([typography.formats.html_web.table]: header bar, border, cell padding, corner radius). Every
+# fail/warn row with a page screenshot
 # gets a cropped image of the issue in site.pdf. Everything below is an older check, not on that list: off by
 # default, flip to true to bring any back (no code removed, just not run).
 check_download = false        # the Download PDF button / file
@@ -349,15 +349,29 @@ check_picture_alignment = true   # pictures on one page at inconsistent left/cen
 check_image_center = true      # design spec: every picture is centred - independent of what the rest of the
                               # page's pictures do (check_picture_alignment above only catches inconsistency)
 check_breadcrumb = true        # breadcrumb present above the H1, its links open and land on the right page
+check_breadcrumb_product = true  # the trail starts with the product name ("<product> > ... > <page>"),
+                              # not straight at the page
 check_empty_page = false      # a page with only its heading, no body content
 check_overlap = false         # a picture or text block printed on top of another
 check_typography = true       # the page's CSS vs [typography.formats.html_web] - font, weight, size,
                               # line height, colour; exact match, no tolerance
+check_table_style = true      # the table component vs [typography.formats.html_web.table] - header bar
+                              # colour, border width/colour, cell padding, corner radius
+check_content_links = true    # links in the content itself (cross-references), not only the chrome:
+                              # each one opens, its anchor exists
+check_guid_links = true       # a link whose address or label still carries a DITA GUID
+                              # (GUID-17f6ffdc-…): an AEM reference the publish did not resolve
+check_list_margin = true      # a list whose markers (1. 2. 3. / bullets) do not start at the left edge
+                              # of the paragraph above it
+list_margin_tolerance = 2     # px a list marker may differ from that edge before it is reported
 # CSS selectors, only when the labels ("Table of contents", "On this page", "Next topic", "Download PDF")
 # do not find the element on a site; empty = found automatically
 nav = ""                      # the left navigation (table of contents)
 on_this_page = ""             # the right-hand list of the page's headings
 on_this_page_max_level = 4    # every heading of the page down to this level (h2, h3, h4) must be in "On this page"
+on_this_page_min_level = 2    # from this level a heading counts as a section the list must carry (the H1 is the
+                              # page title). 3 for a guide whose pages hold their content under one H2 and whose
+                              # "On this page" lists only H3/H4
 next = ""                     # the next-topic link
 prev = ""                     # the previous-topic link
 download = ""                 # the Download PDF link / button
@@ -365,6 +379,8 @@ header = ""                   # the header that holds the product title
 subtitle = ""                 # the product title (subtitle) itself
 footer = ""
 breadcrumb = ""
+breadcrumb_product = ""       # the product name the breadcrumb must start with; empty = the product
+                              # title shown in the header
 
 [genuine]
 report_image_labels = false       # labels / numbers / callout text in a picture (missing or drawn into it): not reported
@@ -384,6 +400,7 @@ types = [
   "missing section", "duplicate section", "extra section",
   "heading text",                           # the same section under a heading with other words / another number
   "emphasis",                                                        # bold / italic missing (or added)
+  "text highlight",                 # a phrase published with an editing highlight still on it (web guide only)
   "label joined",                                                    # bold label + its plain text on one line (prod: 2 lines)
   # hyperlinks
   "broken link", "missing link", "extra link", "link to wrong section", "link target differs",
@@ -519,6 +536,11 @@ severity = "warning"
 [ui]
 stage_dir = ""                # batch pairs: the stage PDFs folder ("" = stage-pdf/ when it holds PDFs, else aem-map-pdfs/)
 parallel_runs = 0             # comparisons run at the same time (each in its own process); 0 = auto: every CPU core but one
+parallel_html_runs = 0        # web page (URL) runs at the same time; 0 = auto: twice the CPU core count, since
+                              # such a run mostly waits on the site rather than the CPU. Each one drives its own
+                              # Chromium, though, so the auto value is 20 browsers on a 10-core machine: if a batch
+                              # reports "The browser for the web capture could not start" or TargetClosedError for
+                              # the runs at the back of the queue, set this to something the machine can hold (6-8)
 
 [footer]
 enabled = false               # running header / footer (page numbers, footer text) prod vs stage: not validated

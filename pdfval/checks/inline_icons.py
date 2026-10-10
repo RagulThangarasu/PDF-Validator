@@ -143,7 +143,10 @@ def check(u: Unit) -> list[Finding]:
                 if j is None:
                     continue
                 w = B.words[j]
-                for sbox, sdpi in _icons(B, w.page, lo, hi):
+                # the stage icon may be a shrunk version of prod's (a real size regression): searched for down
+                # to a quarter of the usual floor, or it falls below `lo` and reads as "missing" instead of
+                # "smaller" - the one case this check exists to catch
+                for sbox, sdpi in _icons(B, w.page, lo * 0.25, hi):
                     cy = (sbox[1] + sbox[3]) / 2
                     gap = sbox[0] - w.bbox[2] if side == "after" else w.bbox[0] - sbox[2]
                     if w.bbox[1] - 4 <= cy <= w.bbox[3] + 4 and -3 <= gap <= reach + 4:
@@ -170,14 +173,26 @@ def check(u: Unit) -> list[Finding]:
                 found["highlight"].append((box, page, Loc(spage, sbox), where))
             if diff > cfg.get("differs_over", 0.30):
                 found["differs"].append((box, page, Loc(spage, sbox), where))
-            elif sdpi is not None and sdpi < cfg.get("min_dpi", 200) and (dpi is None or dpi >= 1.4 * sdpi):
-                found["pixelated"].append((box, page, Loc(spage, sbox),
-                                           f"{where} ({sdpi:.0f} dpi; prod: {'vector' if dpi is None else f'{dpi:.0f} dpi'})"))
+            else:
+                # the same icon (by look), so a size difference is real, not a side-effect of it being another
+                # icon entirely - compared by area (both dimensions can shrink without the aspect ratio moving)
+                area_a = max((box[2] - box[0]) * (box[3] - box[1]), 1e-6)
+                area_b = (sbox[2] - sbox[0]) * (sbox[3] - sbox[1])
+                ratio = (area_b / area_a) ** 0.5
+                if ratio < cfg.get("smaller_than", 0.75):
+                    found["smaller"].append((box, page, Loc(spage, sbox), f"{where} ({ratio:.0%} of prod's size)"))
+                elif ratio > cfg.get("bigger_than", 1.34):
+                    found["bigger"].append((box, page, Loc(spage, sbox), f"{where} ({ratio:.0%} of prod's size)"))
+                elif sdpi is not None and sdpi < cfg.get("min_dpi", 200) and (dpi is None or dpi >= 1.4 * sdpi):
+                    found["pixelated"].append((box, page, Loc(spage, sbox),
+                                               f"{where} ({sdpi:.0f} dpi; prod: {'vector' if dpi is None else f'{dpi:.0f} dpi'})"))
     out = []
     text = {"missing": ("icon missing inline", "Icon missing in stage", "the icon in the sentence in prod is not shown in stage"),
             "highlight": ("icon differs", "Icon differs in stage",
                           "the same button with another part highlighted than in prod (e.g. another arrow of the 5-way controller)"),
             "differs": ("icon differs", "Icon differs in stage", "stage shows another icon than prod at the same place in the sentence"),
+            "smaller": ("icon smaller", "Icon smaller in stage", "the icon in the sentence is smaller in stage than in prod"),
+            "bigger": ("icon bigger", "Icon bigger in stage", "the icon in the sentence is bigger in stage than in prod"),
             "pixelated": ("icon pixelated", "Icon pixelated in stage",
                           "stage's icon is a low-resolution bitmap (blurs when zoomed or printed) where prod's is sharp")}
     for kind, items in found.items():

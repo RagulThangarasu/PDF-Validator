@@ -88,7 +88,21 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("--parallel", type=int, default=3, help="maps generated at the same time (--generate)")
     dp.add_argument("--config", help="TOML overrides merged over config/default.toml")
 
+    cb = sub.add_parser("combined", help="one report with the PDF validation and the AEM site validation of every "
+                                         "product side by side (the newest run of each kind)")
+    cb.add_argument("--runs", default="runs", help="the runs folder to read (default: runs)")
+    cb.add_argument("--out", default="", help="where to write it (default: <runs>/_combined)")
+
     args = ap.parse_args(argv)
+    if args.cmd == "combined":
+        from .report import combined_report
+        pdf, csv_ = combined_report.build(args.runs, args.out or (Path(args.runs) / "_combined"))
+        ps = combined_report.pairs(args.runs)
+        t = combined_report.totals(ps)
+        print(f"{t['products']} product(s), {t['both']} validated both ways "
+              f"(PDF: {t['pdf']['runs']} run(s), site: {t['site']['runs']} run(s))")
+        print(f"report: {pdf}\n   csv: {csv_}")
+        return 0
     if args.cmd == "classes":
         import os
         from . import aem, aem_classes

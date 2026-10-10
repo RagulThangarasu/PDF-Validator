@@ -79,8 +79,11 @@ def test_repeated_points_and_missing_text_are_reported_as_in_pdf(tmp_path):
     assert sorted(t[0] for t, _ in fs) == ["duplicate content", "missing text"]
 
 
-def test_bold_on_the_site_that_prod_does_not_have_is_reported(tmp_path):
-    """Words plain in prod and bold on the web page (or the reverse) are a difference the reader sees: reported on a site run."""
+def test_bold_on_the_site_is_found_but_is_not_a_genuine_issue(tmp_path):
+    """Words plain in prod and bold on the web page (or the reverse) are still detected and still appear in
+    the full report. They are no longer a *genuine* issue on a site run: an AEM site validation reports only
+    content missing / extra, pictures missing or in the wrong section, picture size and picture alignment
+    ([html] report_types - see tests/test_site_report_types.py)."""
     cfg = engine.load_config()
     cfg["typography"]["enabled"] = False
     cfg.setdefault("site", {})["enabled"] = False
@@ -94,4 +97,5 @@ def test_bold_on_the_site_that_prod_does_not_have_is_reported(tmp_path):
             pytest.skip(f"web capture not available: {e}")
         raise
     bold = [f for s in r["sections"] for f in s["findings"] if "emphasis" in (f["types"] or [])]
-    assert bold and bold[0]["genuine"] and "plain in prod → bold in stage" in bold[0]["message"], [(f["types"], f["message"]) for s in r["sections"] for f in s["findings"]]
+    assert bold and "plain in prod → bold in stage" in bold[0]["message"], [(f["types"], f["message"]) for s in r["sections"] for f in s["findings"]]
+    assert not bold[0]["genuine"], "emphasis is out of [html] report_types: found, but not a genuine site issue"

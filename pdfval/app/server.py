@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .. import aem, engine
+from .. import aem, engine, html_source
 from ..report import writer
 
 STATIC = Path(__file__).with_name("static")
@@ -40,6 +40,7 @@ class Jobs:
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "_uploads").mkdir(exist_ok=True)
         self.lock = threading.Lock()
+        self.built_batches: set[str] = set()  # batches whose consolidated report is already written
         n = parallel or int((engine.load_config().get("ui") or {}).get("parallel_runs", 0))
         if n <= 0:  # auto: every core but one (the UI and AEM downloads keep running)
             n = max(1, (os.cpu_count() or 2) - 1)
@@ -106,6 +107,10 @@ class Jobs:
                 options["html_user"] = options["html_user"] or acfg.get("user") or ""
                 if not password and options["html_user"] == (acfg.get("user") or options["html_user"]):
                     password = self.aem_password
+            # an authoring URL (…/editor.html/content/… , …/cf#/content/…) holds the guide in an iframe:
+            # the crawl would find no navigation and no links there and stop after this one page. Read the
+            # plain content URL instead - the page itself, which is also what ?wcmmode=disabled applies to.
+            candidate = html_source.content_url(candidate)
             if aem.is_site_root(candidate):
                 # a folder of AEM Sites, not a guide page (…/sites.html/content/guide): the guide of the selected
                 # prod PDF's product is searched under it, in English, and that page is validated
@@ -337,6 +342,16 @@ class Jobs:
             return  # deleted while queued
         is_html = job.get("options", {}).get("mode") == "html"
         sem = (self.batch_sem.get(job.get("batch", "")) if is_html else None) or (self.html_sem if is_html else self.run_sem)
+        try:
+            self._run_one(jid, job, sem)
+        finally:
+            # whichever way this run ended (done, error, stopped, deleted): it may have been the batch's last
+            if job.get("batch"):
+                self._finish_batch(job["batch"])
+
+    def _run_one(self, jid: str, job: dict, sem) -> None:
+        import subprocess
+        import sys
         with sem:
             try:
                 job = self.get(jid)
@@ -403,7 +418,42 @@ class Jobs:
                     lines = combined.strip().splitlines()
                     tail = lines[-1:] or [f"exit code {r.returncode}"]
                     msg = f"Worker stopped: {tail[0][:300]}"
-                self.update(jid, status="error", message=msg)
+                self.update(jid, status="error", message=msg,
+                            finished=datetime.now().isoformat(timespec="seconds"))
+            elif job["status"] == "error":
+                # the worker caught the failure itself and reported a one-line message, then exited 0: its
+                # traceback (traceback.print_exc() in execute()) was going nowhere, so the call site of an
+                # error such as "IncompleteRead: IncompleteRead(73720 bytes read)" was lost. Keep it.
+                try:
+                    (self.path(jid) / "worker-error.log").write_text(
+                        f"{job.get('message', '')}\n\n--- stderr ---\n{r.stderr or ''}\n\n--- stdout ---\n{r.stdout or ''}",
+                        encoding="utf-8")
+                except OSError:
+                    pass
+
+    def _finish_batch(self, bid: str) -> None:
+        """The batch's consolidated report, written once every product of the batch has executed.
+
+        Called after each run ends; it does nothing until the last one is in, so the file on disk always
+        covers the whole batch and never a partial one. Building it on demand (the download links) stays:
+        that is how a batch still running is looked at. Several runs can finish at the same moment, so the
+        build is done under the jobs lock and only by the run that sees the batch complete."""
+        from ..report import batch_report
+        if not bid:  # a run started on its own is not a batch
+            return
+        with self.lock:
+            if bid in self.built_batches:
+                return
+            runs = [j for j in self.list() if j.get("batch") == bid]
+            if not runs or any(j["status"] not in ("done", "error", "stopped") for j in runs):
+                return  # still queued / running: not the last run
+            self.built_batches.add(bid)
+        try:
+            batch_report.build(bid, runs, self.dir, self.dir / "_batches")
+        except Exception:  # a broken consolidated report must never mark the batch's runs as failed
+            traceback.print_exc()
+            with self.lock:
+                self.built_batches.discard(bid)
 
     def execute(self, jid: str) -> None:
         """The comparison itself (in the worker process)."""
@@ -454,11 +504,17 @@ class Jobs:
                 took = (f" - web capture {tm.get('total_s', 0):.0f} s for {tm.get('web_pages', 0)} page(s) (open "
                         f"{tm.get('open_s', 0):.0f}, load {tm.get('load_s', 0):.0f}, read {tm.get('read_s', 0):.0f}, site "
                         f"checks {tm.get('site_s', 0):.0f}), comparison {tm.get('compare_s', 0):.0f} s") if tm else ""
-                self.update(jid, status="done", progress=1.0, message="Done" + took, summary=result["summary"],
+                warn = result["meta"].get("crawl_warning")
+                self.update(jid, status="done", progress=1.0,
+                            message=("Done" + took + (f" - WARNING: {warn}" if warn else "")), summary=result["summary"],
                             finished=datetime.now().isoformat(timespec="seconds"))
             except Exception as e:  # surface the failure in the UI
                 traceback.print_exc()
-                self.update(jid, status="error", message=f"{type(e).__name__}: {e}")
+                # ... with the time it failed: without it a failed run has no finished timestamp, so the
+                # consolidated report cannot show its run time and there is no way to tell afterwards
+                # whether a batch's failures came in one burst (a machine-wide problem) or were spread out
+                self.update(jid, status="error", message=f"{type(e).__name__}: {e}",
+                            finished=datetime.now().isoformat(timespec="seconds"))
 
 
 def _batches(jobs: Jobs) -> list[dict]:
@@ -472,6 +528,8 @@ def _batches(jobs: Jobs) -> list[dict]:
         b["runs"] += 1
         b[j["status"] if j["status"] in ("done", "error", "running", "queued") else "error"] += 1
         b["created"] = min(b["created"], j["created"])
+    for b in out.values():  # every product executed: the consolidated report on disk covers the whole batch
+        b["complete"] = b["runs"] > 0 and b["queued"] == 0 and b["running"] == 0
     return sorted(out.values(), key=lambda b: b["created"], reverse=True)
 
 
@@ -680,12 +738,24 @@ def make_handler(jobs: Jobs, root: Path):
                 if p == "/api/aem":
                     c = jobs.aem_config()
                     return self._json({**{k: v for k, v in c.items() if k != "password"}, "has_password": bool(c["password"])})
+                if p == "/api/themes":  # brand accent colours (config/typography.toml), for the dashboard's own UI
+                    from .. import engine as _engine
+                    themes = _engine.load_config().get("typography", {}).get("themes", {})
+                    return self._json({k: {"label": v.get("label", k), "accent": v.get("accent", "")}
+                                       for k, v in themes.items()})
                 if p == "/api/metadata":
                     return self._json(meta.status())
                 if m := re.fullmatch(r"/api/metadata/(metadata-report\.(?:pdf|csv))", p):
                     return self._file(meta.dir / m[1], download=m[1])
                 if p == "/api/batches":
                     return self._json(_batches(jobs))
+                if m := re.fullmatch(r"/api/combined\.(pdf|csv)", p):
+                    # every product with its PDF validation and its AEM site validation side by side,
+                    # built from the newest run of each kind - not tied to one batch
+                    from ..report import combined_report
+                    pdf, csv_ = combined_report.build(jobs.dir, jobs.dir / "_combined")
+                    return self._file(pdf if m[1] == "pdf" else csv_,
+                                      download=f"combined-validation-report.{m[1]}")
                 if m := re.fullmatch(r"/api/batches/(batch-[\w-]+)/consolidated\.(pdf|csv)", p):
                     try:
                         pdf, csv_ = _batch_consolidated(jobs, m[1])

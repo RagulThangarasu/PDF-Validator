@@ -224,6 +224,56 @@ def _toc(doc, result: dict, seq: int) -> int:
     return seq
 
 
+def _spec(doc, result: dict, out: Path) -> None:
+    """The live page's CSS / typography / layout against the design spec (the Figma stylesheet), as a
+    table: the Bug number, what was measured, what the spec asks for and what stage draws. Written here
+    because a reader of the bug report never opens site.pdf, where these used to be reported alone.
+    A row that points at one element of the page (a picture off centre, a heading in the wrong face)
+    carries a crop of that spot: "the picture is right-aligned" is worth little without the picture."""
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.shared import Inches
+
+    from .site_report import _crop
+
+    rows = [r for r in (result.get("site") or {}).get("rows", [])
+            if r["group"] in ("typography", "layout") and r["status"] in ("fail", "warn")]
+    if not rows:
+        return
+    n_fail = sum(1 for r in rows if r["status"] == "fail")
+    doc.add_heading(f"Design spec — CSS & layout ({n_fail} fail · {len(rows) - n_fail} warn)", level=1)
+    table = doc.add_table(rows=1, cols=6)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    widths = [Inches(0.8), Inches(2.4), Inches(1.6), Inches(1.6), Inches(1.4), Inches(2.2)]
+    _header_row(table.rows[0], repeat=True)
+    for cell, label in zip(table.rows[0].cells,
+                           ("Bug", "Item", "Expected (spec)", "Actual (stage)", "Page", "On the page")):
+        _cell(cell, label, bold=True, colour="FFFFFF", fill="475569", align_centre=True)
+    short = lambda u: (u or "").rsplit("/", 1)[-1].split("?")[0] or (u or "")
+    cache: dict = {}
+    for n, r in enumerate(rows):
+        cells = table.add_row().cells
+        _header_row(table.rows[-1])
+        _cell(cells[0], r.get("bug", "—"), bold=True)
+        _cell(cells[1], r["item"] + (f'  —  “{r["note"]}”' if r.get("note") else ""), bold=False)
+        _cell(cells[2], r["expected"] or "—", bold=False, colour="2563EB")
+        _cell(cells[3], r["actual"] or "—", bold=True, colour="B42318" if r["status"] == "fail" else "B45309")
+        _cell(cells[4], short(r.get("page", "")), bold=False, colour=MUTED)
+        rel = _crop(out, r["shot"], 90000 + n, cache) if r.get("shot") else None
+        if rel and (out / rel).exists():
+            _cell(cells[5])
+            try:
+                cells[5].paragraphs[0].add_run().add_picture(str(out / rel), width=Inches(2.1))
+            except Exception:  # a crop that Word will not take must not cost the whole report
+                _cell(cells[5], "—", colour=MUTED)
+        else:
+            _cell(cells[5], "—", colour=MUTED)
+    for row in table.rows:
+        for c, w in zip(row.cells, widths):
+            c.width = w
+
+
 def _screenshots(doc, out: Path, f: dict, shots: dict, img_w):
     from docx.shared import Inches
     imgs = {side: pdf_report._jpeg_bytes(out / shots[side]) if shots.get(side) else None for side in ("baseline", "candidate")}
@@ -326,7 +376,8 @@ def build(result: dict, out_dir: str | Path, filename: str = "genuine-issues.doc
             seq += 1
             shown.add(f["id"])
             _issue(doc, out, f, img_w, seq)
-    if not issues and not n_toc and not rest:
+    _spec(doc, result, out)
+    if not issues and not n_toc and not rest and not (result.get("site") or {}).get("rows"):
         _run(_par(doc), "No issues.", colour="16A34A")
     path = out / filename
     _no_proofing(doc)

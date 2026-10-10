@@ -7,7 +7,7 @@
 <style>
   :root {
     --bg: #f4f5f7; --panel: #fff; --ink: #1b2130; --muted: #667085; --line: #e4e7ec; --soft: #f9fafb;
-    --accent: #0f766e; --accent-ink: #fff; --accent-soft: #e6f4f2;
+    --accent: #0f766e; --accent-ink: #fff; --accent-soft: color-mix(in srgb, var(--accent) 12%, var(--bg));
     --fail: #d92d20; --warn: #b54708; --pass: #067647; --info: #475467;
     --c-structure: #2563eb; --c-content: #dc2626; --c-style: #7c3aed; --c-layout: #ea580c; --c-assets: #0d9488; --c-tables: #0284c7; --c-integrity: #b91c1c; --k-content: #dc2626; --k-images: #0d9488; --k-tables: #0284c7; --k-structure: #2563eb; --k-links: #b91c1c; --k-css: #7c3aed; --k-toc: #9333ea; --crit: #b42318;
     --radius: 10px; --shadow: 0 1px 2px rgb(16 24 40 / .06), 0 1px 3px rgb(16 24 40 / .08);
@@ -15,13 +15,15 @@
   /* theme: light by default (same as the report viewer); dark when chosen, or when
      "System" is chosen and the OS is dark. The choice is remembered per browser. */
   :root[data-theme="dark"] { --bg: #0f1218; --panel: #171b23; --ink: #e6e8ec; --muted: #98a2b3; --line: #2a303b; --soft: #1d222c;
-            --accent: #2dd4bf; --accent-ink: #042f2e; --accent-soft: #11302d; --fail: #f97066; --warn: #fdb022; --pass: #47cd89; --info: #98a2b3;
+            --accent: #2dd4bf; --accent-ink: #042f2e; --accent-soft: color-mix(in srgb, var(--accent) 18%, var(--bg)); --fail: #f97066; --warn: #fdb022; --pass: #47cd89; --info: #98a2b3;
             --shadow: none; }
   @media (prefers-color-scheme: dark) {
     :root[data-theme="system"] { --bg: #0f1218; --panel: #171b23; --ink: #e6e8ec; --muted: #98a2b3; --line: #2a303b; --soft: #1d222c;
-            --accent: #2dd4bf; --accent-ink: #042f2e; --accent-soft: #11302d; --fail: #f97066; --warn: #fdb022; --pass: #47cd89; --info: #98a2b3;
+            --accent: #2dd4bf; --accent-ink: #042f2e; --accent-soft: color-mix(in srgb, var(--accent) 18%, var(--bg)); --fail: #f97066; --warn: #fdb022; --pass: #47cd89; --info: #98a2b3;
             --shadow: none; }
   }
+  /* a run's own page: the brand's accent instead of the tool's default teal (setBrandAccent()) */
+  body[data-brand-accent] { --accent: var(--brand-accent); }
   .theme { margin-left: auto; display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   .theme button { border: 0; background: transparent; padding: 4px 10px; cursor: pointer; color: var(--muted); font-size: 12px; }
   .theme button[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
@@ -331,11 +333,36 @@ async function route() {
   const [path, qs] = location.hash.split('?');
   const [, view, id] = path.split('/');
   document.querySelectorAll('[data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === (view || 'new') || (view === 'run' && a.dataset.nav === 'runs')));
+  if (view !== 'run') clearBrandAccent();  // only a run's own page wears its brand's colour
   if (view === 'runs') return viewRuns();
   if (view === 'metadata') return viewMetadata();
   if (view === 'pairs') return viewPairs();
   if (view === 'run' && id) return viewRun(id, qs);
   return viewNew(qs);
+}
+
+// ---------------- brand accent: a run's page uses its product's brand colour (config/typography.toml
+// [typography.themes]) instead of the tool's own teal - ZOWIE red, BenQ purple, etc. The brand is guessed
+// from the run's name / file paths (no reliable cover-page theme detection for a web-page candidate).
+let _themes = null;
+async function _loadThemes() {
+  if (!_themes) { try { _themes = await api('/api/themes'); } catch (e) { _themes = {}; } }
+  return _themes;
+}
+const _BRAND_HINTS = [[/zowie/i, 'zowie'], [/\beducation\b|\bedu\b/i, 'edu'], [/infty/i, 'infty']];
+function clearBrandAccent() {
+  document.body.removeAttribute('data-brand-accent');
+  document.body.style.removeProperty('--brand-accent');
+}
+async function setBrandAccent(job) {
+  const text = [job.name, job.baseline, job.candidate].filter(Boolean).join(' ');
+  const hit = _BRAND_HINTS.find(([re]) => re.test(text));
+  const key = hit ? hit[1] : 'benq';  // the default theme (config/typography.toml default_theme)
+  const themes = await _loadThemes();
+  const accent = themes[key]?.accent;
+  if (!accent || !location.hash.startsWith(`#/run/${job.id}`)) return;  // stale response from a since-left run
+  document.body.style.setProperty('--brand-accent', accent);
+  document.body.setAttribute('data-brand-accent', key);
 }
 addEventListener('hashchange', route);
 
@@ -906,15 +933,20 @@ async function viewRuns() {
       ${b.done ? `<a class="btn ${left ? '' : 'primary'} sm" href="/api/batches/${b.id}/reports.zip"
           title="The PDF report and the image report of every finished product">⬇ Download reports (zip)${left ? ` — ${b.done} of ${b.runs} ready` : ''}</a>`
         : '<span class="small muted">reports appear here as runs finish</span>'}
-      ${b.done ? `<a class="btn sm" href="/api/batches/${b.id}/consolidated.pdf" target="_blank" rel="noopener"
-          title="Every product with its content match %, section results and issue counts">📊 Consolidated report</a>
+      ${b.done ? `<a class="btn ${b.complete ? 'primary' : ''} sm" href="/api/batches/${b.id}/consolidated.pdf" target="_blank" rel="noopener"
+          title="${b.complete ? 'Every product of the batch, with its content match %, section results and issue counts'
+                              : `Only the ${b.done} of ${b.runs} products that have finished so far - the full report is written when the last one ends`}">📊 Consolidated report${b.complete ? '' : ` — ${b.done} of ${b.runs}`}</a>
         <a class="btn sm" href="/api/batches/${b.id}/consolidated.csv" title="The same as a spreadsheet">CSV</a>
         <a class="btn sm" href="/api/batches/${b.id}/image-consolidated.pdf" target="_blank" rel="noopener"
           title="Every publication with its image result: PASS (no image issue, no image report) or FAIL (image issues, see its image report)">🖼 Image consolidated report</a>
         <a class="btn sm" href="/api/batches/${b.id}/image-consolidated.csv" title="The same as a spreadsheet">CSV</a>` : ''}</div></div>`;
   }).join('');
+  const combined = `<div class="row" style="margin:8px 0">
+    <a class="btn sm" href="/api/combined.pdf" target="_blank" rel="noopener"
+       title="Every product with its PDF validation and its AEM site validation side by side, from the newest run of each kind">🔗 Combined report (PDF + AEM site)</a>
+    <a class="btn sm" href="/api/combined.csv" title="The same as a spreadsheet">CSV</a></div>`;
   const active = runs.filter(r => r.status === 'running' || r.status === 'queued').length;
-  app.innerHTML = `<div class="row"><h1>Runs</h1><span class="spacer"></span>
+  app.innerHTML = combined + `<div class="row"><h1>Runs</h1><span class="spacer"></span>
     <button class="btn" data-stopall ${active ? '' : 'disabled'} title="Stop every running and queued run">■ Stop all${active ? ` (${active})` : ''}</button>
     <button class="btn danger" data-clear title="Stop everything and remove every run, including finished reports">Clear</button>
     <a class="btn primary" href="#/new">New comparison</a></div>
@@ -1005,6 +1037,7 @@ async function viewRun(id, qs) {
   app.onclick = null;
   let job;
   try { job = await api('/api/runs/' + id); } catch (e) { app.innerHTML = `<div class="empty">Run not found. <a href="#/runs">Back to runs</a></div>`; return; }
+  setBrandAccent(job);
   const isWeb = (job.mode || job.options?.mode) === 'html';
   const cand = isWeb ? `Web page <a href="${esc(job.candidate)}" target="_blank" rel="noopener"><b>${esc(job.candidate)}</b></a>` : `Stage <b>${esc(job.candidate.split('/').pop())}</b>`;
   const nav = `<div class="rnav"><a class="btn sm" href="#/new">← Back</a><a class="small" href="#/runs">All runs</a>
@@ -1047,6 +1080,8 @@ async function viewRun(id, qs) {
   app.innerHTML = head + `
       <div class="ractions">
         <a class="btn primary" href="${base}index.html" target="_blank" rel="noopener">Side-by-side viewer ↗</a>
+        ${(d.meta || {}).consolidated ? `<a class="btn primary" href="${base}${encodeURIComponent(d.meta.consolidated)}?download=${encodeURIComponent(d.meta.consolidated)}"
+            title="One file: every issue report of this run merged, named after the prod PDF">⬇ Consolidated report</a>` : ''}
         ${s.genuine ? `<a class="btn ${s.genuine.total ? 'danger' : ''}" href="${base}genuine-issues.pdf?download=${encodeURIComponent('pdf-report-' + id + '.pdf')}"
             title="Every issue, each with a description and prod/stage screenshots">⬇ PDF report (${s.genuine.total})</a>
         <a class="btn" href="${base}genuine-issues.docx?download=${encodeURIComponent('pdf-report-' + id + '.docx')}"

@@ -2145,6 +2145,9 @@ _WHY = {
     "row background": ("Table row background differs", "Rows that one side shades (group rows between the data rows) are plain on the other."),
     "spec text-align": ("Text not left-aligned", "Body text is centred or right-aligned; the design spec left-aligns all content."),
     "size / aspect": ("Image size differs", "The picture is shown at another width or aspect ratio in stage."),
+    "text highlight": ("Text left highlighted",
+                       "A phrase on the page is drawn on a coloured highlight (a <mark> or a span with a background "
+                       "colour): an editing highlight that was published with the topic."),
     "emphasis": ("Font weight / italic differs", "The same words are set in another font weight (bold, medium, light ...) or italic on one side only: the emphasis the reader relies on changed."),
     "list level": ("List level differs", "A paragraph that sits under a list item's text in prod (part of that bullet or numbered item) starts under another item's text, or as body text, in stage: the list's marker / text columns are not kept."),
     "list alignment": ("List numbers not aligned", "The numbers of a numbered list start at one left edge in prod; in stage some items are set further in or out than the others."),

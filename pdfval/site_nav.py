@@ -69,8 +69,19 @@ CHROME_JS = r"""
   };
   const q = s => { try { return s ? document.querySelector(s) : null; } catch (e) { return null; } };
   const qa = s => { try { return s ? [...document.querySelectorAll(s)] : []; } catch (e) { return []; } };
-  // the smallest element around a label that holds at least `min` links
-  const panelOf = (label, min) => { for (let e = label; e && e !== document.body; e = e.parentElement) if (e.querySelectorAll('a[href]').length >= min) return e; return null; };
+  // the smallest element around a label that holds at least `min` links. A navigation panel sits BESIDE
+  // the content, never around it: an "On this page" box with no links of its own (a topic with no
+  // sub-headings - the box renders empty) would otherwise send this climb straight past the content root
+  // and return the page's whole container, whose every heading and paragraph then counts as chrome and is
+  // silently dropped from the content and typography checks ("nothing found to sample on this page").
+  const panelOf = (label, min) => {
+    const h1 = root.querySelector('h1');
+    for (let e = label; e && e !== document.body; e = e.parentElement) {
+      if (e !== label && (e.contains(root) || (h1 && e.contains(h1)))) return null;  // climbed into the content itself
+      if (e.querySelectorAll('a[href]').length >= min) return e;
+    }
+    return null;
+  };
   const labelled = re => qa('h1,h2,h3,h4,h5,h6,p,span,div,strong,b,button,summary,label,[aria-label]').find(e =>
     (re.test(txt(e)) && txt(e).length < 40 && !e.querySelector('a[href]') && e.children.length <= 2) || re.test(e.getAttribute('aria-label') || ''));
   const ACTIVE = /(^|[-_\s])(active|current|selected|is-active|is-current)($|[-_\s])/i;
@@ -135,11 +146,18 @@ CHROME_JS = r"""
       }
     }
     // the pager bar itself (its small wrapping container) is chrome, not body content: it must not be
-    // sampled as a body paragraph/hyperlink, nor counted in the overlap/image scans below
+    // sampled as a body paragraph/hyperlink, nor counted in the overlap/image scans below. Either stop
+    // condition below can land on a container that is not really the pager's own bar but a much larger
+    // wrapper (AEM: a single cmp-container wrapping the WHOLE topic, which also happens to hold a
+    // handful of in-body links, so it satisfies ">2 links" on the very first ancestor checked) -
+    // excluding that as "chrome" would blank out every content/typography sample on the page. Only
+    // accept a container whose own text stays close to the link's own label; otherwise exclude just
+    // the link itself (narrower, but never swallows real content).
+    const near = e => txt(e).length <= txt(link).length + 300;
     for (let e = link, bar = link; e && e !== root; e = e.parentElement) {
       bar = e;
-      if (e.querySelectorAll('a[href]').length > 2) { pagerBars.push(bar); break; }
-      if (e.parentElement === root) { pagerBars.push(bar); break; }
+      if (e.querySelectorAll('a[href]').length > 2) { pagerBars.push(near(bar) ? bar : link); break; }
+      if (e.parentElement === root) { pagerBars.push(near(bar) ? bar : link); break; }
     }
     return { text: txt(link), label: label.slice(0, 200), href: link.href || '', where: path(link), visible: visible(link), box: box(link) };
   };
@@ -331,6 +349,66 @@ CHROME_JS = r"""
   // otherwise silently validate nothing and report nothing, looking exactly like a clean pass - this
   // flag lets evaluate() say so instead (see "css_sampled" in the returned object, below)
   const cssSampled = Object.values(css).some(arr => arr && arr.length > 0);
+  // ---- every link in the content (not the chrome): checked for an unresolved AEM GUID address or
+  // label (GUID-17f6ffdc-…), and listed so the report can name the link that is broken or missing
+  const contentLinks = [...root.querySelectorAll('a[href]')].filter(e => visible(e) && !inPanels(e))
+    .slice(0, 300).map(a => ({ text: txt(a).slice(0, 80), href: a.href, raw: a.getAttribute('href') || '',
+                               where: path(a), box: box(a) }));
+  // ---- lists vs the text they sit under: where the marker (1. 2. 3. / •) starts, against the left
+  // edge of the paragraph above the list. The marker is painted outside the item's content box and is
+  // not an element, so its left edge is the item's content-box left less the marker's own width,
+  // measured in the marker's font (Chrome draws decimal markers as "1. ", the trailing space included)
+  const cv = document.createElement('canvas').getContext('2d');
+  const measure = (text, font) => { cv.font = font; return cv.measureText(text).width; };
+  const MARKERS = { disc: '\u2022 ', circle: '\u25e6 ', square: '\u25aa ', none: '' };
+  const listRows = [];
+  for (const list of [...root.querySelectorAll('ol, ul')].slice(0, 30)) {
+    if (!visible(list) || inPanels(list) || list.closest('table') || list.closest('li')) continue;
+    const li = [...list.children].find(e => e.tagName === 'LI' && visible(e) && txt(e));
+    if (!li) continue;
+    // the block of text the list belongs to: the nearest paragraph / heading above it
+    let ref = list.previousElementSibling;
+    while (ref && !(/^(P|H1|H2|H3|H4|H5|H6)$/.test(ref.tagName) && visible(ref) && txt(ref))) ref = ref.previousElementSibling;
+    if (!ref) continue;
+    const rcs = getComputedStyle(ref), lcs = getComputedStyle(li);
+    const left = (el, cs) => el.getBoundingClientRect().left + parseFloat(cs.borderLeftWidth || 0) + parseFloat(cs.paddingLeft || 0);
+    const contentLeft = left(li, lcs);
+    let markerLeft = contentLeft, marker = '';
+    if (lcs.listStylePosition !== 'inside' && lcs.listStyleType !== 'none') {
+      const mcs = getComputedStyle(li, '::marker');
+      const font = mcs.font || `${lcs.fontStyle} ${lcs.fontWeight} ${lcs.fontSize} ${lcs.fontFamily}`;
+      marker = list.tagName === 'OL' ? `${(+list.getAttribute('start') || 1)}. ` : (MARKERS[lcs.listStyleType] || '\u2022 ');
+      markerLeft = contentLeft - measure(marker, font);
+    }
+    listRows.push({ tag: list.tagName.toLowerCase(), marker: marker.trim(), marker_left: Math.round(markerLeft),
+                    text_left: Math.round(contentLeft), ref_left: Math.round(left(ref, rcs)),
+                    ref_tag: ref.tagName.toLowerCase(), ref_text: txt(ref).slice(0, 60),
+                    text: txt(li).slice(0, 60), where: path(list), box: box(list) });
+  }
+  // ---- the table component's own style (design spec "7. Table Component": dark header bar, 1px
+  // {Stroke/Regular} border, 12px cell padding, {Radius/md} corners) - read off the table, its cells
+  // and, for the corners, the wrapper that clips them when the table itself carries no radius
+  const px = v => Math.round(parseFloat(v) || 0);
+  const edge = (cs, side) => ({ width: cs[`border${side}Style`] === 'none' ? 0 : px(cs[`border${side}Width`]),
+                                color: toHex(cs[`border${side}Color`]) });
+  const tableStyles = [...root.querySelectorAll('table')].filter(e => visible(e) && !inPanels(e) && e.rows.length)
+    .slice(0, 20).map(tb => {
+      const cs = getComputedStyle(tb);
+      const th = tb.querySelector('th'), td = tb.querySelector('td'), cell = th || td;
+      const ccs = cell ? getComputedStyle(cell) : null;
+      // border-collapse: the cells carry the line, not the table - take whichever side actually draws one
+      const own = edge(cs, 'Top'), inner = ccs ? edge(ccs, 'Top') : { width: 0, color: null };
+      const b = own.width ? own : inner;
+      const wrap = tb.parentElement && tb.parentElement !== root ? getComputedStyle(tb.parentElement) : null;
+      const radius = px(cs.borderTopLeftRadius) ||
+        (wrap && wrap.overflow !== 'visible' ? px(wrap.borderTopLeftRadius) : 0);
+      return {
+        header_background: th ? toHex(getComputedStyle(th).backgroundColor) : null,
+        border_width: b.width, border_color: b.color, radius,
+        padding: ccs ? [px(ccs.paddingTop), px(ccs.paddingRight), px(ccs.paddingBottom), px(ccs.paddingLeft)] : null,
+        cell: cell ? (th ? 'th' : 'td') : null, text: txt(tb).slice(0, 60), where: path(tb), box: box(tb),
+      };
+    });
   // ---- the vertical gap between adjacent content blocks (paragraph / table / image / callout), vs
   // config/typography.toml [typography.formats.html_web].block_gaps - headings are not in this list,
   // see heading_spacing (margins) above instead
@@ -358,6 +436,33 @@ CHROME_JS = r"""
     if (gap < -2 || gap > 200) continue;  // overlapping, or the two are not really adjacent (a page break)
     gaps.push({ from: blockKind(a), to: blockKind(b), gap, where: path(b) });
   }
+  // ---- in-page jump targets (every "On this page" / TOC anchor, and every heading with an id) hidden
+  // under a sticky/fixed header: a reader who clicks "Remote controller exterior view" in the nav expects
+  // the browser to land them AT that heading - if a sticky top bar stays pinned over the viewport and the
+  // page does not reserve space for it (no scroll-margin-top on the heading), the jump lands with the
+  // heading's top few lines covered by the bar instead. Simulated here (scrollIntoView, the same thing a
+  // real click does), not just observed at the page's own load scroll position, which this bug never
+  // shows at (the reader is always scrolled there by an anchor jump, not by starting at the top).
+  const stickyTop = [...document.querySelectorAll('body *')].filter(e => {
+    const cs = getComputedStyle(e);
+    if (!visible(e) || (cs.position !== 'fixed' && cs.position !== 'sticky')) return false;
+    const r = e.getBoundingClientRect();
+    return r.top <= 2 && r.width > W * 0.5 && r.height > 4 && r.height < 200;
+  }).sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom)[0] || null;
+  if (stickyTop) {
+    const stickyBottom = stickyTop.getBoundingClientRect().bottom;
+    const ids = [...new Set([...Object.keys(targets), ...heads.map(h => h.id)])].filter(Boolean);
+    for (const id of ids.slice(0, 100)) {
+      const t = document.getElementById(id) || document.getElementsByName(id)[0];
+      if (!t || !visible(t)) continue;
+      t.scrollIntoView({ block: 'start' });
+      const over = Math.round(stickyBottom - t.getBoundingClientRect().top);
+      if (over > 4)
+        layout.push({ kind: 'sticky-overlap', text: txt(t).slice(0, 60),
+                     detail: `jumping here leaves ${over}px of it hidden under the sticky header`, where: path(t), box: box(t) });
+    }
+    window.scrollTo(0, 0);
+  }
   return {
     url: location.href, title: document.title, h1: txt(root.querySelector('h1')),
     nav: nav ? { label: navLabel, where: path(nav), items: items(nav) } : null,
@@ -367,6 +472,7 @@ CHROME_JS = r"""
     breadcrumb_box: crumbs ? box(crumbs) : null, breadcrumb_items: crumbs ? items(crumbs) : [], headings: heads,
     layout: layout.slice(0, 200), images: images.slice(0, 400), content_width: Math.round(rb.width),
     ids: [...document.querySelectorAll('[id]')].map(e => e.id).slice(0, 5000), css, css_sampled: cssSampled,
+    table_styles: tableStyles, content_links: contentLinks, lists: listRows,
     gaps: gaps.slice(0, 300),
   };
 }
@@ -406,6 +512,11 @@ def probe(page, pages: list[dict], visited: dict, out: Path, report=None) -> dic
         for pg in (p.get("next"), p.get("prev")):
             if pg and pg.get("href"):
                 targets.setdefault(key(pg["href"]), pg["href"])
+        # the links in the content itself (cross-references, "see also"), not only the chrome: an AEM
+        # site review reports a dead cross-reference the same as a dead navigation link
+        for it in (p.get("content_links") or []):
+            if it.get("href"):
+                targets.setdefault(key(it["href"]), it["href"])
     status = dict(visited)
     todo = [(k, u) for k, u in targets.items() if k not in status and urlsplit(u).scheme in ("http", "https")]
     # the browser's own session (cookies, basic auth), read once here (its only safe use from another thread:
@@ -519,9 +630,11 @@ def _same(a: str, b: str, ratio: float = 0.9) -> bool:
 
 
 def _row(group: str, status: str, item: str, expected: str = "", actual: str = "", page: str = "", note: str = "",
-         where: str = "", shot: dict | None = None) -> dict:
+         where: str = "", shot: dict | None = None, kind: str = "") -> dict:
     r = {"group": group, "status": status, "item": item, "expected": expected, "actual": actual,
          "page": page, "note": note, "where": where}
+    if kind:  # what the row is about, for reports that pick out one kind of issue (report/aem_site_report.py)
+        r["kind"] = kind
     if shot:  # {"page_shot": "site-shots/<hash>.png", "box": [x0, y0, x1, y1]} - crops a screenshot for the report
         r["shot"] = shot
     return r
@@ -534,12 +647,13 @@ LAYOUT_ISSUE = {"page-scroll": "Page scrolls sideways", "image-broken": "Picture
                 "image-overflow": "Picture outside its area", "image-stretched": "Picture stretched", "image-upscaled": "Picture enlarged (blurred)",
                 "block-overflow": "Content outside the page area", "overlap": "Content overlapping",
                 "breadcrumb-overlap": "Breadcrumb / H1 overlap", "empty-page": "Page has only a heading, no content",
-                "hanging-indent": "Wrapped line not indented under the text"}
+                "hanging-indent": "Wrapped line not indented under the text",
+                "sticky-overlap": "Jump target hidden under sticky header"}
 # kinds always checked (on the active validation list: broken / missing / pixelated images, table/content
 # breaking out of the page); "overlap" and "empty-page" are old checks, off by default - see [site]
 # check_overlap / check_empty_page. "breadcrumb-overlap" follows check_breadcrumb, on by default.
 CORE_LAYOUT_KINDS = {"page-scroll", "image-broken", "image-collapsed", "image-overflow", "image-stretched",
-                      "image-upscaled", "block-overflow", "hanging-indent"}
+                      "image-upscaled", "block-overflow", "hanging-indent", "sticky-overlap"}
 _EXTRA_LAYOUT_TOGGLE = {"overlap": "check_overlap", "breadcrumb-overlap": "check_breadcrumb", "empty-page": "check_empty_page"}
 _EXTRA_LAYOUT_DEFAULT = {"overlap": False, "breadcrumb-overlap": True, "empty-page": False}
 
@@ -608,6 +722,104 @@ def _css_rows(pages: list[dict], typography_cfg: dict) -> list[dict]:
                     pass_item = f"{label} — “{got.get('text', '')[:40]}”" if got.get("text") else label
                     rows.append(_row("typography", "pass", pass_item, "", "matches the design spec", p["url"],
                                      where=got.get("where", ""), shot=shot))
+    return rows
+
+
+# an unresolved AEM Guides reference: the DITA topic's GUID, left in the published address or label
+# (GUID-17f6ffdc-ff83-4a35-9a6e-5d5bc655db60-en.html) instead of the topic's readable page name
+_GUID = re.compile(r"GUID-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", re.I)
+
+
+def _guid_link_rows(pages: list[dict]) -> list[dict]:
+    """A link that still carries a DITA GUID - in its address or in the text the reader sees. Content
+    links and the chrome (left navigation, breadcrumb, next/previous, "On this page") alike."""
+    rows = []
+    for p in pages:
+        chrome = [{"text": it.get("text", ""), "href": it.get("href", ""), "where": it.get("where", ""),
+                   "box": it.get("box")}
+                  for key in ("breadcrumb_items",) for it in (p.get(key) or [])]
+        for part in ("nav", "otp"):
+            chrome += [{"text": it.get("text", ""), "href": it.get("href", ""), "where": it.get("where", ""),
+                        "box": it.get("box")} for it in ((p.get(part) or {}).get("items") or [])]
+        for part in ("next", "prev", "download"):
+            it = p.get(part)
+            if isinstance(it, dict) and it.get("href"):
+                chrome.append({"text": it.get("text", ""), "href": it.get("href", ""),
+                               "where": it.get("where", ""), "box": it.get("box")})
+        for it in (p.get("content_links") or []) + chrome:
+            href, text = it.get("href") or "", it.get("text") or ""
+            in_href, in_text = _GUID.search(href), _GUID.search(text)
+            if not in_href and not in_text:
+                continue
+            where_found = "address and label" if in_href and in_text else "address" if in_href else "label"
+            shot = {"page_shot": p["page_shot"], "box": it["box"]} if p.get("page_shot") and it.get("box") else None
+            rows.append(_row("links", "fail", "GUID in the link", "a readable page address",
+                             (in_href or in_text).group(0), p["url"],
+                             f"The link's {where_found} still carries the DITA topic's GUID - "
+                             f"\u201c{text[:40] or href[:60]}\u201d \u2192 {href[:120]}",
+                             it.get("where", ""), shot=shot, kind="link-guid"))
+    return rows
+
+
+def _list_margin_rows(pages: list[dict], tol: int) -> list[dict]:
+    """A list's markers (1. 2. 3. / bullets) must start at the left edge of the text above it. A list
+    indented by its own padding sits out of the content margin - the numbers hang left of (or step
+    right of) the paragraph that introduces them."""
+    rows = []
+    for p in pages:
+        for li in p.get("lists") or []:
+            delta = li["marker_left"] - li["ref_left"]
+            shot = {"page_shot": p["page_shot"], "box": li["box"]} if p.get("page_shot") and li.get("box") else None
+            what = f"{li['tag']} \u201c{li.get('text', '')[:40]}\u201d"
+            if abs(delta) > tol:
+                side = "left of" if delta < 0 else "right of"
+                rows.append(_row("layout", "fail", "List out of the text margin",
+                                 f"{li['ref_left']}px (the {li['ref_tag']} above it)", f"{li['marker_left']}px",
+                                 p["url"],
+                                 f"The list's {'numbers' if li['tag'] == 'ol' else 'bullets'} start {abs(delta)}px "
+                                 f"{side} \u201c{li.get('ref_text', '')[:40]}\u201d \u2014 {what}",
+                                 li.get("where", ""), shot=shot, kind="list-margin"))
+            else:
+                rows.append(_row("layout", "pass", "List margin", "", f"{li['marker_left']}px, level with the text above",
+                                 p["url"], what, li.get("where", ""), shot=shot))
+    return rows
+
+
+def _table_style_rows(pages: list[dict], typography_cfg: dict) -> list[dict]:
+    """The table component vs config/typography.toml [typography.formats.html_web.table]: the dark header
+    bar, the 1px {Stroke/Regular} border, 12px cell padding and the {Radius/md} corners - exact match, no
+    tolerance, the same contract as the rest of the design spec."""
+    spec = (((typography_cfg or {}).get("formats") or {}).get("html_web") or {}).get("table") or {}
+    if not spec:
+        return []
+    rows = []
+    for p in pages:
+        for tb in p.get("table_styles") or []:
+            bad = []
+            shot = {"page_shot": p["page_shot"], "box": tb["box"]} if p.get("page_shot") and tb.get("box") else None
+            want = (spec.get("header_background") or "").lower()
+            got = (tb.get("header_background") or "").lower()
+            if want and tb.get("cell") == "th" and got and got != want:
+                bad.append(("header bar colour", want, got))
+            if spec.get("border_width") is not None and tb.get("border_width") != spec["border_width"]:
+                bad.append(("border width", f"{spec['border_width']}px", f"{tb.get('border_width')}px"))
+            want_c = (spec.get("border_color") or "").lower()
+            if want_c and tb.get("border_color") and tb["border_color"].lower() != want_c:
+                bad.append(("border colour", want_c, tb["border_color"]))
+            if spec.get("cell_padding") is not None and tb.get("padding"):
+                off = sorted({v for v in tb["padding"] if v != spec["cell_padding"]})
+                if off:
+                    bad.append(("cell padding", f"{spec['cell_padding']}px",
+                                "/".join(f"{v}px" for v in tb["padding"]) + f" ({tb.get('cell')})"))
+            if spec.get("radius") is not None and tb.get("radius") != spec["radius"]:
+                bad.append(("corner radius", f"{spec['radius']}px", f"{tb.get('radius')}px"))
+            if bad:
+                for prop, exp, act in bad:
+                    rows.append(_row("typography", "fail", f"Table style \u2014 {prop}", exp, act, p["url"],
+                                     tb.get("text", ""), tb.get("where", ""), shot=shot))
+            else:
+                rows.append(_row("typography", "pass", "Table style", "", "matches the design spec", p["url"],
+                                 tb.get("text", ""), tb.get("where", ""), shot=shot))
     return rows
 
 
@@ -830,16 +1042,25 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
     # ---- on this page: shown only when the page has H3/H4 sub-sections, and each entry must jump to the
     # right one - on the active list (H1 = page title, H2 = the page's own section: neither needs this list)
     if cfg.get("check_otp", True):
+      # which headings are sections the list has to carry: the H1 is the page's own title, so anything
+      # below it is a section ([site] on_this_page_min_level = 3 for a guide whose pages put their content
+      # under one H2 and only list H3/H4). A page that HAS sections must list them - whether the panel is
+      # missing or rendered empty - and a page that has none must not show the panel at all.
+      min_level = max(int(cfg.get("on_this_page_min_level", 2)), 2)
+      lv = f"h{min_level}+"
       for p in pages:
-        heads = [h for h in p.get("headings") or [] if h["level"] >= 3]
-        if not p.get("otp") or not p["otp"]["items"]:
-            if len(heads) >= 1:
-                rows.append(_row("otp", "fail", "On this page", f"{len(heads)} sub-heading(s) (h3/h4)", "not found", p["url"],
-                                 "The page has h3/h4 sub-headings but no “On this page” list"))
+        heads = [h for h in p.get("headings") or [] if h["level"] >= min_level]
+        otp = p.get("otp")
+        if not otp or not otp["items"]:
+            if heads:
+                rows.append(_row("otp", "fail", "On this page", f"{len(heads)} section(s) ({lv})",
+                                 "shown but empty" if otp else "not found", p["url"],
+                                 f"The page has {lv} sections but its “On this page” list "
+                                 + ("is empty" if otp else "is missing"), (otp or {}).get("where", "")))
             continue
         if not heads:
-            rows.append(_row("otp", "warn", "On this page", "hidden (no h3/h4 on the page)", "shown", p["url"],
-                             "No sub-heading to list: the “On this page” panel should be hidden", p["otp"]["where"]))
+            rows.append(_row("otp", "warn", "On this page", f"hidden (no {lv} section on the page)", "shown", p["url"],
+                             "No section to list: the “On this page” panel should be hidden", otp["where"]))
             continue
         its = [it for it in p["otp"]["items"] if "#" in it["href"]]
         top = min((h["level"] for h in heads), default=3)
@@ -906,6 +1127,17 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
         if "layout" in p and not [i for i in issues if i["kind"] in CORE_LAYOUT_KINDS]:
             rows.append(_row("layout", "pass", "Page layout", "", f"{len(p.get('images') or [])} picture(s) checked", p["url"]))
 
+    # ---- links in the content itself: every cross-reference opens (no broken link, no dead anchor).
+    # Their text is a phrase in a sentence, not the target page's title, so only that the link opens is
+    # checked - [site] check_content_links = false to drop
+    if cfg.get("check_content_links", True):
+        for p in pages:
+            for it in p.get("content_links") or []:
+                if not it.get("href"):
+                    continue
+                rows.append(_link_row("links", it.get("text") or _short(it["href"]), it["href"], links, p["url"],
+                                      shot=shot_of(p, it), check_title=False))
+
     # ---- breadcrumb: present above the H1, each crumb's link opens (no broken link) and lands on the
     # right page (no wrong redirect), and the gap above the H1 matches the spec (config/typography.toml
     # [typography.formats.html_web].heading_spacing.h1.margin_top: the H1 sits right under the breadcrumb,
@@ -929,6 +1161,11 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
                 if not it.get("href"):
                     continue
                 rows.append(_link_row("breadcrumb", it["text"], it["href"], links, p["url"], shot=shot_of(p, it), check_title=False))
+        # the trail starts with the product: "<product> > ... > <this page>", not straight at the page
+        # ([site] check_breadcrumb_product = false to drop, breadcrumb_product = "<name>" to name it here
+        # instead of reading it from the header's product title)
+        if cfg.get("check_breadcrumb_product", True):
+            rows += _breadcrumb_product_rows(pages, cfg.get("breadcrumb_product", "") or "")
 
 
 
@@ -945,6 +1182,16 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
                                  "have rendered its content yet when captured, or the content area selector is wrong"))
         rows += _css_rows(pages, typography_cfg or {})
         rows += _spacing_rows(pages, typography_cfg or {})
+    # ---- the table component's own style (header bar, border, cell padding, corner radius) vs
+    # config/typography.toml [typography.formats.html_web.table] - [site] check_table_style = false to drop
+    if cfg.get("check_table_style", True):
+        rows += _table_style_rows(pages, typography_cfg or {})
+    # ---- AEM site validation: a link whose address or label still carries a DITA GUID, and a list
+    # whose markers sit outside the margin of the text above it
+    if cfg.get("check_guid_links", True):
+        rows += _guid_link_rows(pages)
+    if cfg.get("check_list_margin", True):
+        rows += _list_margin_rows(pages, int(cfg.get("list_margin_tolerance", 2) or 0))
 
     # ---- product subtitle: old check, not on the active list - off by default, [site] check_subtitle = true to restore
     if cfg.get("check_subtitle", False):
@@ -989,19 +1236,22 @@ def _link_row(group: str, text: str, href: str, links: dict, page: str, shot: di
     st = links.get(k)
     frag = href.split("#", 1)[1] if "#" in href else ""
     if urlsplit(href).scheme not in ("http", "https"):
-        return _row(group, "warn", text, "a page link", href, page, "Not an http(s) link", shot=shot)
+        return _row(group, "warn", text, "a page link", href, page, "Not an http(s) link", shot=shot, kind="link-not-http")
     if not st:
-        return _row(group, "warn", text, "opens", "not checked", page, href, shot=shot)
+        return _row(group, "warn", text, "opens", "not checked", page, href, shot=shot, kind="link-unchecked")
     if st.get("error") or not 0 < st.get("status", 0) < 400:
-        return _row(group, "fail", text, "HTTP 200", st.get("error") or f"HTTP {st['status']}", page, href, shot=shot)
+        return _row(group, "fail", text, "HTTP 200", st.get("error") or f"HTTP {st['status']}", page, href, shot=shot,
+                    kind="link-broken")
     landed = st.get("h1") or re.split(r"\s+[|–-]\s+", st.get("title") or "")[0]
     if frag and frag not in (st.get("ids") or []):
-        return _row(group, "fail", text, f"#{frag} on {_short(href)}", "anchor not found", page, href, shot=shot)
+        return _row(group, "fail", text, f"#{frag} on {_short(href)}", "anchor not found", page, href, shot=shot,
+                    kind="link-broken")
     # a left-nav / pager link's own text is the target page's title: it must match. A breadcrumb crumb's
     # label ("Home", a category name) is not: check_title=False there - only that the link opens, not what it says
     if check_title and landed and not _same(landed, text, 0.8) and not _same(st.get("title", ""), text, 0.8) and not frag:
-        return _row(group, "fail", text, text, f"opens “{landed}”", page, f"{href} → {st.get('url', '')}", shot=shot)
-    return _row(group, "pass", text, text, landed or f"HTTP {st['status']}", page, href, shot=shot)
+        return _row(group, "fail", text, text, f"opens “{landed}”", page, f"{href} → {st.get('url', '')}", shot=shot,
+                    kind="link-wrong-target")
+    return _row(group, "pass", text, text, landed or f"HTTP {st['status']}", page, href, shot=shot, kind="link-ok")
 
 
 def _words(doc, limit: int = 0) -> set[str]:
@@ -1105,6 +1355,45 @@ def _subtitle_rows(pages: list[dict], prod, source: dict, baseline: str) -> list
     if fv or pv:
         rows.append(_row("subtitle", "pass" if fv and fv == pv else "warn", "Version", pv or "—", fv or "—", url,
                          "" if fv == pv else "The site's version (footer) and the PDF's version differ"))
+    return rows
+
+
+def _breadcrumb_product_rows(pages: list[dict], want: str) -> list[dict]:
+    """The first crumb names the product. A trail that opens straight at the page ("Introduction")
+    leaves the reader with no way back up and no sign of which product the page belongs to."""
+    rows = []
+    if not want:  # the product title shown in the header, as most pages spell it
+        names: dict[str, int] = {}
+        for p in pages:
+            t = ((p.get("subtitle") or {}).get("text") or "").strip()
+            if t:
+                names[t] = names.get(t, 0) + 1
+        want = max(names, key=lambda n: names[n]) if names else ""
+    if not want:
+        return rows
+    key = [t for t in _tokens(want) if len(t) > 2 or t.isupper()]
+    for p in pages:
+        trail = (p.get("breadcrumb") or "").strip()
+        if not trail:
+            continue  # already reported as a missing breadcrumb above
+        its = p.get("breadcrumb_items") or []
+        first = (its[0]["text"] if its else re.split(r"[>/\u203a\u00bb|]", trail)[0]).strip()
+        hit = [t for t in key if re.search(rf"\b{re.escape(t)}\b", first, re.I)]
+        if hit and len(hit) >= max(1, len(key) // 2):
+            rows.append(_row("breadcrumb", "pass", "Product name in the breadcrumb", want, first, p["url"],
+                             "The trail starts with the product"))
+            continue
+        where = its[0]["where"] if its else ""
+        box = (its[0].get("box") if its else None) or p.get("breadcrumb_box")
+        shot = {"page_shot": p["page_shot"], "box": box} if p.get("page_shot") and box else None
+        in_trail = bool([t for t in key if re.search(rf"\b{re.escape(t)}\b", trail, re.I)])
+        rows.append(_row("breadcrumb", "fail", "Product name in the breadcrumb", f"{want} > {first or 'page'}",
+                         trail[:120] or first,
+                         p["url"],
+                         ("The product is further down the trail, not the first crumb" if in_trail else
+                          f"The breadcrumb does not name the product ({want}) - it starts at "
+                          f"\u201c{first or trail[:60]}\u201d"),
+                         where, shot=shot))
     return rows
 
 

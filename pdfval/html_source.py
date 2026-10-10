@@ -49,13 +49,27 @@ _EXTRACT_JS = r"""
     return blockIds.get(b);
   };
   const hex = c => { const m = c.match(/\d+(\.\d+)?/g) || [0, 0, 0]; return '#' + m.slice(0, 3).map(v => (+v | 0).toString(16).padStart(2, '0')).join(''); };
+  const clearBg = c => !c || c === 'transparent' || /rgba\(.*,\s*0\)\s*$/.test(c);
+  // A highlight painted on a run of words inside a line: <mark>, or a span given a background-colour.
+  // Only inline ancestors are looked at - a background on a block (a NOTE / WARNING callout, a table
+  // header bar, a card) is part of the design, not a highlight over the text.
+  const bgOf = el => {
+    let x = el;
+    while (x && x !== root) {
+      const cs = getComputedStyle(x);
+      if (!(cs.display.startsWith('inline') || x.tagName === 'MARK')) break;
+      if (!clearBg(cs.backgroundColor)) return hex(cs.backgroundColor);
+      x = x.parentElement;
+    }
+    return '';
+  };
   const styleCache = new Map();
   const styleOf = el => {
     if (styleCache.has(el)) return styleCache.get(el);
     const cs = getComputedStyle(el);
     const s = { family: cs.fontFamily.split(',')[0].replace(/["']/g, '').trim(), weight: +cs.fontWeight || 400,
                 italic: cs.fontStyle !== 'normal', size: parseFloat(cs.fontSize), color: hex(cs.color),
-                pre: /pre/.test(cs.whiteSpace) };
+                pre: /pre/.test(cs.whiteSpace), bg: bgOf(el) };
     styleCache.set(el, s); return s;
   };
   const words = [];
@@ -122,7 +136,7 @@ _EXTRACT_JS = r"""
         if (r0) {
           const w = Math.max(st.size * 0.5 * mk.length, st.size * 0.5);
           const x1 = r0.left - st.size * 0.45, x0 = x1 - w;
-          words.push([mk, x0 + sx, r0.top + sy, x1 + sx, r0.bottom + sy, st.family, st.weight, st.italic, st.size, st.color, block, 0, '', 1]);
+          words.push([mk, x0 + sx, r0.top + sy, x1 + sx, r0.bottom + sy, st.family, st.weight, st.italic, st.size, st.color, block, 0, '', 1, st.bg]);
         }
       }
     }
@@ -138,7 +152,7 @@ _EXTRACT_JS = r"""
       if (x1 - x0 < 0.5) continue;
       const after = node.data.slice(m.index + m[0].length).match(/^\s*/)[0].length;
       words.push([m[0], x0 + sx, y0 + sy, x1 + sx, y1 + sy, st.family, st.weight, st.italic, st.size, st.color, block,
-                  h ? +h.tagName[1] : 0, a ? a.href : '', st.pre ? after : Math.min(after, 1)]);
+                  h ? +h.tagName[1] : 0, a ? a.href : '', st.pre ? after : Math.min(after, 1), st.bg]);
     }
   }
   const rect = el => { const r = el.getBoundingClientRect(); return [r.left + sx, r.top + sy, r.right + sx, r.bottom + sy]; };
@@ -188,6 +202,25 @@ _EXTRACT_JS = r"""
 """
 _EXTRACT_JS = _EXTRACT_JS.replace("__NOSPACE__", normalize.NOSPACE)
 
+
+
+
+# AEM wraps a page in an authoring shell: /editor.html/<path> (the editor), /cf#/<path> (the classic
+# site admin). The guide itself then lives in an <iframe>, so the crawl's left navigation and the page's
+# own links are not on the page it opens - it captures that one page and stops. Both wrappers are
+# stripped to the plain content URL, which is what the crawl (and ?wcmmode=disabled) needs.
+_AUTHOR_WRAPPERS = ("/editor.html/", "/cf#/")
+
+
+def content_url(url: str) -> str:
+    """…/editor.html/content/guide/x/en/page.html -> …/content/guide/x/en/page.html (unchanged if plain)."""
+    parts = urlsplit(url)
+    for w in _AUTHOR_WRAPPERS:
+        path = parts.path + (("#" + parts.fragment) if parts.fragment else "")
+        if w in path:
+            rest = path.split(w, 1)[1]
+            return urlunsplit(parts._replace(path="/" + rest.lstrip("/"), fragment=""))
+    return url
 
 
 def split_login(url: str) -> tuple[str, str, str]:
@@ -344,7 +377,7 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
     report = progress or (lambda f, m: None)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    url, url_user, url_password = split_login(url)
+    url, url_user, url_password = split_login(content_url(url))
     user, password = user or url_user, password or url_password
     # "always": servers like AEM redirect to a login page instead of answering 401
     creds = {"username": user, "password": password, "send": "always"} if user else None
@@ -514,6 +547,17 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
             "nav_toc": nav_toc,
             "crawl_by": "left navigation (PDF L1 TOC)" if nav_led else "guide links" if crawl else "",
             "skipped": skipped}
+    # "all pages of the guide" was asked for and exactly one page came back: the whole PDF is then compared
+    # against a single page and almost every chapter reads as missing content. Say why instead of letting the
+    # report look like the guide lost its text (the usual cause: an authoring URL whose guide sits in an
+    # iframe, a navigation the page does not carry, or a start page outside the guide's folder)
+    if crawl and len(captured) <= 1 and len(toc_l1 or []) > 1:
+        info["crawl_warning"] = (f"Only 1 page was captured although the whole guide was asked for "
+                                 f"({len(toc_l1 or [])} chapters in the PDF): no left navigation and no guide "
+                                 f"links were found on {url}. Check that this is the guide's own page "
+                                 f"(an AEM /editor.html/… address holds it in an iframe) and that [site] nav "
+                                 f"finds the table of contents.")
+        report(0.9, info["crawl_warning"])
     # where the capture's time went (seconds): signing in / first page, opening the other pages one at a time
     # (only the guide-links path still does that), reading them (scroll, structure, screenshots), the rest of
     # the queue fetched in parallel (parallel_s - wall time, several pages at once, not summed per page), the
@@ -873,7 +917,7 @@ def _to_doc(data: dict, cuts: list[int], path: str) -> Doc:
     words: list[Word] = []
     lines: list[Line] = []
     prev = None
-    for k, (t, x0, y0, x1, y1, fam, wt, it, px, col, block, hlevel, href, after) in enumerate(data["words"]):
+    for k, (t, x0, y0, x1, y1, fam, wt, it, px, col, block, hlevel, href, after, bg) in enumerate(data["words"]):
         p = _slice_of(cuts, y0)
         if p is None:
             continue
@@ -891,7 +935,7 @@ def _to_doc(data: dict, cuts: list[int], path: str) -> Doc:
             ln.text += " " + t
             ln.size = max(ln.size, size)
         words.append(Word(t, normalize.token(t, case_sensitive=True, ignore={"•", "●", "■", "▪", "◦"}),
-                          p, (x0, top, x1, y1 - cuts[p]), Style(fam, int(wt), bool(it), size, col),
+                          p, (x0, top, x1, y1 - cuts[p]), Style(fam, int(wt), bool(it), size, col, bg or ""),
                           len(lines) - 1, line_start=new_line, space_after=int(after)))
         prev = (p, block, top)
     if words:

@@ -554,6 +554,74 @@ def _nav_section(c: "_Canvas", site: dict) -> None:
     c.y += 6
 
 
+def _spec_section(c: "_Canvas", site: dict, out: Path | None = None) -> None:
+    """Every CSS / typography / layout issue the live page has against the design spec (the Figma
+    stylesheet, config/typography.toml): font family, weight, size, line height, colour, underline,
+    upper case, heading spacing, block gaps, and the layout breaks (picture / table / jump target).
+    These carry the same Bug_NNN numbers as the rest of the report - they used to be in site.pdf only,
+    where a reader of the bug report never saw them."""
+    rows = [r for r in site.get("rows") or []
+            if r["group"] in ("typography", "layout") and r["status"] in ("fail", "warn")]
+    if not rows:
+        return
+    short = lambda u: (u or "").rsplit("/", 1)[-1].split("?")[0] or (u or "")
+    c.new_page()
+    c.runs([("Design spec — CSS & layout", "#1d2330", True),
+            (f"   {len(rows)} issue(s) against the Figma stylesheet, on the live stage pages", "#6a7282", False)], 14)
+    c.y += 10
+    w = c.width
+    xs = [c.M, c.M + 0.08 * w, c.M + 0.38 * w, c.M + 0.53 * w, c.M + 0.68 * w, c.M + 0.82 * w]
+    widths = [0.08 * w - 6, 0.30 * w - 6, 0.15 * w - 6, 0.15 * w - 6, 0.14 * w - 6, 0.18 * w]
+    for x, label in zip(xs, ("Bug", "Item", "Expected", "Actual", "Page", "On the page")):
+        _text(c, x, c.y, label, "#475569", True)
+    c.y += 14
+    # a row that points at one spot of the page (a picture off centre, a heading in the wrong face) is
+    # shown with a crop of that spot: "the picture is right-aligned" says little without the picture
+    cache: dict = {}
+    for n, r in enumerate(rows):
+        cols = [c.wrap(r.get("bug", "—"), 8, c.regular, widths[0]),
+                c.wrap(r["item"], 8, c.regular, widths[1]),
+                c.wrap(r["expected"] or "—", 8, c.regular, widths[2]),
+                c.wrap(r["actual"] or "—", 8, c.bold, widths[3]),
+                c.wrap(short(r.get("page", "")), 8, c.regular, widths[4])]
+        crop = _spec_crop(out, r, 80000 + n, cache) if out is not None else None
+        img_h = min(crop[2] * widths[5] / crop[1], 110) if crop else 0
+        h = max(11 * max(len(x) for x in cols) + 3, img_h + 6)
+        if not c.room(h + 2):
+            c.new_page()
+        y = c.y
+        colour = "#b42318" if r["status"] == "fail" else "#b45309"
+        for k, (x, lines) in enumerate(zip(xs, cols)):
+            for j, line in enumerate(lines):
+                _text(c, x, y + 11 * j, line, colour if k == 3 else "#1d2330", k == 3)
+        if crop and img_h:
+            rect = pymupdf.Rect(xs[5], y, xs[5] + img_h * crop[1] / crop[2], y + img_h)
+            try:
+                c.page.insert_image(rect, filename=str(crop[0]))
+                c.page.draw_rect(rect, color=(0.82, 0.84, 0.87), width=0.5)
+            except Exception:  # a crop that will not render must not cost the whole report
+                pass
+        c.y = y + h
+    c.y += 6
+
+
+def _spec_crop(out: Path, row: dict, idx: int, cache: dict):
+    """(path, width, height) of the crop for a design-spec row, or None when it points at no one spot."""
+    if not row.get("shot") or out is None:
+        return None
+    try:
+        from PIL import Image
+
+        from .site_report import _crop
+        rel = _crop(Path(out), row["shot"], idx, cache)
+        if not rel:
+            return None
+        path = Path(out) / rel
+        with Image.open(path) as im:
+            return path, im.width, im.height
+    except Exception:
+        return None
+
 
 def _missing_sections_row(result: dict) -> str:
     """The first page names every section of prod that stage does not have: its title and prod page."""
@@ -877,6 +945,7 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
     site = result.get("site")
     if site and not site.get("error"):
         _nav_section(c, site)
+        _spec_section(c, site, out)
     col_w, gap, max_h = (c.width - 16) / 2, 16, 320
     current = group = None
     for k, (s, f) in enumerate(issues):

@@ -82,3 +82,68 @@ def test_numbered_step_with_hanging_indent_is_not_reported(tmp_path, serve):
     site = _site(tmp_path, serve, f'<p style="padding-left:1.5em;text-indent:-1.5em">{_STEP_TEXT}</p>')
     assert not any(r["item"] == "Wrapped line not indented under the text" for r in rows(site, "layout"))
 
+
+_STICKY = '<div style="position:fixed;top:0;left:0;right:0;height:60px;background:#fff;z-index:10">Sticky bar</div>'
+# enough height that scrolling the heading below it to the top of the viewport is actually possible
+# (the page must be taller than the viewport by more than the bar's height, or the browser clamps the
+# scroll short of fully aligning the heading, and the bar never gets the chance to cover it)
+_FILLER = '<div style="height:2000px">spacer</div>'
+
+
+def test_heading_under_sticky_header_is_reported(tmp_path, serve):
+    """A heading far down the page (so jumping to it, like a reader clicking it in the nav, actually
+    scrolls): if a sticky/fixed top bar stays pinned over the viewport and the page does not reserve
+    space for it, the jump lands with the heading's top partly covered by the bar - reported even though
+    nothing is wrong at the page's own load scroll position, which this bug never shows at."""
+    # a spacer after the heading too: the browser can only scroll a heading all the way to the top of the
+    # viewport if there is enough page left below it to make that scroll position reachable at all
+    site = _site(tmp_path, serve, _STICKY + _FILLER + '<h2 id="jump">Remote controller exterior view</h2>' + _FILLER)
+    bad = rows(site, "layout")
+    hit = next((r for r in bad if r["item"] == "Jump target hidden under sticky header"
+                and r["actual"] == "Remote controller exterior view"), None)
+    assert hit is not None, bad
+
+
+def test_heading_clear_of_sticky_header_is_not_reported(tmp_path, serve):
+    """The same sticky bar, but the heading reserves space for it (scroll-margin-top matching the bar's
+    height, the standard fix): the browser's own scrollIntoView honours it, so the jump lands clear of
+    the bar - not reported."""
+    site = _site(tmp_path, serve, _STICKY + _FILLER + '<h2 id="jump" style="scroll-margin-top:64px">Clear heading</h2>' + _FILLER)
+    assert not any(r["item"] == "Jump target hidden under sticky header" and r["actual"] == "Clear heading"
+                   for r in rows(site, "layout"))
+
+
+def test_empty_on_this_page_box_does_not_swallow_the_page(tmp_path, serve):
+    """A topic with no sub-headings renders its "On this page" box empty - no links of its own. The panel
+    search must not climb out of that empty box and up past the content root looking for one, or the
+    page's whole container is taken for the panel and every heading and paragraph in it counts as chrome:
+    the typography checks then sample nothing at all and report a clean page instead of its real issues."""
+    site = _site(tmp_path, serve, '<div class="toc topic-toc-root is-toc-empty"><p>On this page</p></div>')
+    assert not [r for r in site["rows"] if "nothing found to sample" in r.get("actual", "")]
+    # the content really was sampled: the page's own H1 was measured against the design spec
+    assert [r for r in site["rows"] if r["group"] == "typography" and r["item"].startswith("Headline 1")]
+
+
+
+def test_a_design_spec_issue_is_reported_with_the_picture(tmp_path, serve):
+    """A picture left in its column fails the design spec. The bug report must show the picture, not only
+    say "centred -> left": the reader has to see the spot to judge and to fix it."""
+    from docx import Document
+
+    from pdfval.report import writer
+    pdf = make_site(tmp_path)
+    page = tmp_path / "guide" / "overview.html"
+    _png(tmp_path / "guide" / "pic.png", 200, 100)
+    page.write_text(page.read_text().replace(
+        '<div class="pager">', '<p>Picture:</p><img src="pic.png" alt="left" width="200" height="100"><div class="pager">'))
+    run_dir = tmp_path / "run"
+    result = compare_url(str(pdf), serve + "overview.html", str(run_dir), load_config())
+    rows = [r for r in result["site"]["rows"] if r["item"] == "Picture alignment (design spec)"]
+    assert rows and rows[0].get("shot"), rows
+    writer.write_pdf_report(result, run_dir)
+    doc = Document(run_dir / "genuine-issues.docx")
+    table = next(t for t in doc.tables if t.rows[0].cells[0].text == "Bug")
+    assert table.rows[0].cells[5].text == "On the page"
+    blip = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
+    assert any(c.paragraphs[0].runs and c.paragraphs[0].runs[0]._element.findall(f".//{blip}")
+               for r in table.rows[1:] for c in [r.cells[5]]), "no design-spec row carries its picture"

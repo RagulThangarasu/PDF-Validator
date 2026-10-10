@@ -1,6 +1,7 @@
 """Site navigation of a web guide (pdfval/site_nav.py): left navigation vs the PDF's L1 TOC,
 navigation links, Download PDF, next / previous topic, On this page, product subtitle."""
 import functools
+import re
 import http.server
 import threading
 
@@ -66,7 +67,7 @@ a{{font-family:Roboto,sans-serif;font-weight:400;font-size:16px;line-height:24px
 <a href="manual.pdf">Download PDF</a></div></header>
 <div style="display:flex"><nav style="width:220px"><p>Table of Contents</p><ul>
 {nav.replace(f'href="{slug}.html"', f'href="{slug}.html" aria-current="page"')}</ul></nav>
-<main style="width:700px"><nav class="breadcrumb" style="margin:0 0 {breadcrumb_gap}px 0"><a href="overview.html">Home</a> &gt; 
+<main style="width:700px"><nav class="breadcrumb" style="margin:0 0 {breadcrumb_gap}px 0"><a href="overview.html">{subtitle or 'SX1000 Series'}</a> &gt; 
 <a href="{'nope.html' if breadcrumb_broken else slug + '.html'}">{title}</a></nav><h1>{title}</h1>{body}{extra_body if slug == "overview" else ""}<div class="pager">{pager}</div></main>
 <aside style="width:220px"><p>On this page</p><ul>{otp}</ul></aside></div>
 <footer>SX1000 Series user manual</footer></body></html>""")
@@ -132,15 +133,46 @@ def test_otp_is_on_by_default_and_jumps_to_the_right_h3(tmp_path, serve):
     assert any(row["item"] == "Unboxing" and row["status"] == "pass" for row in site["rows"] if row["group"] == "otp")
 
 
-def test_otp_hidden_when_no_h3_or_h4(tmp_path, serve):
-    """A page whose sub-headings are h2 (no h3/h4): no otp row at all when no "On this page" list is shown,
-    and a warn when one is shown anyway (nothing to list)."""
+def _h2_page(tmp_path, serve, cfg):
+    """The overview page with its sub-headings as h2 (the shape of a BenQ topic page: H1 title, H2 sections),
+    its "On this page" listing them."""
     pdf = make_site(tmp_path)
     page = tmp_path / "guide" / "overview.html"
     page.write_text(page.read_text().replace("<h3 ", "<h2 ").replace("</h3>", "</h2>"))
+    r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), cfg)
+    return [row for row in r["site"]["rows"] if row["group"] == "otp" and "overview" in row["page"]]
+
+
+def test_h2_sections_listed_on_this_page_are_not_faulted(tmp_path, serve):
+    """A page whose sections are h2 and whose "On this page" lists them is correct: its entries are
+    checked and pass, and it is NOT told to hide the panel (the H1 is the page title, so an H2 is a
+    section of the page, not the page itself)."""
+    rows = _h2_page(tmp_path, serve, load_config())
+    assert not any(row["status"] == "warn" and "hidden" in row["expected"] for row in rows), rows
+    assert any(row["status"] == "pass" for row in rows), rows
+
+
+def test_otp_hidden_when_the_page_has_no_section_of_its_own(tmp_path, serve):
+    """A guide that lists only h3/h4 ([site] on_this_page_min_level = 3): the same page then has nothing
+    to list, so showing the panel anyway is a warn."""
+    cfg = load_config()
+    cfg["site"]["on_this_page_min_level"] = 3
+    rows = _h2_page(tmp_path, serve, cfg)
+    assert any(row["status"] == "warn" and "hidden" in row["expected"] for row in rows), rows
+
+
+def test_a_page_with_sections_but_an_empty_list_is_reported(tmp_path, serve):
+    """"On this page" rendered with no entries, on a page that does have sections: the reader is given an
+    empty list where the page's own sections should be - reported, not passed over in silence."""
+    pdf = make_site(tmp_path)
+    page = tmp_path / "guide" / "overview.html"
+    html = page.read_text().replace("<h3 ", "<h2 ").replace("</h3>", "</h2>")
+    html = re.sub(r"<aside style=\"width:220px\"><p>On this page</p><ul>.*?</ul></aside>",
+                  '<aside style="width:220px"><p>On this page</p><ul></ul></aside>', html, flags=re.S)
+    page.write_text(html)
     r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
     rows = [row for row in r["site"]["rows"] if row["group"] == "otp" and "overview" in row["page"]]
-    assert any(row["status"] == "warn" and "hidden" in row["expected"] for row in rows)
+    assert any(row["status"] == "fail" and row["item"] == "On this page" for row in rows), rows
 
 
 def test_pager_is_on_by_default(tmp_path, serve):
@@ -317,3 +349,168 @@ def test_blank_page_error_points_at_its_screenshot(tmp_path, serve):
     (tmp_path / "guide" / "blank.html").write_text("<!doctype html><html><body></body></html>")
     with pytest.raises(RuntimeError, match="screenshot was saved to"):
         compare_url(str(pdf), serve + "blank.html", str(tmp_path / "run"), load_config())
+
+
+def _crumb_page(url, trail, crumbs, subtitle="Identity and Access Management (IAM)"):
+    return {"url": url, "breadcrumb": trail, "subtitle": {"text": subtitle}, "page_shot": "site-shots/a.png",
+            "breadcrumb_items": [{"text": t, "href": h, "where": "nav.breadcrumb a", "box": [0, 0, 10, 10]}
+                                 for t, h in crumbs]}
+
+
+def test_breadcrumb_missing_the_product_name_is_reported():
+    """A trail that opens straight at the page ("Introduction") never names the product the page
+    belongs to: it must be a fail, not a silent pass just because a breadcrumb exists."""
+    pages = [_crumb_page("http://x/intro.html", "Introduction", [("Introduction", "intro.html")])]
+    rows = site_nav._breadcrumb_product_rows(pages, "")
+    assert len(rows) == 1 and rows[0]["status"] == "fail"
+    assert rows[0]["item"] == "Product name in the breadcrumb"
+    assert "Identity and Access Management (IAM)" in rows[0]["expected"]
+    assert rows[0]["shot"] == {"page_shot": "site-shots/a.png", "box": [0, 0, 10, 10]}  # crop of the crumb
+
+
+def test_breadcrumb_starting_with_the_product_passes_and_a_late_product_fails():
+    """The product must be the FIRST crumb: deeper in the trail is still wrong, and the note says so."""
+    good = _crumb_page("http://x/a.html", "Identity and Access Management (IAM) > Introduction",
+                       [("Identity and Access Management (IAM)", "index.html"), ("Introduction", "a.html")])
+    late = _crumb_page("http://x/b.html", "Home > Identity and Access Management (IAM) > Introduction",
+                       [("Home", "/"), ("Identity and Access Management (IAM)", "index.html"), ("Introduction", "b.html")])
+    rows = site_nav._breadcrumb_product_rows([good, late], "")
+    assert [r["status"] for r in rows] == ["pass", "fail"]
+    assert "not the first crumb" in rows[1]["note"]
+
+
+def test_breadcrumb_product_name_can_be_set_in_config():
+    """[site] breadcrumb_product names the product when the header's title is not the right source."""
+    p = _crumb_page("http://x/a.html", "IFP software IAM > Introduction",
+                    [("IFP software IAM", "index.html"), ("Introduction", "a.html")])
+    assert site_nav._breadcrumb_product_rows([p], "IFP software IAM")[0]["status"] == "pass"
+    assert site_nav._breadcrumb_product_rows([p], "")[0]["status"] == "fail"  # header title differs
+
+
+GOOD_TABLE = """<table class="good" style="border-collapse:collapse;border-radius:1px">
+<tr><th style="background:#333333;border:1px solid #DCDCDC;padding:12px;color:#fff">Port</th></tr>
+<tr><td style="border:1px solid #DCDCDC;padding:12px">HDMI 1</td></tr></table>"""
+BAD_TABLE = """<table class="bad" style="border-collapse:collapse;border-radius:0">
+<tr><th style="background:#444444;border:2px solid #EEEEEE;padding:8px;color:#fff">Port</th></tr>
+<tr><td style="border:2px solid #EEEEEE;padding:8px">HDMI 2</td></tr></table>"""
+
+
+def test_table_style_vs_the_design_spec(tmp_path, serve):
+    """The table component spec ([typography.formats.html_web.table]: {900-dark-gary} header bar, 1px
+    {Stroke/Regular} border, 12px cell padding, {Radius/md} corners). A table built to it passes; one
+    with a lighter header, a 2px border in the wrong grey, 8px padding and square corners fails on each
+    of those four properties separately."""
+    pdf = make_site(tmp_path, extra_body=GOOD_TABLE + BAD_TABLE)
+    r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
+    rows = [row for row in r["site"]["rows"] if row["item"].startswith("Table style")]
+    assert any(row["status"] == "pass" and "table.good" in row["where"] for row in rows), rows
+    bad = {row["item"]: (row["expected"], row["actual"]) for row in rows
+           if row["status"] == "fail" and "table.bad" in row["where"]}
+    assert bad["Table style — header bar colour"] == ("#333333", "#444444")
+    assert bad["Table style — border width"] == ("1px", "2px")
+    assert bad["Table style — border colour"] == ("#dcdcdc", "#eeeeee")
+    assert bad["Table style — cell padding"][0] == "12px" and bad["Table style — cell padding"][1].startswith("8px")
+    assert bad["Table style — corner radius"] == ("1px", "0px")
+    assert all(row.get("shot") for row in rows)
+
+
+def _table_page(**style):
+    tb = {"header_background": "#333333", "border_width": 1, "border_color": "#DCDCDC", "radius": 1,
+          "padding": [12, 12, 12, 12], "cell": "th", "text": "Port", "where": "table", "box": [0, 0, 9, 9]}
+    return {"url": "http://x/a.html", "table_styles": [{**tb, **style}]}
+
+
+def test_table_style_check_is_per_property_and_tolerates_nothing():
+    spec = {"formats": {"html_web": {"table": {"header_background": "#333333", "border_color": "#DCDCDC",
+                                               "border_width": 1, "cell_padding": 12, "radius": 1}}}}
+    assert [r["status"] for r in site_nav._table_style_rows([_table_page()], spec)] == ["pass"]
+    # one padding side off is still off: the spec is exact, and the row names every side
+    off = site_nav._table_style_rows([_table_page(padding=[12, 16, 12, 12])], spec)
+    assert len(off) == 1 and off[0]["item"] == "Table style — cell padding" and off[0]["actual"].startswith("12px/16px")
+    # a table whose cells are <td> only has no header bar to judge - the rest is still checked
+    body_only = site_nav._table_style_rows([_table_page(cell="td", header_background="#FFFFFF", radius=4)], spec)
+    assert [r["item"] for r in body_only] == ["Table style — corner radius"]
+
+
+def test_a_crawl_that_captures_one_page_says_so(tmp_path, serve):
+    """"All pages of the guide" asked for, one page captured: the whole PDF then reads as missing
+    content. The run must name the cause (no navigation, no guide links) instead of looking like the
+    guide lost its text - the usual case is an AEM /editor.html/… URL, whose guide sits in an iframe."""
+    pdf = make_site(tmp_path)
+    (tmp_path / "guide" / "solo.html").write_text(
+        "<!doctype html><meta charset=utf-8><title>Product overview</title>"
+        "<main><h1>Product overview</h1><p>Text about specifications for the SX1000.</p></main>")
+    r = compare_url(str(pdf), serve + "solo.html", str(tmp_path / "run"), load_config())
+    warn = r["meta"].get("crawl_warning", "")
+    assert "Only 1 page was captured" in warn and "3 chapters" in warn, warn
+
+
+def test_a_real_crawl_does_not_warn(tmp_path, serve):
+    """The same guard must stay quiet on a guide whose navigation the crawl does follow."""
+    pdf = make_site(tmp_path)
+    r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
+    assert not r["meta"].get("crawl_warning")
+
+
+AEM_BODY = """
+<p id="lead" style="margin:0">When connecting a signal source to the projector, be sure to:</p>
+<ol class="offmargin" style="list-style-position:inside;padding-left:24px;margin:0">
+  <li>Turn all equipment off before making any connections.</li></ol>
+<p style="margin:0">A/V devices, notebook or desktop computers</p>
+<ol class="level" style="list-style-position:inside;padding-left:0;margin:0">
+  <li>Use the correct signal cables for each source.</li></ol>
+<p style="margin:0">See also</p>
+<ul class="wide" style="padding-left:40px;margin:0"><li>Ensure the cables are firmly inserted.</li></ul>
+<p><a id="guid" href="GUID-17f6ffdc-ff83-4a35-9a6e-5d5bc655db60-en.html">Connection</a>
+   <a id="guidtext" href="install.html">GUID-17f6ffdc-ff83-4a35-9a6e-5d5bc655db60-en</a>
+   <a id="dead" href="nope-404.html">Missing page</a></p>"""
+
+
+def _aem_rows(tmp_path, serve):
+    pdf = make_site(tmp_path, extra_body=AEM_BODY)
+    r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
+    return r, r["site"]["rows"]
+
+
+def test_guid_links_and_list_margins_are_reported(tmp_path, serve):
+    """The AEM site review's own checks: a link whose address or label still carries a DITA GUID, and a
+    list whose markers do not start at the left edge of the paragraph above it."""
+    r, rows = _aem_rows(tmp_path, serve)
+    guid = [row for row in rows if row.get("kind") == "link-guid"]
+    assert {row["where"].rsplit("#", 1)[-1] for row in guid} >= {"guid", "guidtext"}, [row["where"] for row in guid]
+    assert all(row["status"] == "fail" and "17f6ffdc" in row["actual"] for row in guid)
+    margins = {row["status"]: row for row in rows if row["item"].startswith("List")}
+    off = [row for row in rows if row.get("kind") == "list-margin"]
+    assert any("24px right of" in row["note"] for row in off), [row["note"] for row in off]   # padding-left:24px
+    assert any(row["where"].endswith("ul.wide") or "ul" in row["where"] for row in off)       # default 40px padding
+    assert any(row["status"] == "pass" and row["item"] == "List margin" for row in rows)      # the level one
+    assert margins  # both statuses present
+
+
+def test_a_dead_in_content_link_is_not_silently_passed(tmp_path, serve):
+    """A content link to a page that 404s is a "link not working" row, with its kind tagged so the AEM
+    report can pick it out."""
+    _, rows = _aem_rows(tmp_path, serve)
+    assert any(row.get("kind") == "link-broken" for row in rows) or \
+        any(row["status"] == "fail" and "nope-404" in (row["note"] or "") for row in rows)
+
+
+def test_the_aem_site_report_holds_only_the_four_issues(tmp_path, serve):
+    """aem-site-issues.csv / .pdf: missing links, links that do not work, links carrying a GUID and
+    lists out of the text margin - and nothing else from the run (no CSS, no pager, no images)."""
+    import csv as _csv
+
+    from pdfval.report import aem_site_report
+
+    r, _ = _aem_rows(tmp_path, serve)
+    out = tmp_path / "aem"
+    out.mkdir()
+    assert aem_site_report.build(r, out) is not None
+    issues = list(_csv.DictReader((out / "aem-site-issues.csv").read_text(encoding="utf-8-sig").splitlines()))
+    kinds = {row["Issue"] for row in issues}
+    assert kinds <= {"Link missing", "Link not working", "Link contains a GUID", "List out of the text margin"}
+    assert "Link contains a GUID" in kinds and "List out of the text margin" in kinds
+    assert (out / "aem-site-issues.pdf").exists()
+    # a run with none of the four leaves no empty report behind
+    clean = {"meta": r["meta"], "sections": [], "site": {"rows": [], "summary": {}}}
+    assert aem_site_report.build(clean, out) is None and not (out / "aem-site-issues.csv").exists()

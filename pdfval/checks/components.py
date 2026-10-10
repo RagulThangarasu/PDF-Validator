@@ -308,7 +308,45 @@ def document(doc: Doc, cfg: dict, fmt: dict) -> list[Finding]:
         out = print_structure(doc, cfg, fmt)
     else:
         out = cover(doc, cfg, fmt, th)
-    return out + page_numbers(doc, cfg, fmt, th) + callout_colons(doc, cfg, fmt) + pagination(doc, cfg, fmt)
+    return out + page_numbers(doc, cfg, fmt, th) + callout_colons(doc, cfg, fmt) + pagination(doc, cfg, fmt) \
+        + images(doc, cfg, fmt)
+
+
+def images(doc: Doc, cfg: dict, fmt: dict) -> list[Finding]:
+    """Figma "Picture Component": every picture's width against the content box (never wider than
+    the spec's max_width_pct) and, when the spec calls for it, centred in that box."""
+    spec = fmt.get("image")
+    if not spec:
+        return []
+    t = cfg.get("typography") or {}
+    label, sev = fmt["label"], t.get("severity", "warning")
+    m = fmt.get("margins") or {}
+    max_pct = spec.get("max_width_pct", 100) / 100
+    centered = spec.get("alignment") == "center"
+    align_tol = t.get("align_tolerance", 6)
+    out = []
+    for im in doc.images:
+        if im.broken or im.bbox[2] - im.bbox[0] < 20 or im.bbox[3] - im.bbox[1] < 20:
+            continue  # an icon, not a picture: the Picture Component is the figure itself
+        pg = doc.pages[im.page]
+        left, right = m.get("left", 0), m.get("right", 0)
+        box_w = pg.width - left - right
+        if box_w <= 0:
+            continue
+        pct = (im.bbox[2] - im.bbox[0]) / box_w
+        if pct > max_pct + 0.01:
+            out.append(_spec(label, "layout", sev, f"Picture wider than its content box (p.{im.page + 1}): {pct:.0%}",
+                             [Loc(im.page, im.bbox)], "Picture Component: max width 100% of the content box",
+                             "spec image width", figma=f"max width {spec.get('max_width_pct', 100):g}%",
+                             stage=f"{pct:.0%} of the content box"))
+        elif centered:
+            gap_l, gap_r = im.bbox[0] - left, (pg.width - right) - im.bbox[2]
+            if min(gap_l, gap_r) >= -align_tol and abs(gap_l - gap_r) > align_tol:
+                out.append(_spec(label, "layout", sev, f"Picture not centred in its content box (p.{im.page + 1})",
+                                 [Loc(im.page, im.bbox)], "Picture Component: centred in the content box",
+                                 "spec image alignment", figma="centred",
+                                 stage=f"left gap {gap_l:.0f}pt, right gap {gap_r:.0f}pt"))
+    return out
 
 
 _FRONT = re.compile(r"^(table of contents?|contents|q\s*&\s*a index)$", re.I)

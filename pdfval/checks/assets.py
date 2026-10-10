@@ -1398,7 +1398,8 @@ def check(u: Unit) -> list[Finding]:
         findings.append(Finding(
             "assets", acfg.get("broken_severity", "error"),
             f"{kind(icon)} broken in stage: it does not display (prod p.{x.page + 1} ↔ stage p.{y.page + 1})",
-            [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)], {"kind": "broken", "icon": icon}, critical=True))
+            [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)], {"kind": "broken", "icon": icon}, critical=True,
+            types=["broken image"]))
     for n, y in enumerate(ib):  # failed to load, with no counterpart found in prod
         if n not in used and y.broken:
             used.add(n)
@@ -1407,13 +1408,14 @@ def check(u: Unit) -> list[Finding]:
                 "assets", acfg.get("broken_severity", "error"),
                 f"{kind(icon)} broken in stage: it failed to load (stage p.{y.page + 1})",
                 [], [Loc(y.page, y.bbox)], {"kind": "broken", "icon": icon}, baseline_at=al.loc_in_a(anc_b[n]),
-                critical=True))
+                critical=True, types=["broken image"]))
     for x, y, dark in blacked:
         findings.append(Finding(
             "assets", acfg.get("broken_severity", "error"),
             f"Image blacked out in stage: {dark:.0%} of the picture is black where prod shows content "
             f"(prod p.{x.page + 1} ↔ stage p.{y.page + 1})",
-            [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)], {"kind": "blackout", "dark_share": round(dark, 3)}, critical=True))
+            [Loc(x.page, x.bbox)], [Loc(y.page, y.bbox)], {"kind": "blackout", "dark_share": round(dark, 3)},
+            critical=True, types=["image blacked out"]))
     for x, y, vis in changed:
         same = (id(x), id(y)) in same_screen
         # the same picture re-captured, re-cropped or with / without highlight marks: an image difference to
@@ -1761,6 +1763,8 @@ def check(u: Unit) -> list[Finding]:
         findings = _grid_repair(u, findings, acfg)
     if acfg.get("check_vertical_alignment", True):
         findings += _vertical_alignment(u, acfg)
+    if acfg.get("check_overlap", True):
+        findings += _overlap(u.b, ib, acfg)
     if acfg.get("check_vector_only_missing", True):
         findings += _missing_vector_only(u, al, ia, ib, used, claimed_a, acfg, icon_w)
     _annotate(u, findings)
@@ -1879,6 +1883,40 @@ def _vertical_alignment(u: Unit, acfg: dict) -> list[Finding]:
                 [Loc(wa.page, pa)], [Loc(page, ic)],
                 {"kind": "vertical alignment", "baseline": round(ra, 2), "candidate": round(rb, 2)},
                 types=["image vertical alignment"], links=[(Loc(wa.page, pa), Loc(page, ic))]))
+    return out
+
+
+def _overlap(doc: Doc, images: list[Image], acfg: dict) -> list[Finding]:
+    """Two pictures drawn on top of each other in stage - a layout bug (a float/position rule that
+    did not clear, a grid cell collapsed onto the next): prod lays out its pictures side by side or
+    stacked with a gap, so this is never paired against a prod picture, only found on stage's own
+    page. min_fraction: how much of the smaller picture's area the overlap must cover to count (a
+    few points of touching frames is normal spacing, not a collision)."""
+    min_frac = acfg.get("overlap_min_fraction", 0.2)
+    out = []
+    by_page: dict[int, list[Image]] = defaultdict(list)
+    for im in images:
+        if not im.broken:
+            by_page[im.page].append(im)
+    for page, pics in by_page.items():
+        for i in range(len(pics)):
+            for j in range(i + 1, len(pics)):
+                x, y = pics[i], pics[j]
+                ix0, iy0 = max(x.bbox[0], y.bbox[0]), max(x.bbox[1], y.bbox[1])
+                ix1, iy1 = min(x.bbox[2], y.bbox[2]), min(x.bbox[3], y.bbox[3])
+                if ix1 <= ix0 or iy1 <= iy0:
+                    continue
+                area = lambda b: max(b[2] - b[0], 0) * max(b[3] - b[1], 0)
+                inter = (ix1 - ix0) * (iy1 - iy0)
+                smaller = min(area(x.bbox), area(y.bbox))
+                if smaller <= 0 or inter / smaller < min_frac:
+                    continue
+                out.append(Finding(
+                    "assets", acfg.get("overlap_severity", "error"),
+                    f"Images overlap in stage (p.{page + 1}): {inter / smaller:.0%} of the smaller picture",
+                    [], [Loc(page, x.bbox), Loc(page, y.bbox)],
+                    {"kind": "overlap", "overlap_fraction": round(inter / smaller, 3)},
+                    types=["image overlap"]))
     return out
 
 

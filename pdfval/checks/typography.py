@@ -149,6 +149,15 @@ def _roles(u: Unit, t: dict, styles: dict, fonts: dict) -> dict[int, str]:
                         and w.style.size <= note_size + 0.5):
                     role[i] = "table_note"
     titles = components.callout_title_words(doc, u.cfg) if "callout_title" in styles else set()
+    caption_lines: set[int] = set()
+    if "caption" in styles:
+        from . import caption_rows
+        lines_by_li: dict[int, list[int]] = defaultdict(list)
+        for i in range(*rng):
+            lines_by_li[doc.words[i].line].append(i)
+        for page in sorted({doc.words[i].page for i in range(*rng)}):
+            pics = caption_rows._things(doc, page)
+            caption_lines.update(caption_rows._captions(doc, page, lines_by_li, pics, 12, 24))
     # a link area often spans the whole sentence ("See Notes on HDMI for details."): when its words are in two
     # colours, only the ones not in the running text's colour are the link
     plain_in_link: set[int] = set()
@@ -179,6 +188,8 @@ def _roles(u: Unit, t: dict, styles: dict, fonts: dict) -> dict[int, str]:
             role[i] = "callout_title"  # "NOTE" / "TIP": the Callout Component's title
         elif _callout_label(w):
             role[i] = ""  # "Note:" outside a callout box: checked as a callout (components.py), not as text
+        elif w.line in caption_lines:
+            role[i] = "caption"  # a short line right under a picture: the Picture Component's caption
         elif any(r.contains(pymupdf.Point(cx, cy)) for r in _in_pictures(doc, w.page, pics)):
             role[i] = ""  # a label on a picture / screenshot text
         elif i not in plain_in_link and any(_link_word(w.bbox, r) for r in links.get(w.page, ())):

@@ -86,6 +86,9 @@ label = "A4 PDF (View)"
 page = [595.28, 841.89]
 margins = { top = 24, bottom = 24, left = 24, right = 24 }
 footer_gap = 12               # content area to page number
+[typography.formats.a4_view.image]   # Figma "Picture Component": the image itself, not its caption
+max_width_pct = 100           # share of the content box width - never wider than the column
+alignment = "center"
 [typography.formats.a4_view.styles]
 h1            = { font = "branding", weight = "Bold",    size = 20, line_height = 24, color = "accent" }
 h2            = { font = "branding", weight = "Bold",    size = 14, line_height = 16, color = "#000000" }
@@ -97,6 +100,7 @@ table_header  = { font = "default",  weight = "Medium",  size = 12, line_height 
 table_default = { font = "default",  weight = "Regular", size = 12, line_height = 16, color = "#000000" }
 table_note    = { font = "default",  weight = "Regular", size = 10, line_height = 12, color = "#757575" }
 callout_title = { font = "default",  weight = "Bold",    size = 12, line_height = 16, color = "#333333" }
+caption       = { font = "default",  weight = "Regular", size = 12, line_height = 16, color = "#757575" }   # {Text/Secondary}
 [typography.formats.a4_view.page_number]   # centred below the content, on every page after the cover
 font = "default"
 weight = "Regular"
@@ -114,6 +118,9 @@ page = [419.53, 595.28]
 margins = { top = 12, bottom = 12, left = 24, right = 24 }
 footer_gap = 4
 print = true                  # PDF (Print): no cover / Q&A index / TOC, the first page is page 1, version and title on page 1 only
+[typography.formats.a5_print.image]
+max_width_pct = 100
+alignment = "center"
 [typography.formats.a5_print.styles]
 h1            = { font = "branding", weight = "Bold",    size = 10, line_height = 10, color = "accent" }
 h2            = { font = "branding", weight = "Bold",    size = 7,  line_height = 7, color = "#000000" }
@@ -125,6 +132,7 @@ table_header  = { font = "default",  weight = "Medium",  size = 5,  line_height 
 table_default = { font = "default",  weight = "Regular", size = 5,  line_height = 5, color = "#000000" }
 table_note    = { font = "default",  weight = "Regular", size = 4,  line_height = 4, color = "#757575" }
 callout_title = { font = "default",  weight = "Bold",    size = 5,  line_height = 5, color = "#333333" }
+caption       = { font = "default",  weight = "Regular", size = 5,  line_height = 5, color = "#757575" }
 
 [typography.formats.html_web]   # for reference (web pages are checked by their CSS, not this spec)
 label = "HTML Web"
@@ -142,6 +150,16 @@ table_note    = { font = "default",  weight = "Regular", size = 12, line_height 
 # the callout's bold title (IMPORTANT / NOTE / TIP / WARNING): printed in upper case - #333333 is the
 # same dark grey already used for it in the a4_view / a5_print formats above (Figma "900-dark-gray" token)
 callout_title = { font = "default",  weight = "Bold",    size = 12, color = "#333333", uppercase = true }
+# the table component's own style (Figma "7. Table Component"), in the design spec's own tokens:
+# header bar {900-dark-gary}, border {Stroke/Regular} 1px, cell padding 12px, corners {Radius/md}.
+# Checked from the page's live CSS ([site] check_table_style) - HTML web only, not the PDF formats.
+[typography.formats.html_web.table]
+header_background = "#333333"   # {900-dark-gary}
+border_color = "#DCDCDC"        # {Stroke/Regular}
+border_width = 1                # px
+cell_padding = 12               # px, all four sides of a th / td
+radius = 1                      # px, {Radius/md}
+
 # margin-top / margin-bottom of each heading role, and paragraph spacing (margin-bottom) - "0" means flush
 # against whatever comes before/after it (H1 right under the breadcrumb, no extra air above/below it)
 [typography.formats.html_web.heading_spacing]

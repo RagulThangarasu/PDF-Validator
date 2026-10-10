@@ -865,6 +865,12 @@ def check(u: Unit) -> list[Finding]:
         findings += _row_background(u, tb_pages)
     if tcfg.get("check_header_align", True):
         findings += _header_align(u, tb_pages)
+    # off by default: unlike a header (always left-aligned, see _header_align), a narrow ID/number
+    # column legitimately centred on its own is common in real tables - this would flag it every time
+    if tcfg.get("check_cell_align", False):
+        findings += _cell_align(u, tb_pages)
+    if tcfg.get("check_font_size", True):
+        findings += _uniform_font_size(u, tb_pages)
     if tcfg.get("check_single_column_center", True):
         findings += _single_column_center(u)
     return findings
@@ -986,6 +992,89 @@ def _header_align(u: Unit, tb: list) -> list[Finding]:
             + " — table headers must be left-aligned (design spec)",
             locs(A, a_idx, rcfg["max_locs"]) if a_idx else [], locs(B, idx, rcfg["max_locs"]),
             {"kind": "table header alignment", "cells": len(bad)}, types=["table header alignment"]))
+    return out
+
+
+def _cell_align(u: Unit, tb: list) -> list[Finding]:
+    """Table data cells: like a header (_header_align), every line of a data cell's text must be
+    left-aligned in its column - an absolute design-spec rule, judged on its own, not against what
+    prod happens to do. A right-aligned number column is still a stage-only deviation from the spec."""
+    tol = u.cfg["tables"].get("header_align_tolerance", 4.0)
+    sev = u.cfg["tables"].get("header_align_severity", "error")
+    A, B = u.a, u.b
+    b2a = {j: i for i, j in u.pairs}
+    rcfg = u.cfg["report"]
+    out = []
+    for t in tb:
+        raw = next((r for r in _raw(B, t.page) if r[0] == t.key[1]), None)
+        if not raw or not is_data_table(B, t):
+            continue
+        grid = raw[3]
+        head = t.rows[0]
+        data_rows = t.rows[1:] if _is_header_bar(B, head) else t.rows
+        bad = []
+        for row in data_rows:
+            for x0, x1 in grid:
+                words = [i for i in row.idx if x0 - 1 <= (B.words[i].bbox[0] + B.words[i].bbox[2]) / 2 <= x1 + 1]
+                if not words:
+                    continue
+                by_line: dict[int, list[int]] = defaultdict(list)
+                for i in words:
+                    by_line[B.words[i].line].append(i)
+                for ln, ws in by_line.items():
+                    left = min(B.words[i].bbox[0] for i in ws) - x0
+                    right = x1 - max(B.words[i].bbox[2] for i in ws)
+                    if left < 0 or left <= tol:
+                        continue  # at (or past) the column's left edge: left-aligned, as the spec requires
+                    how = ("centred" if right >= 0 and abs(left - right) <= 2 * tol else "right-aligned" if 0 <= right <= tol
+                          else f"indented {left:.0f}pt from the left edge")
+                    bad.append((sorted(ws, key=lambda i: B.words[i].bbox[0]), how))
+        if not bad:
+            continue
+        idx = [i for ws, _ in bad for i in ws]
+        names = "; ".join(f"“{' '.join(B.words[i].text for i in ws)}” {how}" for ws, how in bad[:6])
+        more = f" (+{len(bad) - 6} more)" if len(bad) > 6 else ""
+        a_idx = [b2a[j] for j in idx if j in b2a]
+        out.append(Finding(
+            "tables", sev,
+            f"Table cell(s) not left-aligned in stage ({len(bad)} cell{'s' if len(bad) > 1 else ''}): {names}{more}"
+            + " — table cell text must be left-aligned (design spec)",
+            locs(A, a_idx, rcfg["max_locs"]) if a_idx else [], locs(B, idx, rcfg["max_locs"]),
+            {"kind": "table cell alignment", "cells": len(bad)}, types=["table cell alignment"]))
+    return out
+
+
+def _uniform_font_size(u: Unit, tb: list) -> list[Finding]:
+    """Every data cell of a table set in the same font size - a table does not mix sizes within
+    itself (a formatting slip, not a deliberate choice). The header may be its own size by the
+    design spec's own table_header role (see _header_align) and is not counted here."""
+    tol = u.cfg["tables"].get("font_size_tolerance", 0.25)
+    sev = u.cfg["tables"].get("font_size_severity", "warning")
+    B = u.b
+    rcfg = u.cfg["report"]
+    out = []
+    for t in tb:
+        if not is_data_table(B, t):
+            continue
+        head = t.rows[0]
+        data_rows = t.rows[1:] if _is_header_bar(B, head) else t.rows
+        idx = [i for row in data_rows for i in row.idx if B.words[i].norm]
+        if len(idx) < 2:
+            continue
+        sizes = Counter(round(B.words[i].style.size, 1) for i in idx)
+        if len(sizes) < 2:
+            continue
+        dominant = sizes.most_common(1)[0][0]
+        if max(abs(s - dominant) for s in sizes) <= tol:
+            continue
+        off = [i for i in idx if abs(round(B.words[i].style.size, 1) - dominant) > tol]
+        by_size = sorted({round(B.words[i].style.size, 1) for i in off} | {dominant})
+        out.append(Finding(
+            "tables", sev,
+            f"Table mixes font sizes in stage: {', '.join(f'{s:g}pt' for s in by_size)} "
+            f"({len(off)} word(s) off {dominant:g}pt) — a table's text must be one font size (design spec)",
+            [], locs(B, off, rcfg["max_locs"]),
+            {"kind": "table font size", "sizes": by_size}, types=["table font size"]))
     return out
 
 

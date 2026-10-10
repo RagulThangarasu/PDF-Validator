@@ -119,7 +119,8 @@ def _card(r: dict, out_dir: Path, idx: int, cache: dict) -> tuple[str, int]:
 
 
 def build(result: dict, out_dir: str | Path, *, progress: Callable[[float, str], None] | None = None,
-          filename: str = "site.pdf") -> Path | None:
+          filename: str = "site.pdf", title: str = "Site validation report",
+          groups: list[tuple[str, str]] | None = None) -> Path | None:
     """One PDF for the whole site run: a summary dashboard, then every group (left navigation, links,
     pager, on this page, page layout and pictures, breadcrumb, CSS vs the design spec, ...) with its
     fail/warn rows as cards (with a screenshot crop when the row points at one page element) and its
@@ -138,7 +139,7 @@ def build(result: dict, out_dir: str | Path, *, progress: Callable[[float, str],
     candidate = ((meta.get("candidate") or {}).get("url") or (meta.get("candidate") or {}).get("path") or "")
     overall = STATUS.get(sm.get("status"), STATUS["info"])
     html = [
-        "<h1>Site validation report</h1>"
+        f"<h1>{escape(title)}</h1>"
         f"<p class='subtitle'>{escape(candidate)} · generated {escape(meta.get('generated', ''))}</p>"
         "<table class='dash'><tr><th>Result</th><th>Pages</th><th>Fail</th><th>Warn</th><th>Pass</th></tr>"
         f"<tr><td style='color:{overall['text']}'>{str(sm.get('status', '')).upper()}</td>"
@@ -149,7 +150,7 @@ def build(result: dict, out_dir: str | Path, *, progress: Callable[[float, str],
     ]
     cache: dict = {}
     idx = 0
-    for gid, label in site_nav.GROUPS:
+    for gid, label in (groups or site_nav.GROUPS):
         grows = [r for r in rows if r["group"] == gid]
         if not grows:
             continue

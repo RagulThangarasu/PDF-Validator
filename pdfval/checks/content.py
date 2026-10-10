@@ -653,7 +653,14 @@ def check(u: Unit) -> list[Finding]:
     at = [u.a.words[i].norm for i in ai]
     bt = [u.b.words[i].norm for i in bi]
 
-    sm = SequenceMatcher(None, at, bt, autojunk=False)
+    # A word the print cut at a line break keeps the break's own hyphen once its halves are joined
+    # ("con-" | "nect" -> "con-nect", "man-" | "age-ment" -> "man-age-ment"); the web page, which wraps
+    # elsewhere, writes it whole ("connect", "management"). Aligning on the hyphenless form pairs the two
+    # instead of leaving a hole - a hole that pulls the words around it out of step and reports a whole
+    # table cell that IS on the page as "data missing". A hyphen-only difference is not content anywhere
+    # else either: classify() calls it "hyphenation" and the check leaves it unreported.
+    _dehyph = lambda t: re.sub(r"[-‐‑–—]", "", t) or t  # "-" alone is a bullet, not a hyphen
+    sm = SequenceMatcher(None, [_dehyph(t) for t in at], [_dehyph(t) for t in bt], autojunk=False)
     u.similarity = sm.ratio() if (at or bt) else 1.0
     ops = _peel_list_edges(_peel_labels(sm.get_opcodes(), at, bt), at, bt)
     moved = _moved_blocks(ops, at, bt)

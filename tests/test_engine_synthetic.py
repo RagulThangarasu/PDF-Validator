@@ -95,6 +95,7 @@ def section_by(result, title):
 
 def test_punctuation_and_spacing_are_content(tmp_path, cfg):
     cfg["ignore"]["types"] = [t for t in cfg["ignore"]["types"] if t not in ("case", "punctuation", "case + punctuation")]
+    cfg["content"]["check_spacing"] = True  # this test covers the detector the default turns off
     a = make_pdf(tmp_path / "a.pdf")
     b = make_pdf(tmp_path / "b.pdf", body_text=BODY.replace("bank.", "bank").replace("over the", "over  the"))
     r = compare(a, b, cfg)

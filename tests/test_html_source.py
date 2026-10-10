@@ -6,8 +6,8 @@ from pdfval import html_source
 
 
 def _word(text, x0, y0, x1, y1, px=16):
-    # (t, x0, y0, x1, y1, fam, wt, it, px, col, block, hlevel, href, after) - html_source._to_doc's shape
-    return (text, x0, y0, x1, y1, "Roboto", 400, False, px, "#000000", 0, None, None, 1)
+    # (t, x0, y0, x1, y1, fam, wt, it, px, col, block, hlevel, href, after, bg) - html_source._to_doc's shape
+    return (text, x0, y0, x1, y1, "Roboto", 400, False, px, "#000000", 0, None, None, 1, "")
 
 
 def test_to_doc_plus_measure_finds_the_content_columns_left_right():
@@ -20,3 +20,21 @@ def test_to_doc_plus_measure_finds_the_content_columns_left_right():
     assert doc.pages[0].left == 430
     assert doc.pages[0].right == 960
     assert doc.body_size == 12.0  # 16 CSS px -> pt (x 0.75)
+
+
+def test_an_aem_authoring_url_is_read_as_the_plain_content_page():
+    """AEM's /editor.html/… (and the classic /cf#/…) shell holds the guide in an iframe: the crawl finds
+    no left navigation and no links there and stops after one page, so the whole PDF ends up compared
+    against a single page. Both wrappers are stripped back to the page's own URL."""
+    base = "http://139.59.13.139:4502"
+    assert html_source.content_url(f"{base}/editor.html/content/guide/consumer/eye-careu/en/copyright.html") == \
+        f"{base}/content/guide/consumer/eye-careu/en/copyright.html"
+    assert html_source.content_url(f"{base}/editor.html/content/guide/x/en/a.html?wcmmode=disabled") == \
+        f"{base}/content/guide/x/en/a.html?wcmmode=disabled"
+    assert html_source.content_url(f"{base}/cf#/content/guide/x/en/a.html") == f"{base}/content/guide/x/en/a.html"
+
+
+def test_a_plain_page_url_is_left_alone():
+    for u in ("https://docs.example.com/manual/sl04", "https://x.test/content/guide/en/a.html?v=2",
+              "http://h:4502/content/editor.html.detail/a.html"):
+        assert html_source.content_url(u) == u

@@ -118,6 +118,8 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     if labels:  # "Tips" -> "TIPS:", "Note" -> "NOTE:" is house style, not a content change
         normalize.fold_labels(A, labels)
         normalize.fold_labels(B, labels)
+        normalize.fold_label_icons(A)  # a one-letter icon drawn as text right before the label ("i Note")
+        normalize.fold_label_icons(B)  # is the icon's artwork, not wording - a DOM candidate has no such word
     if cfg["content"].get("ignore_xref_page_numbers", True):  # `"Title" on page 12` vs `"Title"`: template
         normalize.fold_xref_pages(A)
         normalize.fold_xref_pages(B)
@@ -1168,6 +1170,8 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
                      progress=lambda f, m: report(0.3 + 0.7 * f, m))
     # where the run's time went: the capture's phases (html_source) and the comparison itself
     result["meta"]["timing"] = {**(info.get("timing") or {}), "compare_s": round(_time.monotonic() - t0, 1)}
+    if info.get("crawl_warning"):
+        result["meta"]["crawl_warning"] = info["crawl_warning"]
     if site:  # left navigation, download PDF, next/previous, on this page, product subtitle
         from . import site_nav
         try:

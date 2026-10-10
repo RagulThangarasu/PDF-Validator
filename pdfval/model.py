@@ -13,6 +13,8 @@ class Style:
     italic: bool
     size: float  # pt
     color: str  # #rrggbb
+    bg: str = ""  # #rrggbb of a highlight painted behind the word (inline background); "" = none.
+                  # Only ever set for a web page read from the DOM; a PDF leaves it empty.
 
     def css(self) -> str:
         it = " italic" if self.italic else ""

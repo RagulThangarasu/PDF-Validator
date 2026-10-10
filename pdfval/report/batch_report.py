@@ -65,6 +65,7 @@ def rows(jobs: list[dict], runs_dir: Path) -> list[dict]:
             "seconds": round(secs) if secs is not None else None,
             "image_issues": img["issues"] if img else None, "image_result": img["result"] if img else "",
             "message": "" if j["status"] == "done" else j.get("message", ""),
+            "by_category": sm.get("by_category") or {},
         })
     out.sort(key=lambda r: (r["match_pct"] is None, r["match_pct"] if r["match_pct"] is not None else 0, r["product"].lower()))
     return out
@@ -105,6 +106,23 @@ def _img(r: dict) -> str:
     return ""
 
 
+# the category label shown in the consolidated report: what kind of issue it is, not the internal check name
+_CAT_LABEL = {"content": "content", "images": "image", "tables": "table", "toc": "TOC",
+             "structure": "structure", "links": "hyperlink", "css": "layout"}
+
+
+def _cats(r: dict) -> str:
+    """What this product's issues actually are, by category (e.g. "image 5 · hyperlink 2 · table 3"):
+    the breakdown a reader needs to tell an image problem from a hyperlink or layout one at a glance,
+    instead of one combined count. Empty categories are left out; nothing found at all shows a dash."""
+    cats = r["by_category"] or {}
+    parts = [(cat, c.get("total") or 0) for cat, c in cats.items() if c.get("total")]
+    if not parts:
+        return f'<span style="color:{GREY}">—</span>' if r["status"] == "done" else ""
+    parts.sort(key=lambda kv: -kv[1])
+    return " · ".join(f"{_CAT_LABEL.get(cat, cat)} {n}" for cat, n in parts)
+
+
 def build_pdf(batch: str, rs: list[dict], out: str | Path) -> Path:
     t = totals(rs)
     fmt = lambda v: "—" if v is None else f"{v:.2f} %"
@@ -116,11 +134,12 @@ Content match = share of the prod words found unchanged in stage (missing, chang
 <tr><td>{t['products']}</td><td>{t['done']}</td><td style="color:{RED if t['error'] else '#1d2330'}">{t['error']}</td><td>{t['pending']}</td>
 <td><b>{fmt(t['average'])}</b></td><td>{fmt(t['median'])}</td><td>{_dur(t['seconds'])}</td></tr></table>
 <h2>Products</h2>
-<table><tr><th class="n">#</th><th>Product</th><th class="n">Content match</th><th class="n">CSS issues</th>
+<table><tr><th class="n">#</th><th>Product</th><th class="n">Content match</th><th>Issues by category</th><th class="n">CSS issues</th>
 <th>Image issues</th><th class="n">Run time</th><th>Run</th></tr>"""]
     for k, r in enumerate(rs, 1):
         note = f'<br/><span style="color:{RED}">{escape(r["status"])}: {escape(r["message"][:160])}</span>' if r["message"] else ""
         html.append(f'<tr><td class="n">{k}</td><td>{escape(r["product"])}{note}</td><td class="n">{_pct(r)}</td>'
+                    f'<td>{_cats(r)}</td>'
                     f'<td class="n">{r["css"] if r["css"] is not None else ""}</td><td>{_img(r)}</td><td class="n">{_dur(r["seconds"])}</td>'
                     f'<td class="muted">{escape(r["run"])}</td></tr>')
     html.append("</table>")

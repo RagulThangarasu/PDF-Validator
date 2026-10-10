@@ -105,6 +105,31 @@ def fold_labels(doc, labels: list[str]) -> int:
     return n
 
 
+def fold_label_icons(doc) -> int:
+    """A callout icon drawn as a single real character ("i" for an info circle, bold, oversized)
+    right before the label it introduces - "i Note" - is part of the icon's artwork, not its
+    wording: a DOM-based candidate has no such character (its icon is an image/SVG), so comparing
+    it as a word always reports it missing. Taken out of the comparison (word.norm = "", as a
+    bullet glyph already is) whenever it directly precedes a word folded to <label:...> by
+    fold_labels: on the same page, immediately to its left and vertically overlapping it (own
+    line index is unreliable here - an icon's oversized glyph often lands its own line even
+    though it visually sits beside the label). The label itself still compares normally. Returns
+    the number cleared."""
+    n = 0
+    for i, w in enumerate(doc.words):
+        if i == 0 or not w.norm.startswith("<label:"):
+            continue
+        prev = doc.words[i - 1]
+        if prev.page != w.page or not prev.norm or prev.norm.startswith("<label:"):
+            continue
+        overlap = min(prev.bbox[3], w.bbox[3]) - max(prev.bbox[1], w.bbox[1])
+        if (len(prev.norm) == 1 and prev.norm.isalpha()
+                and 0 <= w.bbox[0] - prev.bbox[2] < 1.5 * (prev.bbox[3] - prev.bbox[1]) and overlap > 0):
+            prev.norm = ""
+            n += 1
+    return n
+
+
 _CLOSE_QUOTE = ('"', "”", "’", "'", "»")
 
 

@@ -19,6 +19,55 @@ VIEWER = Path(__file__).with_name("viewer.html")
 DEFERRED = ("report.pdf", "css-issues.pdf")
 
 
+# the consolidated report: the issue reports, in this order, merged into one file named after the prod PDF.
+# report.pdf is left out on purpose - it is the exhaustive internal report (coverage, style map, every
+# passing section) and would duplicate most of what is here at twice the size.
+_CONSOLIDATED = (("genuine-issues.pdf", "Issues — content, design spec and layout"),
+                 ("css-issues.pdf", "CSS and typography (PDF side)"),
+                 ("image-issues.pdf", "Pictures — numbers, labels, artwork"),
+                 ("site.pdf", "Site checks — navigation, links, layout, CSS per page"))
+
+
+def report_name(result: dict) -> str:
+    """The prod PDF's own name, for the consolidated report's file name: a reader with twenty manuals to
+    get through should see which one a report belongs to without opening it."""
+    meta = result.get("meta") or {}
+    stem = Path((meta.get("baseline") or {}).get("path") or "").stem or (meta.get("name") or "validation")
+    safe = "".join(ch if (ch.isalnum() or ch in " ._-") else "-" for ch in stem).strip(" .-")
+    return (safe or "validation")[:120]
+
+
+def write_consolidated(result: dict, out_dir: str | Path) -> Path | None:
+    """One PDF per run, named after the prod PDF: every issue report merged in order, each part a
+    bookmark so the reader can jump to it. Returns None when no part was built (a clean run)."""
+    import pymupdf
+
+    out = Path(out_dir)
+    parts = [(out / f, title) for f, title in _CONSOLIDATED if (out / f).exists()]
+    if not parts:
+        return None
+    path = out / f"{report_name(result)}-validation-report.pdf"
+    path.unlink(missing_ok=True)  # never merge a previous run's copy into this one
+    merged, toc = pymupdf.open(), []
+    try:
+        for src_path, title in parts:
+            with pymupdf.open(src_path) as src:
+                if not src.page_count:
+                    continue
+                toc.append([1, title, merged.page_count + 1])
+                merged.insert_pdf(src)
+        if not merged.page_count:
+            return None
+        merged.set_toc(toc)
+        merged.save(str(path), garbage=3, deflate=True)
+    finally:
+        merged.close()
+    # the viewer offers it for download by name: recorded here so the page never has to guess how the
+    # prod PDF's name was turned into a file name
+    result.setdefault("meta", {})["consolidated"] = path.name
+    return path
+
+
 def image_summary(result: dict) -> dict:
     """{"issues": n, "result": "pass" | "fail"} of the image report: PASS = no image issue."""
     from . import image_report
@@ -82,7 +131,11 @@ def write_pdf_report(result: dict, out_dir: str | Path) -> Path | None:
     pass needs no report, and one left from an earlier run is removed."""
     out = Path(out_dir)
     assign_bug_ids(result)
-    if not (result.get("summary") or {}).get("genuine", {}).get("total"):
+    # a web run whose only issues are against the design spec (fonts, sizes, line heights, spacing, layout)
+    # still has a bug report to write: those are reported here too, so "no content issue" is not "no issue"
+    spec_issues = any(r["group"] in ("typography", "layout") and r["status"] in ("fail", "warn")
+                      for r in (result.get("site") or {}).get("rows", []))
+    if not (result.get("summary") or {}).get("genuine", {}).get("total") and not spec_issues:
         (out / "genuine-issues.pdf").unlink(missing_ok=True)
         (out / "genuine-issues.docx").unlink(missing_ok=True)
         return None
@@ -135,6 +188,12 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
         write_csv(result["site"], out / "site-navigation.csv")
         from . import site_report
         site_report.build(result, out)
+        # the AEM site review's own report: only missing / broken / GUID links and lists out of the
+        # text margin (removed when the run has none of them)
+        from . import aem_site_report
+        aem_site_report.build(result, out)
+    report(0.997, "Building consolidated report")
+    write_consolidated(result, out)  # one file per run, named after the prod PDF
     (out / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
     (out / "junit.xml").write_text(junit(result), encoding="utf-8")
     (out / "summary.md").write_text(markdown(result), encoding="utf-8")
@@ -155,6 +214,7 @@ def build_deferred(run_dir: str | Path, name: str) -> Path:
             pdf_report.build(result, out, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
     result["meta"]["deferred"] = []
     result["meta"]["screenshots"] = "all"
+    write_consolidated(result, out)  # the deferred parts exist now: fold them into the one-file report
     (out / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
     write_viewer(result, out)
     return out / name
@@ -188,6 +248,17 @@ def write_genuine_csv(result: dict, path: Path) -> Path:
                     w.writerow([f.get("bug", ""), f["id"], s["title"], f.get("issue") or f.get("check", ""), pdf_report.SEV_LABEL.get(f["severity"], f["severity"]).lower(), pa, pc, a.get("topic", ""), guid,
                                 a.get("element", ""), a.get("url", ""), f.get("description") or f.get("message", ""),
                                 f.get("why", ""), shots.get("baseline", ""), shots.get("candidate", "")])
+        # the live page's CSS / layout against the design spec (site_nav): the same Bug_NNN numbers, in the
+        # same file - they were in site-navigation.csv only, which a reader of the bug list never opens
+        for r in (result.get("site") or {}).get("rows", []):
+            if r["group"] not in ("typography", "layout") or r["status"] not in ("fail", "warn"):
+                continue
+            w.writerow([r.get("bug", ""), "", r.get("page", ""), r["item"], r["status"], "", "", "", "",
+                        r.get("where", ""), "",
+                        f'Design spec: expected {r["expected"] or "—"}, stage has {r["actual"] or "—"}'
+                        + (f' — “{r["note"]}”' if r.get("note") else ""),
+                        "The page must match the Figma design spec (font, size, line height, colour, spacing).",
+                        "", ""])
     return path
 
 
