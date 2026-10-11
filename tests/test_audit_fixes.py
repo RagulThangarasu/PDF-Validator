@@ -331,10 +331,30 @@ def test_pdf_report_order_content_links_formatting_css():
     s1 = {"id": "s1", "title": "One", "findings": [f("style", "css"), f("layout", "css"), f("integrity", "links"),
                                                    f("content", "content"), f("assets", "images")]}
     s2 = {"id": "s2", "title": "Two", "findings": [f("content", "content"), f("tables", "tables")]}
-    got = [(group_of(x), s["id"]) for s, x in select_issues({"sections": [s1, s2]})]
+    every = {"sections": [s1, s2], "meta": {"report": {"exclude_groups": []}}}
+    got = [(group_of(x), s["id"]) for s, x in select_issues(every)]
     assert [g for g, _ in got] == sorted((g for g, _ in got), key=GROUP_ORDER.get)
     assert got[:2] == [("content", "s1"), ("content", "s2")] and got[-1] == ("css", "s1")
     assert ("formatting", "s1") in got and len(got) == 7  # layout is formatting, not CSS; nothing dropped
+
+
+def test_the_formatting_group_is_left_out_of_the_reports_by_default():
+    """[report] exclude_groups (default ["formatting"]): the group is not listed, and the groups that
+    are get renumbered - CSS is "4. CSS", not "5. CSS". Pictures are their own group and stay in:
+    nothing else reports them. The findings themselves are untouched."""
+    from pdfval.report.pdf_report import group_number, group_of, select_issues
+    f = lambda check, cat: {"check": check, "category": cat, "severity": "info", "message": "m", "types": []}
+    s1 = {"id": "s1", "title": "One", "findings": [f("style", "css"), f("layout", "css"), f("tables", "tables"),
+                                                   f("integrity", "links"), f("content", "content"),
+                                                   f("assets", "images")]}
+    got = {group_of(x) for _, x in select_issues({"sections": [s1]})}
+    assert got == {"content", "links", "images", "css"}  # formatting (layout, tables) left out
+    assert group_number("images", {"formatting"})[:2] == (3, "Images")
+    assert group_number("css", {"formatting"})[:2] == (4, "CSS")
+    assert group_number("css", set())[:2] == (5, "CSS")
+    # still every group when the run's config asks for them
+    with_all = select_issues({"sections": [s1], "meta": {"report": {"exclude_groups": []}}})
+    assert "formatting" in {group_of(x) for _, x in with_all}
 
 
 def _package_list(path, rows_b, bold_item: str = ""):

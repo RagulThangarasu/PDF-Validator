@@ -139,13 +139,14 @@ def d_section_duplicated(doc):
     doc.set_toc(toc)
 
 
+# "link to wrong section" (d_link_wrong_target) is not planted here any more: where a WORKING link
+# lands is not reported at all ([ignore] types) - only a link that does not work, or is gone.
 DEFECTS = {
     "missing word": (d_missing_word, {"Data missing"}),
     "extra text": (d_extra_text, {"Extra content"}),
     "missing space": (d_missing_space, {"Space after a word differs"}),
     "missing punctuation": (d_missing_punct, {"Punctuation differs"}),
     "link removed": (d_link_removed, {"Link not working"}),
-    "link to wrong section": (d_link_wrong_target, {"Link to wrong section"}),
     "image removed": (d_image_removed, {"Image missing", "Image / icon broken"}),
     "image replaced": (d_image_replaced, {"Different image"}),
     "table row removed": (d_row_removed, {"Table row missing"}),

@@ -1,8 +1,11 @@
-"""Site validation report (site.pdf): every left-nav, link, pager, image, table and CSS-vs-spec check
-the site run captured (pdfval/site_nav.py). Fail/warn rows are cards (status label, one-line expectation,
-page, and a screenshot crop of the issue when it points at one page element) in a muted palette - pale
-tint backgrounds and thin borders, not solid colour fills; pass rows are compact single lines, so every
-pass is still in the report without burying the issues that matter under them.
+"""Site validation report (site.pdf): the site run's own TOC/pager checklist - Left navigation (the
+whole TOC) and next/previous pager - captured by pdfval/site_nav.py. Everything else the site run also
+checks (navigation/content links, Download PDF, "On this page", breadcrumb, product subtitle, layout /
+pictures, CSS vs the design spec) is still run and still counted in results.json; it is just not printed
+here (SKIP_GROUPS, below). Fail/warn rows are cards (status label, one-line expectation, page, and a
+screenshot crop of the issue when it points at one page element) in a muted palette - pale tint
+backgrounds and thin borders, not solid colour fills; pass rows are compact single lines, so every pass
+is still in the report without burying the issues that matter under them.
 """
 from __future__ import annotations
 
@@ -118,11 +121,22 @@ def _card(r: dict, out_dir: Path, idx: int, cache: dict) -> tuple[str, int]:
     return html, idx
 
 
+# The groups the site report prints: TOC (left navigation) and next / previous pager - everything else
+# (navigation/content links, Download PDF, "On this page", breadcrumb, product subtitle, layout/pictures,
+# CSS vs the design spec) is still run and still counted in the run's own summary and results.json - only
+# this report leaves it out, so putting any of it back is this one list.
+SKIP_GROUPS = {"links", "download", "otp", "breadcrumb", "subtitle", "typography", "layout"}
+
+
+def report_groups() -> list[tuple[str, str]]:
+    return [g for g in site_nav.GROUPS if g[0] not in SKIP_GROUPS]
+
+
 def build(result: dict, out_dir: str | Path, *, progress: Callable[[float, str], None] | None = None,
           filename: str = "site.pdf", title: str = "Site validation report",
           groups: list[tuple[str, str]] | None = None) -> Path | None:
     """One PDF for the whole site run: a summary dashboard, then every group (left navigation, links,
-    pager, on this page, page layout and pictures, breadcrumb, CSS vs the design spec, ...) with its
+    pager, on this page, breadcrumb, ...) with its
     fail/warn rows as cards (with a screenshot crop when the row points at one page element) and its
     pass rows as compact lines. Removed when the run has no site rows (a plain PDF-vs-PDF compare)."""
     report = progress or (lambda f, m: None)
@@ -135,22 +149,27 @@ def build(result: dict, out_dir: str | Path, *, progress: Callable[[float, str],
         return None
     sm = site.get("summary") or {}
     counts = sm.get("groups") or {}
+    shown = groups or report_groups()
+    # the dashboard counts what this report actually prints: the run's own summary still counts the
+    # groups left out (SKIP_GROUPS), and a header reading "12 fail" above no failing row is a bug report
+    gids = {g for g, _ in shown}
+    tally = {k: sum((counts.get(g) or {}).get(k, 0) for g in gids) for k in ("fail", "warn", "pass")}
+    worst = "fail" if tally["fail"] else "warn" if tally["warn"] else "pass"
     meta = result.get("meta") or {}
     candidate = ((meta.get("candidate") or {}).get("url") or (meta.get("candidate") or {}).get("path") or "")
-    overall = STATUS.get(sm.get("status"), STATUS["info"])
     html = [
         f"<h1>{escape(title)}</h1>"
         f"<p class='subtitle'>{escape(candidate)} · generated {escape(meta.get('generated', ''))}</p>"
         "<table class='dash'><tr><th>Result</th><th>Pages</th><th>Fail</th><th>Warn</th><th>Pass</th></tr>"
-        f"<tr><td style='color:{overall['text']}'>{str(sm.get('status', '')).upper()}</td>"
+        f"<tr><td style='color:{STATUS[worst]['text']}'>{worst.upper()}</td>"
         f"<td>{sm.get('pages', 0)}</td>"
-        f"<td style='color:{STATUS['fail']['text']}'>{sm.get('fail', 0)}</td>"
-        f"<td style='color:{STATUS['warn']['text']}'>{sm.get('warn', 0)}</td>"
-        f"<td style='color:{STATUS['pass']['text']}'>{sm.get('pass', 0)}</td></tr></table>",
+        f"<td style='color:{STATUS['fail']['text']}'>{tally['fail']}</td>"
+        f"<td style='color:{STATUS['warn']['text']}'>{tally['warn']}</td>"
+        f"<td style='color:{STATUS['pass']['text']}'>{tally['pass']}</td></tr></table>",
     ]
     cache: dict = {}
     idx = 0
-    for gid, label in (groups or site_nav.GROUPS):
+    for gid, label in shown:
         grows = [r for r in rows if r["group"] == gid]
         if not grows:
             continue

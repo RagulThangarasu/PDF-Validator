@@ -25,6 +25,26 @@ _LEADER = re.compile(r"(\.\s*){3,}\d*$")  # TOC dot leaders (+ page number)
 _NUMBERING = re.compile(r"^(\d+(\.\d+)*\.?|[A-Z]\.)\s+")
 
 
+def _script_chars() -> dict[str, str]:
+    """Characters that are raised or lowered by their code point alone - the Unicode superscript and
+    subscript forms: “²”, “ⁿ”, “º”, “ᵒ”, “ʼ”, “₂”, “ₒ”, “™”. NFKC folds each to its base letters
+    (“²” → “2”, “ᵒ” → “o”, “™” → “TM”), which is what the word comparison wants, but on its own that
+    also loses the fact that one side set the character raised or lowered. Reading the script off the
+    code point keeps it - in any language, whatever font the PDF used, and whether or not the PDF
+    bothered to set the character in a smaller span above the baseline (extract.py reads that too)."""
+    out = {}
+    for cp in range(0x20, 0x3000):
+        d = unicodedata.decomposition(chr(cp))
+        if d.startswith("<super>"):
+            out[chr(cp)] = "^"
+        elif d.startswith("<sub>"):
+            out[chr(cp)] = "_"
+    return out
+
+
+SCRIPT_CHARS = _script_chars()
+
+
 # Scripts written without spaces between words (Chinese, Japanese kana, Thai, Lao, Myanmar, Khmer,
 # CJK and full-width punctuation): each character is compared as its own word, so a missing or
 # changed character is reported as exactly that, not as the whole sentence changed.
@@ -54,11 +74,22 @@ def join_words(words) -> str:
             or (wrapped and w.text.endswith("\u00ad"))  # "But­" | "ton’s": one word hyphenated at the line break
         if not glued:
             out.append(" ")
-    return clean("".join(out), typography=False)  # keep ’ vs ' visible: it may be the difference
+    return display("".join(out))  # keep ’ vs ', ™ and ² visible: they may be the difference
 
 
 _WIDE = re.compile("[\u3000-\u303F\uFF00-\uFFEF]")
 _KEEP_WIDTH = re.compile("[\u3000-\u303F\uFF00-\uFFEF]+|[^\u3000-\u303F\uFF00-\uFFEF]+")
+
+
+_ARABIC_FORMS = re.compile("[\uFB50-\uFDFF\uFE70-\uFEFF]+")
+
+
+def display(text: str) -> str:
+    """Text as the reader sees it, for a report message: no NFKC, so “USB-C™” is not printed as
+    “USB-CTM”, “H₂O” not as “H2O” and “Nº” not as “No”. Only Arabic presentation forms (glyph
+    shapes of the same letters, unreadable one by one) are folded, and invisible characters dropped."""
+    text = _ARABIC_FORMS.sub(lambda m: unicodedata.normalize("NFKC", m.group()), text).translate(_INVISIBLE)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def clean(text: str, typography: bool | str = True) -> str:
@@ -101,6 +132,38 @@ def fold_labels(doc, labels: list[str]) -> int:
             base = base[:-1]
         if base in known:
             w.norm = f"<label:{base}>"
+            n += 1
+    return n
+
+
+# Each language's own name for itself (autonym), as a multi-language manual's language-divider
+# caption or page-margin tab actually prints it - "简体中文" not "Chinese (Simplified)", "English"
+# not "Anglais". Shared by sections.py (keeps such a caption out of the no-outline heading
+# fallback) and fold_language_captions below (keeps a page-margin tab out of the content diff).
+LANGUAGE_NAMES = {
+    "english", "简体中文", "繁體中文", "日本語", "한국어", "ภาษาไทย", "tiếng việt", "bahasa indonesia",
+    "bahasa melayu", "deutsch", "français", "español", "italiano", "português", "nederlands",
+    "polski", "русский", "türkçe", "العربية", "עברית", "ελληνικά", "čeština", "magyar", "română",
+    "svenska", "norsk", "dansk", "suomi",
+}
+
+
+def norm_lang(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def fold_language_captions(doc) -> int:
+    """A multi-language manual bundled as one PDF often marks each language's pages with a tab in
+    the page margin - a rotated "English" / "日本語" running the height of the sidebar - standing on
+    its own line, not part of a sentence. It is real extractable text, so without this it compares
+    like any other word: a DOM-based stage page has no such tab (its language is a dropdown, not
+    printed text), so every one of these pages reports "Missing text" for a word that was never
+    meant to be read as content. Taken out of the comparison (word.norm = "") whenever a whole line
+    is exactly a language's own name. Returns the number cleared."""
+    n = 0
+    for w in doc.words:
+        if w.norm and norm_lang(doc.lines[w.line].text) in LANGUAGE_NAMES:
+            w.norm = ""
             n += 1
     return n
 

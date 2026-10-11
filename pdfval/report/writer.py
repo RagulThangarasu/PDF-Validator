@@ -16,16 +16,15 @@ VIEWER = Path(__file__).with_name("viewer.html")
 
 
 # built when first opened (batch runs): the full report and the CSS report, with every finding's screenshot
-DEFERRED = ("report.pdf", "css-issues.pdf")
+DEFERRED = ("report.pdf",)
 
 
 # the consolidated report: the issue reports, in this order, merged into one file named after the prod PDF.
 # report.pdf is left out on purpose - it is the exhaustive internal report (coverage, style map, every
-# passing section) and would duplicate most of what is here at twice the size.
+# passing section) and would duplicate most of what is here at twice the size. site.pdf is left out too -
+# a site run's own TOC/pager/CSS/layout checklist is a separate deliverable, not folded into this one.
 _CONSOLIDATED = (("genuine-issues.pdf", "Issues — content, design spec and layout"),
-                 ("css-issues.pdf", "CSS and typography (PDF side)"),
-                 ("image-issues.pdf", "Pictures — numbers, labels, artwork"),
-                 ("site.pdf", "Site checks — navigation, links, layout, CSS per page"))
+                 ("image-issues.pdf", "Pictures — numbers, labels, artwork"))
 
 
 def report_name(result: dict) -> str:
@@ -35,6 +34,94 @@ def report_name(result: dict) -> str:
     stem = Path((meta.get("baseline") or {}).get("path") or "").stem or (meta.get("name") or "validation")
     safe = "".join(ch if (ch.isalnum() or ch in " ._-") else "-" for ch in stem).strip(" .-")
     return (safe or "validation")[:120]
+
+
+_TYPESCALE_HEADING = "Design spec (Figma)"
+
+
+def _typescale_vocabulary(result: dict) -> tuple[set[str], set[str]]:
+    """(style names, every other cell the Figma table can print), taken from the spec the report was
+    built against - so a page is recognised as part of that table by its own data, not by guesswork."""
+    styles = ((result.get("meta") or {}).get("typography") or {}).get("styles") or []
+    names, cells = set(), set()
+    for st in styles:
+        name = str(st.get("style") or "").strip()
+        if not name:
+            continue
+        names.add(name)
+        cells.add(str(st.get("font") or "").strip())
+        weight = str(st.get("weight") or "").strip()
+        cells |= {weight, f"{weight}, underlined"}
+        for key in ("size", "line_height"):
+            if isinstance(st.get(key), (int, float)):
+                cells.add(f"{st[key]:g} pt")
+        cells.add(str(st.get("color") or "").strip())
+    return names, {c for c in cells if c}
+
+
+def _is_typescale_continuation(page, names: set[str], cells: set[str]) -> bool:
+    """True when the page holds nothing but more rows of that table (it runs over the page break).
+
+    Every line must be one the table itself prints: a style name, one of its cells, the "Stage (actual)"
+    column (always "x · y · z" or "not used in stage"), or the page footer. One line that is none of
+    those and the page is left alone - a real page is never dropped to tidy up a table.
+    """
+    blocks = page.get_text("blocks")
+    # the footer (page number + product name) is on every page: found by its own text, then everything
+    # from there down is ignored, so the product name is not mistaken for something outside the table
+    foot = min([b[1] for b in blocks if "page " in b[4] and " of " in b[4]], default=page.rect.y1)
+    lines = [ln.strip() for b in blocks if b[3] <= foot + 1 for ln in b[4].splitlines() if ln.strip()]
+    if not lines or not any(ln in names for ln in lines):
+        return False
+    for ln in lines:
+        if ln in names or ln in cells or " · " in ln or ln == "not used in stage":
+            continue
+        return False  # something that is not part of the table: keep the page
+    return True
+
+
+def strip_typescale(doc, result: dict) -> list[int]:
+    """Leave the Figma design-spec table in the consolidated copy ONCE and take out the repeats.
+    Returns the 0-based pages that were dropped, so bookmarks can be moved with them.
+
+    Each merged part carries its own copy, so the table used to be taken out altogether - which also
+    took the design spec (the font, weight, size, line height and colour each style must have) out of
+    the one file the reviewer is handed. The first copy is kept and the rest dropped instead.
+
+    The table is not on a page of its own: it sits at the foot of a report's summary page and runs over
+    onto the next. So the block is redacted where it starts, and a page that is only its continuation is
+    dropped. Nothing is reflowed - the summary page simply ends where the table began.
+    """
+    import pymupdf
+
+    names, cells = _typescale_vocabulary(result)
+    if not names:
+        return []
+    drop, n, kept = [], 0, False
+    while n < doc.page_count:
+        page = doc[n]
+        hits = page.search_for(_TYPESCALE_HEADING)
+        if not hits:
+            n += 1
+            continue
+        if not kept:  # the first copy stays, with the pages it continues onto
+            kept = True
+            n += 1
+            while n < doc.page_count and _is_typescale_continuation(doc[n], names, cells):
+                n += 1
+            continue
+        top = min(r.y0 for r in hits) - 2
+        # down to the footer line, so the page number at the bottom survives
+        feet = [b[1] for b in page.get_text("blocks") if "page " in b[4] and " of " in b[4] and b[1] > top]
+        page.add_redact_annot(pymupdf.Rect(page.rect.x0, top, page.rect.x1, min(feet or [page.rect.y1]) - 2))
+        page.apply_redactions()
+        n += 1
+        while n < doc.page_count and _is_typescale_continuation(doc[n], names, cells):
+            drop.append(n)
+            n += 1
+    if drop:
+        doc.delete_pages(drop)
+    return drop
 
 
 def write_consolidated(result: dict, out_dir: str | Path) -> Path | None:
@@ -58,7 +145,13 @@ def write_consolidated(result: dict, out_dir: str | Path) -> Path | None:
                 merged.insert_pdf(src)
         if not merged.page_count:
             return None
-        merged.set_toc(toc)
+        # the Figma type scale is reference material for the typography findings: useful in the report that
+        # raises them, repeated once per merged part here - so it is left out of the consolidated file only
+        dropped = strip_typescale(merged, result)
+        # a bookmark points at a page number: move it up by however many pages went before it
+        for entry in toc:
+            entry[2] -= sum(1 for d in dropped if d < entry[2] - 1)
+        merged.set_toc([t for t in toc if 1 <= t[2] <= merged.page_count])
         merged.save(str(path), garbage=3, deflate=True)
     finally:
         merged.close()
@@ -69,19 +162,31 @@ def write_consolidated(result: dict, out_dir: str | Path) -> Path | None:
 
 
 def image_summary(result: dict) -> dict:
-    """{"issues": n, "result": "pass" | "fail"} of the image report: PASS = no image issue."""
+    """{"issues": n, "result": "pass" | "fail"}: PASS = no image issue, or a publication whose content
+    matches prod to within [content] pass_pct.
+
+    A product scoring above pass_pct reads PASS everywhere, the picture verdict included - the issue
+    count is still carried in "issues" and the image report is still built, so nothing is hidden, it is
+    just not called a failure. (`result: "fail" if n else "pass"` restores counting alone.)
+    """
     from . import image_report
     n = len(image_report.issues(result))
-    return {"issues": n, "result": "fail" if n else "pass"}
+    content = ((result.get("summary") or {}).get("content") or {})
+    pct, pass_pct = content.get("match_pct"), content.get("pass_pct", 95.0)
+    passes = n == 0 or (pct is not None and pct >= pass_pct)
+    return {"issues": n, "result": "pass" if passes else "fail"}
 
 
 def write_image_report(result: dict, out_dir: str | Path) -> Path | None:
-    """The image report (image-issues.pdf) - only when the publication has image issues (FAIL): a PASS needs no
-    report, and one left from an earlier run is removed. The verdict goes into the summary (consolidated report)."""
+    """The image report (image-issues.pdf) - whenever the run found something about a picture, however
+    well the text scores. The verdict in the summary is another question: a publication whose content
+    matches prod still reads PASS (image_summary), but a picture issue that exists has to be in a
+    report somebody is handed. Only a run with no picture issue at all writes none, and one left from
+    an earlier run is removed."""
     from . import image_report
     out = Path(out_dir)
     result.setdefault("summary", {})["images"] = sm = image_summary(result)
-    if sm["result"] == "pass":
+    if not sm["issues"]:
         (out / "image-issues.pdf").unlink(missing_ok=True)
         return None
     return image_report.build(result, out)
@@ -138,9 +243,11 @@ def write_pdf_report(result: dict, out_dir: str | Path) -> Path | None:
     if not (result.get("summary") or {}).get("genuine", {}).get("total") and not spec_issues:
         (out / "genuine-issues.pdf").unlink(missing_ok=True)
         (out / "genuine-issues.docx").unlink(missing_ok=True)
+        (out / "content.docx").unlink(missing_ok=True)
         return None
     path = pdf_report.build(result, out, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
     write_docx_report(result, out)
+    write_content_report(result, out)   # content.docx: the content review on its own
     return path
 
 
@@ -155,12 +262,39 @@ def write_docx_report(result: dict, out_dir: str | Path) -> Path | None:
         return None
 
 
+def write_content_report(result: dict, out_dir: str | Path) -> Path | None:
+    """content.docx - the content review on its own: text missing from or added to stage, bold / italic on
+    one side only, hyperlinks that do not work or that arrive somewhere else, and how the text is aligned.
+    Nothing about pictures, tables, the TOC, fonts, colours, sizes or spacing (pdf_report.CONTENT_TYPES).
+
+    Every issue carries its Expected (prod) and Actual (stage) text, as in the other Word report.
+    Removed when a run has none of these issues, so an empty file never has to be opened."""
+    out = Path(out_dir)
+    path = out / "content.docx"
+    try:
+        from . import docx_report, pdf_report
+    except ImportError:
+        return None
+    if not pdf_report.select_issues(result, pdf_report.CONTENT_REPORT["filter"], None):
+        path.unlink(missing_ok=True)
+        return None
+    try:
+        return docx_report.build(result, out, "content.docx", options=pdf_report.CONTENT_REPORT,
+                                 title="Content report", groups=docx_report.CONTENT_GROUPS,
+                                 bucket=docx_report.content_bucket, extras=False)
+    except ImportError:
+        return None
+
+
 def write_all(result: dict, out_dir: str, shots: str = "all",
               progress: Callable[[float, str], None] | None = None, full: bool = True) -> Path:
     """shots: all | warnings | errors | reports | none — which findings get prod/stage screenshots
     (and therefore appear with images in report.pdf). progress(fraction, message) is optional.
     full=False (batch runs): only the genuine-issues and image reports are built now, with their
-    screenshots; report.pdf and css-issues.pdf are built by build_deferred() when first opened."""
+    screenshots; report.pdf is built by build_deferred() when first opened.
+
+    There is no CSS report: fonts, sizes, colours and line heights are not validated as a deliverable
+    of their own. CSS findings are still produced and still live in results.json and report.pdf."""
     report = progress or (lambda f, m: None)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -178,9 +312,6 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
     report(0.98, "Building PDF report (issues)")
     write_pdf_report(result, out)
     write_genuine_csv(result, out / "genuine-issues.csv")
-    if full:
-        report(0.99, "Building CSS report")
-        pdf_report.build(result, out, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
     report(0.995, "Building image report")
     write_image_report(result, out)  # pictures only: missing numbers / labels / leader lines, overlay, pixelated
     if (result.get("site") or {}).get("rows"):
@@ -210,8 +341,6 @@ def build_deferred(run_dir: str | Path, name: str) -> Path:
     for n in result["meta"].get("deferred", []):
         if n == "report.pdf":
             pdf_report.build(result, out)
-        elif n == "css-issues.pdf":
-            pdf_report.build(result, out, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
     result["meta"]["deferred"] = []
     result["meta"]["screenshots"] = "all"
     write_consolidated(result, out)  # the deferred parts exist now: fold them into the one-file report
@@ -380,11 +509,11 @@ def markdown(result: dict) -> str:
     elif site.get("error"):
         lines += ["## Site navigation", "", f"Not checked: {site['error']}", ""]
     lines += ["## Sections", "",
-              "| Section | Status | Content % | Missing / extra | Critical | CSS issues |",
-              "|---|---|---:|---:|---:|---:|"]
+              "| Section | Status | Content % | Missing / extra | Critical |",
+              "|---|---|---:|---:|---:|"]
     for s in result["sections"]:
         lines.append(f"| {s['title']} | {s['status']} | {s['content']['match_pct']:.2f}% ({s['content']['status']}) | "
-                     f"{s['content']['missing_words']} / {s['content']['extra_words']} | {s['critical']} | {s['css']['issues']} |")
+                     f"{s['content']['missing_words']} / {s['content']['extra_words']} | {s['critical']} |")
     lines += ["", "## Global style map (prod → stage)", "", "| Role | Prod | Stage | Words | Sections |", "|---|---|---|---:|---:|"]
     for m in result["style_map"]:
         lines.append(f"| {m['role']} | {m['baseline']} | {m['candidate']} | {m['words']} | {m['sections']} |")

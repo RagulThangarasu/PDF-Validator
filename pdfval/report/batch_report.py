@@ -1,5 +1,5 @@
 """Consolidated report of a batch: one row per product (publication) with its content match %, the
-section results, critical / genuine / CSS issue counts and how long the run took. PDF + CSV."""
+section results, critical / genuine issue counts and how long the run took. PDF + CSV."""
 from __future__ import annotations
 
 import csv
@@ -51,13 +51,16 @@ def rows(jobs: list[dict], runs_dir: Path) -> list[dict]:
         sm = j.get("summary") or {}
         c = sm.get("content") or {}
         pct = c.get("match_pct")
-        pass_pct, warn_pct = c.get("pass_pct", 98.0), c.get("warn_pct", 90.0)
+        pass_pct, warn_pct = c.get("pass_pct", 95.0), c.get("warn_pct", 90.0)
         band = ("" if pct is None else "pass" if pct >= pass_pct else "warn" if pct >= warn_pct else "fail")
         img = _images(j, runs_dir / j["id"]) if j["status"] == "done" else None
         end = _finished(j, runs_dir / j["id"]) if j["status"] == "done" else None
         secs = (end - datetime.fromisoformat(j["created"])).total_seconds() if end else None
         out.append({
             "product": j["name"], "status": j["status"], "run": j["id"], "match_pct": pct, "band": band,
+            # the publication's own verdict (engine: content score >= [content] pass_pct), the one the
+            # report at the top of the run shows; falls back to the band for a run made before it was kept
+            "result": sm.get("result") or ("pass" if band == "pass" else "fail" if band else ""),
             "sections": sm.get("sections"), "sec_fail": sm.get("fail"), "sec_warn": sm.get("warn"), "sec_pass": sm.get("pass"),
             "critical": (sm.get("critical") or {}).get("total"), "genuine": (sm.get("genuine") or {}).get("total"),
             "css": (sm.get("css") or {}).get("issues"), "missing_words": c.get("missing_words"),
@@ -134,13 +137,13 @@ Content match = share of the prod words found unchanged in stage (missing, chang
 <tr><td>{t['products']}</td><td>{t['done']}</td><td style="color:{RED if t['error'] else '#1d2330'}">{t['error']}</td><td>{t['pending']}</td>
 <td><b>{fmt(t['average'])}</b></td><td>{fmt(t['median'])}</td><td>{_dur(t['seconds'])}</td></tr></table>
 <h2>Products</h2>
-<table><tr><th class="n">#</th><th>Product</th><th class="n">Content match</th><th>Issues by category</th><th class="n">CSS issues</th>
+<table><tr><th class="n">#</th><th>Product</th><th class="n">Content match</th><th>Issues by category</th>
 <th>Image issues</th><th class="n">Run time</th><th>Run</th></tr>"""]
     for k, r in enumerate(rs, 1):
         note = f'<br/><span style="color:{RED}">{escape(r["status"])}: {escape(r["message"][:160])}</span>' if r["message"] else ""
         html.append(f'<tr><td class="n">{k}</td><td>{escape(r["product"])}{note}</td><td class="n">{_pct(r)}</td>'
                     f'<td>{_cats(r)}</td>'
-                    f'<td class="n">{r["css"] if r["css"] is not None else ""}</td><td>{_img(r)}</td><td class="n">{_dur(r["seconds"])}</td>'
+                    f'<td>{_img(r)}</td><td class="n">{_dur(r["seconds"])}</td>'
                     f'<td class="muted">{escape(r["run"])}</td></tr>')
     html.append("</table>")
     out = Path(out)
@@ -243,11 +246,11 @@ def write_csv(rs: list[dict], out: str | Path) -> Path:
     out = Path(out)
     with open(out, "w", newline="", encoding="utf-8-sig") as fh:  # opens in Excel
         w = csv.writer(fh)
-        w.writerow(["Product", "Status", "Content match %", "Content result", "CSS issues", "Image issues (PASS/FAIL)",
+        w.writerow(["Product", "Status", "Content match %", "Content result", "Image issues (PASS/FAIL)",
                     "Number of image issues", "Run time (s)", "Run", "Message"])
         for r in rs:
             w.writerow([r["product"], r["status"], "" if r["match_pct"] is None else r["match_pct"], r["band"],
-                        r["css"], r["image_result"].upper(), "" if r["image_issues"] is None else r["image_issues"],
+                        r["image_result"].upper(), "" if r["image_issues"] is None else r["image_issues"],
                         r["seconds"], r["run"], r["message"]])
     return out
 

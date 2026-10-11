@@ -28,6 +28,7 @@ class Unit:
     similarity: float = 1.0
     content: dict = field(default_factory=dict)  # content % and word counts, set by the content check
     image_pairs: list = field(default_factory=list)  # (prod Image, stage Image) matched by the assets check
+    drawn_pairs: list = field(default_factory=list)  # ... the same, where prod draws the picture as vector artwork
     # same word on both sides although its text differs (case/punctuation/changed block):
     # not a content match, but its style can still be compared
     style_pairs: list[tuple[int, int]] = field(default_factory=list)
@@ -166,4 +167,4 @@ from . import joined, brackets, highlights, assets, content, integrity, layout, 
 # content must run first: it produces the word pairs every other check relies on;
 # placement needs the image pairs from assets
 PIPELINE = [content.check, joined.check, brackets.check, highlights.check, style.check, typography.check, layout.check, rows.check, tables.check, assets.check, inline_icons.check,
-            placement.check, picture_rows.check, integrity.check]
+            placement.check, picture_rows.check, picture_rows.picture_text_rows, integrity.check]

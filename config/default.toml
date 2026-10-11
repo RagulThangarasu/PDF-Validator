@@ -25,6 +25,8 @@ page_scope = true             # web page vs PDF: validate only the top-level (L1
 skip = []                     # regexes on normalised titles to exclude, e.g. ['^table of contents?$']
 missing_severity = "error"
 extra_severity = "warning"
+duplicate_severity = "error"        # a heading stage repeats more often than prod: a genuine duplicate
+duplicate_both_severity = "warning" # ...repeated as often as in prod: reported for the record, not a genuine issue
 level_severity = "warning"
 outline_only_severity = "warning"   # heading text exists on both sides, only the PDF bookmark differs
 
@@ -40,7 +42,7 @@ outline_only_severity = "warning"   # heading text exists on both sides, only th
 issue_weight_pct = 0.1        # score = 100 % - 0.1 % for each issue in the PDF report (genuine + image issues)
                               # a section scoring >= pass_pct passes: shown as 100 %, its issues are not subtracted
                               # (in the section or in the document's score)
-pass_pct = 98.0               # score % >= pass_pct            -> content PASS
+pass_pct = 95.0               # score % >= pass_pct            -> content PASS
 warn_pct = 90.0               # warn_pct <= score % < pass_pct -> content WARN, below -> FAIL
 critical_missing_words = 8    # a missing block of >= N prod words is flagged CRITICAL
 case_sensitive = true
@@ -71,8 +73,11 @@ label_words = ["note", "tip", "hint", "warning", "important", "caution", "danger
 # A note with only its icon (no label) means the label its icon stands for: a stage label that matches prod's
 # icon is not "a label on one side only"; one that does not is "callout type differs" (icon kinds: callout_icons.py)
 callout_icons = { pencil = ["note"], lightbulb = ["tip"], exclamation = ["important"], triangle = ["warning"] }
-check_callout_icon_label = false  # icons are only compared for look, size, broken/missing and pixelation -
-                                   # not for which callout label they imply
+check_callout_icon_label = true   # a note set with only its icon means the label that icon stands for:
+                                   # a pencil is a NOTE, a lightbulb a TIP, an exclamation mark IMPORTANT,
+                                   # a triangle a WARNING. The stage label is then compared with prod's
+                                   # icon - the same one is house style (an info note, not a difference),
+                                   # another one is "callout type differs"
 min_diff_words = 1
 severity = "warning"          # individual text diffs (they are counted in the %)
 spacing_severity = "warning"
@@ -120,6 +125,13 @@ check_header_align = true     # table header cells (dark header bar): text must 
                               # (design spec) - flags centred / right-aligned / indented headers
 header_align_tolerance = 4.0  # pt the text may sit off the column centre
 header_align_severity = "error"
+check_cell_align = true       # every row of a table column, its header rows included, must start at the
+                              # same left edge - whatever cell padding the column uses. Reported when they
+                              # do not: header rows at the cell border while the data is indented, one
+                              # header row indented and the next not, or a column whose text is centred
+cell_align_tolerance = 4.0    # pt two left edges may differ by and still count as the same edge
+cell_align_severity = "error"
+cell_align_min_rows = 3       # filled cells a column needs before its left edge is judged
 check_single_column_center = true  # a table with only one column (not a multi-column data table - a key /
                               # single-field layout): its cell text (header and data) must be centred, not
                               # left-aligned - the opposite rule from a normal multi-column table's header
@@ -143,6 +155,11 @@ validate_deeper_levels = true # an entry on a level prod's TOC does not list (st
 min_entries = 4               # a page is a TOC page when it has >= N "Title ...... 12" lines
 max_front_fraction = 0.25     # ... and sits in the first 25 % of the document
 title_match_threshold = 0.8   # fuzzy score to pair prod and stage entries
+compare_sequence_always = false  # the order of the entries is compared only when PROD prints a table
+                              # of contents. With no printed TOC, prod's entries come from its PDF bookmarks
+                              # (document order, not a printed list), so stage listing them in another order
+                              # is not a TOC defect - content that moved is reported by the content checks.
+                              # true = compare the order whatever each side's TOC comes from
 
 [toc.severity]
 "level differs" = "warning"
@@ -204,6 +221,14 @@ ignore_bullet_glyph = true    # a list item marked "•" in one PDF and "-" (or 
 bullet_tolerance_em = 0.3     # marker position / marker-text gap / hanging indent may differ by this much (em)
 bullet_intro_max_gap_em = 2.0 # the line introducing a list must be this close above it (em); a list with none
                               # (e.g. first list in a table cell) is checked for its items lining up with each other
+check_picture_rows = true     # pictures set side by side on one row in prod (a 2 x 2 grid of product views) must
+                              # be side by side in stage too - and ones prod stacks must not be set in a row
+check_picture_text_rows = true  # a picture and the text that belongs to it side by side in prod ("1. Connect your
+                              # camera ..." in the right-hand column, the drawing in the left) must stay side by
+                              # side in stage: stacking the step text above / below its picture is a layout
+                              # difference the reader sees (and the reverse, stage setting a stacked pair in a row)
+picture_text_min_words = 4    # ... only for a block of at least this many words standing beside the picture
+picture_text_min_share = 0.3  # ... still a row when this share of those words is beside the picture on the other side
 
 [layout.severity]
 text-align = "error"
@@ -212,6 +237,7 @@ line-height = "warning"
 space-above = "warning"
 placement = "warning"
 line-wrap = "warning"
+"text beside picture" = "error"
 
 [assets]
 blurred_ratio = 0.35          # stage picture blurred: its edge sharpness is below this share of prod's
@@ -237,9 +263,13 @@ marks_max_share = 0.1         # ... and they cover at most this share of the pic
 aspect_tolerance = 0.05       # 5 %
 distorted_tolerance = 0.25    # stage draws a picture >= 25 % out of its own pixel proportions (prod does not)
                               # = stretched / squashed (genuine)
-width_tolerance = 0.10        # 10 % of content width
-size_ratio_tolerance = 0.05   # or stage picture >= 5 % smaller / bigger than prod (image size differs) - either
-                              # direction, so nothing under 5 % is noise and nothing over 5 % is missed
+# A picture's size is reported whenever it is noticeably different, not only when it is grossly so:
+# the stage picture at 95 % of the prod picture's width or less, or at 105 % or more. The two settings
+# are OR-ed, so width_tolerance has to stay out of the way (1.0 = a share of the content box that cannot
+# be exceeded) or it would fire first and the ratio below would never decide anything.
+width_tolerance = 1.0         # off: the ratio decides (0.10 = also report a 10 %-of-content-width shift)
+size_ratio_tolerance = 0.05   # stage picture <= 95 % or >= 105 % of prod's width (image size differs) - either
+                              # direction, smaller or bigger - every size change this size or over is reported
 # The picture issues reported (every report): missing (or not loading), a different picture (not the same picture
 # with / without a red overlay or re-captured: "image marks" / "image version" are not reported), blacked out,
 # pixelated, distorted, duplicated, alignment (a complete move left <-> right only), a picture in the wrong section,
@@ -296,6 +326,12 @@ full_page_shots = true        # PDF report screenshots: the whole prod page and 
 max_locs = 40                 # highlight boxes per finding
 max_findings_per_check = 0    # per check and section; 0 = no cap, every finding is reported (a cap only ever
                               # thins CSS / layout findings: critical and genuine issues are always kept)
+# Issue groups left out of the PDF reports' grouped issue listing (report.pdf, the genuine-issues and
+# CSS reports): "content", "links", "formatting" (sections and headings, tables, images, TOC, layout,
+# bullets and lists) or "css". The remaining groups are renumbered, so dropping "formatting" leaves
+# 1. Content, 2. Links, 3. CSS. [] = every group. The findings themselves are still produced and still
+# in results.json, the CSVs and the site report - this only decides what the PDF reports list.
+exclude_groups = ["formatting"]
 
 [html]                        # web page (URL) as the candidate
 crawl = true                  # validate every page of the guide: follow the start page's links to the other
@@ -314,13 +350,13 @@ report_types = [
   # the PDF does not have. Not how it is worded (a changed word, spacing, case, punctuation, the same
   # content twice): that is not checked for a web guide, its text comes from the live DOM
   "missing text", "extra text", "missing section", "extra section",
-  # pictures: gone from the page, or shown under a different heading than in the PDF
-  "missing image", "image in wrong section",
-  # pictures rendered at another size than the same picture in the PDF (oversized / tiny)
-  "image bigger", "image smaller",
-  # pictures sitting differently in the text column (left / centred / right / full width), and an icon
-  # centred on its paragraph on one side but at its first line on the other
-  "image alignment", "image vertical alignment",
+  # pictures: only whether the picture is there at all - one of the PDF's pictures missing from the page,
+  # or one the page shows but cannot load (broken). A web page lays its pictures out responsively, so how
+  # a picture is sized, placed or scaled is NOT validated for a site: not which heading it sits under
+  # ("image in wrong section"), not its size against the PDF's ("image bigger" / "image smaller"), not
+  # where it sits in the text column ("image alignment" / "image vertical alignment"), not its sharpness
+  # ("image pixelated") - add any of those back here to report them again.
+  "missing image", "broken image",
 ]
 
 [site]                        # web page runs: the chrome around the content (see pdfval/site_nav.py)
@@ -335,8 +371,8 @@ enabled = true                # left navigation vs the PDF's L1 TOC, its links, 
 # every crumb's link opens and lands on the right page - no broken link, no wrong redirect, and the
 # first crumb names the product), and the page's
 # live CSS vs config/typography.toml [typography.formats.html_web] (font, weight incl. bold missing, size,
-# line height, colour, table header alignment, callout title upper case), and pictures centred (design spec:
-# "Image rules" - alignment is always centre, on every format), the table component's style
+# line height, colour, table header alignment, callout title upper case), pictures present (a picture that
+# does not load or has collapsed - not how it is aligned, sized or scaled), the table component's style
 # ([typography.formats.html_web.table]: header bar, border, cell padding, corner radius). Every
 # fail/warn row with a page screenshot
 # gets a cropped image of the issue in site.pdf. Everything below is an older check, not on that list: off by
@@ -345,9 +381,15 @@ check_download = false        # the Download PDF button / file
 check_pager = true            # next / previous topic links (first page: no "previous"; last page: no "next")
 check_otp = true               # "On this page": shown only with h3/h4 on the page, each entry jumps to it
 check_subtitle = false        # product subtitle in the header
-check_picture_alignment = true   # pictures on one page at inconsistent left/center/right alignment
-check_image_center = true      # design spec: every picture is centred - independent of what the rest of the
+# Pictures on a site are checked for one thing only: is the picture there? A picture that does not load
+# or has collapsed to nothing is reported; how it is aligned, sized or scaled on the page is not (a web
+# page lays its pictures out responsively). Flip either of these to true to bring the alignment checks
+# back, and see [site] check_picture_layout for size / scaling.
+check_picture_alignment = false  # pictures on one page at inconsistent left/center/right alignment
+check_image_center = false     # design spec: every picture is centred - independent of what the rest of the
                               # page's pictures do (check_picture_alignment above only catches inconsistency)
+check_picture_layout = false   # a picture stretched, enlarged past its own resolution (blurred) or running
+                              # outside its area: how it is laid out, not whether it is there
 check_breadcrumb = true        # breadcrumb present above the H1, its links open and land on the right page
 check_breadcrumb_product = true  # the trail starts with the product name ("<product> > ... > <page>"),
                               # not straight at the page
@@ -396,15 +438,27 @@ report_visually_present = false   # text drawn into a stage picture (label in pi
 types = [
   # content differences
   "missing text", "extra text", "changed text", "case", "punctuation", "case + punctuation", "spacing",
+  # Other languages: a punctuation-only difference that is NOT the ASCII quote/dash style the house
+  # ignores ("punctuation" in [ignore] types) - the wrong character in that script, which the reader sees:
+  "punctuation character",   # "，" vs ",", "（" vs "(", "。" vs ".": CJK / full-width punctuation
+  "diacritic",               # a mark above or below a letter on one side only: Arabic harakat, Thai tone
+                             # mark, Hebrew niqqud (marks that do not compose into their letter)
+  "superscript character",   # "m²" vs "m2", "H₂O" vs "H2O", "Nº" vs "No", "USB-C™" vs "USB-CTM": another
+                             # character on each side, raised or lowered only on one - the reader sees it
   "superscript", "paragraph break", "content in wrong section", "duplicate content",
   "missing section", "duplicate section", "extra section",
+  # ("repeated section" - a heading repeated as often in stage as in prod - stays out: it is prod's own repetition)
   "heading text",                           # the same section under a heading with other words / another number
   "emphasis",                                                        # bold / italic missing (or added)
   "text highlight",                 # a phrase published with an editing highlight still on it (web guide only)
   "label joined",                                                    # bold label + its plain text on one line (prod: 2 lines)
   # hyperlinks
-  "broken link", "missing link", "extra link", "link to wrong section", "link target differs",
-  "link lands elsewhere", "link page number", "page zero",   # “on page 0”: a cross-reference that did not resolve
+  "broken link", "missing link", "extra link", "link target differs",
+  "link lands elsewhere",   # a working link that arrives somewhere else than prod's does (content.docx)
+  "spec text-align",        # body text centred / right-aligned where the design spec left-aligns it
+  "spec font-weight",       # a style set lighter / heavier than the design spec (Figma) asks for
+  "page zero",   # “on page 0”: a cross-reference that did not resolve
+  # (not "link to wrong section" / "link page number": see [ignore] types)
   # lists: 1, 2, 3 instead of a, b, c, bullets missing / different
   "bullet", "bullet marker", "numbering style", "numbering format", "numbering sequence", "marker glued",
   # (not "indent" - bullet position / gap to the text / hanging indent: full report only)
@@ -426,9 +480,15 @@ types = [
   "stacked to columns",   # a list broken into columns: text stacked in prod, side by side in stage
   "list alignment",       # the numbers of one numbered list at one left edge in prod, at different indents in stage
   "picture row",          # a picture grid laid out differently: side by side in prod, stacked in stage (or the reverse)
+  "text beside picture",  # a picture and its step text side by side in prod, stacked one above the other in stage
   # tables: header (missing / not left-aligned), rows and cells merged or split
-  "missing header", "table header alignment", "single column alignment", "rows merged", "row split", "cells merged", "cells split",
+  "missing header", "single column alignment", "rows merged", "row split", "cells merged", "cells split",
+  "table cell alignment",   # the rows of one table column at different left edges (header rows vs data rows)
+  # (not "table header alignment" - how a header's text sits in its column: see [ignore] types)
   "missing row", "missing table", "tables merged", "cell differs",
+  "extra row", "extra table", "table split",      # a row / a table only stage has, one prod table broken in two
+  "table to text", "text to table",               # a table published as plain text (or the reverse)
+  "row order",       # the rows of a prod table in another order in stage: the sequence the reader reads
   "icon missing inline", "icon differs", "icon pixelated",   # icons inside a sentence: missing, another icon, low resolution
   "caption row",                            # captions of one row of pictures: level in prod, not in stage
   "missing image label",                    # a picture's caption / label missing in stage: live text that
@@ -449,7 +509,16 @@ exclude_checks = []           # checks whose findings never go into the genuine 
 # Left out of the validation entirely (not in any report).
 types = [
   "row background", "cell background",      # table interior background colours
+  # Where a working link lands. A hyperlink is checked for whether it works, not for which heading or
+  # page it arrives at: the PDF and the site number their pages differently, so these fire on documents
+  # whose links are all fine. "broken link" / "missing link" still report a link that does not work.
   "link page number",                       # page numbers printed next to hyperlinks ("… on page 12")
+  "link to wrong section",                  # judged on the section the link arrives in
+  # How a table header's text sits in its column. Left-aligned in the PDF is fine, centred is fine:
+  # the design spec's rule is not something a reader of the manual notices, and it fired on tables
+  # that are otherwise correct. The header's TEXT is still compared like any other content, and a
+  # header missing from stage is still "missing header".
+  "table header alignment",
   "repeated header", "continued header",    # table headers repeated across page breaks: expected
   "table width", "column width",            # table widths follow the DITA rendering rules
   "table border", "table border added",     # table layout: borders drawn by the template
@@ -461,14 +530,20 @@ types = [
   "line-wrap",
   # (not "row alignment": items side by side on one row in prod - “1. Front Table” | “2. Rear Table” - that are
   # at different heights in stage are reported)
-  "spec font-size", "spec font-family", "spec font-weight", "spec color", "spec line-height", "spec text-decoration",
-  "spec text-align", "spec bullet", "spec list numbering", "spec callout title", "spec callout background",
+  "spec font-size", "spec font-family", "spec color", "spec line-height", "spec text-decoration",
+  # (not "spec font-weight": a heading or a label set Regular where the design spec wants Bold - or the
+  #  other way round - is what the reader sees first, so it is reported, see [genuine] types)
+  # (not "spec text-align": body text centred or right-aligned where the spec left-aligns it is an
+  #  alignment difference the reader sees - it is reported, and content.docx is built around it)
+  "spec bullet", "spec list numbering", "spec callout title", "spec callout background",
   "spec callout content", "spec callout icon", "spec cover", "spec page margin", "spec page size", "spec pagination",
   "spec page structure",
   # images: text drawn into a picture is not reported (a picture softer than prod's - "image blurred" - is)
   "text as graphic",
   "size / aspect",                          # the same picture at another width / aspect ratio (1.43 -> 1.34): layout
-  "superscript",                            # the same text raised / not raised (MacBook® vs MacBook^®): looks the same
+  "superscript",                            # the SAME character, raised by the typesetter on one side only
+                                            # (MacBook® vs MacBook^®): looks the same. Another character on each
+                                            # side is "superscript character" - reported, see [genuine] types
   "case", "punctuation", "case + punctuation",  # uppercase/lowercase and punctuation-only wording differences
   "callout style",                          # a note drawn another way throughout (bar vs filled box): house style
   "order differs",                          # a section moved to another position: its content is still there

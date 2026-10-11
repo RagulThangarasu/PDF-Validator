@@ -248,8 +248,6 @@ class Jobs:
             writer.write_genuine_csv(result, run_dir / "genuine-issues.csv")
             writer.write_viewer(result, run_dir)
             writer.write_pdf_report(result, run_dir)
-            if (run_dir / "css-issues.pdf").exists():  # a batch run builds it when first opened
-                pdf_report.build(result, run_dir, options=pdf_report.CSS_REPORT, filename="css-issues.pdf")
             writer.write_image_report(result, run_dir)
             if (run_dir / "report.pdf").exists():
                 from ..report import shots as shotmod
@@ -534,9 +532,11 @@ def _batches(jobs: Jobs) -> list[dict]:
 
 
 def _batch_zip(jobs: Jobs, bid: str) -> Path:
-    """One zip with the PDF report (genuine issues), its Word version and the image report of every finished product
-    of the batch, named after the product: "<product> - PDF report.pdf", "<product> - PDF report.docx",
-    "<product> - Image report.pdf". A product with no
+    """One zip with the batch's consolidated report over all publications ("Consolidated report - all
+    publications.pdf" / ".csv": one row per product with its content match %, including the ones that
+    passed cleanly), then the PDF report (genuine issues), its Word version and the image report of every
+    finished product of the batch, named after the product: "<product> - PDF report.pdf",
+    "<product> - PDF report.docx", "<product> - Image report.pdf". A product with no
     genuine issues has no PDF report, one with no image issues has no image report - never an empty "0 issues" file."""
     import tempfile
     import zipfile
@@ -547,6 +547,16 @@ def _batch_zip(jobs: Jobs, bid: str) -> Path:
     os.close(fd)
     used: set[str] = set()
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        # the whole batch on one page first: every publication with its content match %, the runs that
+        # passed cleanly included - they have no report of their own further down
+        try:
+            cpdf, ccsv = _batch_consolidated(jobs, bid)
+            for f, name in ((cpdf, "Consolidated report - all publications.pdf"),
+                            (ccsv, "Consolidated report - all publications.csv")):
+                if Path(f).exists():
+                    z.write(f, name)
+        except Exception:
+            traceback.print_exc()  # a zip without the overview is still worth having
         for j in sorted(runs, key=lambda j: j["name"].lower()):
             if j["status"] != "done":
                 continue
@@ -578,10 +588,14 @@ def _batch_zip(jobs: Jobs, bid: str) -> Path:
                         res = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
                         writer.assign_bug_ids(res)
                         writer.write_docx_report(res, run_dir)
+                        writer.write_content_report(res, run_dir)
                 except Exception:
                     traceback.print_exc()
                 if word.exists():
                     z.write(word, f"{name} - PDF report.docx")
+                content = run_dir / "content.docx"
+                if content.exists():
+                    z.write(content, f"{name} - Content report.docx")
             if img.exists():
                 z.write(img, f"{name} - Image report.pdf")
     return Path(tmp)

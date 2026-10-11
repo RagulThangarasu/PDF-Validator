@@ -514,3 +514,29 @@ def test_the_aem_site_report_holds_only_the_four_issues(tmp_path, serve):
     # a run with none of the four leaves no empty report behind
     clean = {"meta": r["meta"], "sections": [], "site": {"rows": [], "summary": {}}}
     assert aem_site_report.build(clean, out) is None and not (out / "aem-site-issues.csv").exists()
+
+
+def test_a_sites_pictures_are_only_checked_for_being_there(tmp_path, serve):
+    """A web page lays its pictures out responsively, so a site run asks one thing of a picture: is it
+    there? A picture that does not load is reported; one that is left-aligned, stretched or scaled up
+    is not - those are print-layout rules that do not apply to a page the browser reflows."""
+    extra = ('<p>Pictures of the SX1000.</p>'
+             '<img src="nope-missing.png" width="200" height="120" alt="broken">'
+             '<img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"'
+             '     style="display:block;margin:0;width:300px;height:60px" alt="stretched and left">')
+    pdf = make_site(tmp_path, extra_body=extra)
+    r = compare_url(str(pdf), serve + "overview.html", str(tmp_path / "run"), load_config())
+    rows = [row for row in r["site"]["rows"] if row["group"] == "layout"]
+    items = {row["item"] for row in rows if row["status"] in ("fail", "warn")}
+    assert "Picture not loaded" in items, rows                      # it is not there: reported
+    assert not items & {"Picture alignment", "Picture alignment (design spec)",
+                        "Picture stretched", "Picture enlarged (blurred)", "Picture outside its area"}, items
+
+
+def test_a_web_run_reports_a_picture_only_as_missing_or_broken():
+    """[html] report_types: a web guide's picture issues are existence only - not size, placement,
+    sharpness or which heading the picture sits under."""
+    types = set(load_config()["html"]["report_types"])
+    assert {"missing image", "broken image"} <= types
+    assert not types & {"image in wrong section", "image bigger", "image smaller", "image alignment",
+                        "image vertical alignment", "image pixelated", "image changed", "placement"}

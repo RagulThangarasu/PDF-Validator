@@ -95,6 +95,26 @@ def _reset_caches() -> None:
     inline_icons.reset()
 
 
+def beside_or_below(w, hw) -> bool:
+    """True when the word `w` sits beside the heading word `hw` or under it - not on a line above it.
+
+    A heading in one column with its section's text in the other is read after that text, so the words
+    right before a heading that do not lie above it start its section too (pull_back).
+
+    Judged on the two top edges, with a margin of half w's own type size: a glyph box is far taller
+    than the type it holds - in CJK text about two and a half times - so a window measured from the
+    boxes' heights reached a whole line above the heading. That swallowed the last line of the previous
+    section into this one, and the next heading's window swallowed the line above it - a note at the
+    foot of this section - out of it: the one came out as content in the wrong section, the other as
+    missing here and extra there, although both documents had the text exactly where it belongs. Two
+    tops line up for text set beside a heading however the font inflates its boxes, and the margin is
+    the type's own size, not the box's.
+    """
+    margin = 0.5 * (getattr(w.style, "size", 0) or (w.bbox[3] - w.bbox[1]) / 2)
+    return w.bbox[1] > hw.bbox[1] - margin
+
+
+
 def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str | None = None,
             progress: Callable[[float, str], None] | None = None, candidate_doc: Doc | None = None,
             candidate_meta: dict | None = None) -> dict:
@@ -123,6 +143,8 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     if cfg["content"].get("ignore_xref_page_numbers", True):  # `"Title" on page 12` vs `"Title"`: template
         normalize.fold_xref_pages(A)
         normalize.fold_xref_pages(B)
+    normalize.fold_language_captions(A)  # a page-margin language tab ("English") is layout, not content
+    normalize.fold_language_captions(B)
     report(0.4, "Matching sections")
     # the printed table of contents is compared on its own (levels, entries, page numbers);
     # its text is taken out of the content diff (page numbers shift with every layout change)
@@ -205,9 +227,8 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
         if anchor is None or not getattr(anchor, "located", True) or not 0 < w < len(D.words):
             return w
         hw = D.words[w]
-        top = hw.bbox[1] - 0.5 * (hw.bbox[3] - hw.bbox[1])
         k = w
-        while k - 1 > floor and D.words[k - 1].page == hw.page and D.words[k - 1].bbox[1] >= top:
+        while k - 1 > floor and D.words[k - 1].page == hw.page and beside_or_below(D.words[k - 1], hw):
             k -= 1
         return k
 
@@ -350,20 +371,33 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     count_b = Counter(an.norm for an in anB)
     pos_b = lambda k: (B.words[k].page, B.words[k].bbox[1]) if k < len(B.words) else (len(B.pages), 0.0)
     dup_spans: list[tuple[tuple, tuple, Finding]] = []  # stage (page, y) start, end of a duplicate copy
+    first_b: dict[str, int] = {}
     for j, an in enumerate(anB):
-        # a duplicate copies a prod section: a heading prod does not have (e.g. "Structure" repeated
-        # under every menu chapter in stage, plain text in prod) is an extra section, not a duplicate
-        if j not in matched_b and count_b[an.norm] > count_a[an.norm] >= 1 and count_b[an.norm] >= 2:
-            first = next(x for x in anB if x.norm == an.norm)
+        first_b.setdefault(an.norm, j)
+    for j, an in enumerate(anB):
+        # every heading stage repeats is reported: the copies after the first one. More copies than prod
+        # has (prod has the section once, or not at all) is a genuine duplicate; the same number of copies
+        # on both sides is prod's own repetition, reported for the record only (not a genuine issue)
+        if (count_b[an.norm] >= 2 and j != first_b[an.norm]
+                and (j not in matched_b or count_b[an.norm] == count_a[an.norm])):
+            excess = count_b[an.norm] > count_a[an.norm]
+            first = anB[first_b[an.norm]]
+            in_prod = (f"but {count_a[an.norm]} time(s) in prod" if count_a[an.norm]
+                       else "and not at all in prod")
             struct[unit_for("b", an.word).id].append(Finding(
-                "structure", cfg["sections"].get("duplicate_severity", "error"),
+                "structure", cfg["sections"].get("duplicate_severity", "error") if excess
+                else cfg["sections"].get("duplicate_both_severity", "warning"),
                 f"Duplicate section in stage: “{an.title}” appears {count_b[an.norm]} times in stage "
-                f"but {count_a[an.norm]} time(s) in prod (again on stage p.{an.page + 1}, first on p.{first.page + 1})",
+                + (in_prod if excess else "as in prod")
+                + f" (again on stage p.{an.page + 1}, first on p.{first.page + 1})",
                 [], [locs(B, [an.word])[0]] if an.located else [Loc(an.page, (0, an.y, B.pages[an.page].width, an.y + 20))],
                 detail={"kind": "duplicate-section", "heading": an.title, "anchor_side": "candidate",
-                        "anchor_word": an.word if an.located else None}, critical=True, types=["duplicate section"]))
-            end = min((x.word for x in anB if x.word > an.word), default=len(B.words))
-            dup_spans.append((pos_b(an.word), pos_b(end), struct[unit_for("b", an.word).id][-1]))
+                        "anchor_word": an.word if an.located else None,
+                        "stage_copies": count_b[an.norm], "baseline_copies": count_a[an.norm]},
+                critical=excess, types=["duplicate section"] if excess else ["repeated section"]))
+            if excess:
+                end = min((x.word for x in anB if x.word > an.word), default=len(B.words))
+                dup_spans.append((pos_b(an.word), pos_b(end), struct[unit_for("b", an.word).id][-1]))
             continue
         if j not in matched_b:
             struct[unit_for("b", an.word).id].append(Finding(
@@ -574,7 +608,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
         # --- verdict: the score is 100 % less issue_weight_pct (0.1 %) for each issue in the PDF report;
         # CSS separately, critical always fails
         pct = _issue_score(counted_for_pct, ccfg)
-        content_status = ("pass" if pct >= ccfg.get("pass_pct", 98.0)
+        content_status = ("pass" if pct >= ccfg.get("pass_pct", 95.0)
                           else "warn" if pct >= ccfg.get("warn_pct", 90.0) else "fail")
         # text genuinely absent from stage (not merely moved/reordered), extra text, a missing/broken image
         # or a note-style issue is never cheap enough to pass: at 0.1 % per issue a section would need 20
@@ -632,6 +666,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             "mode": (candidate_meta or {}).get("mode", "pdf"),
             "matched_sections": len(pairs),
             "typography": checks_typography.reference(B, cfg),  # the Figma type scale stage is checked against
+            "report": {"exclude_groups": list(cfg.get("report", {}).get("exclude_groups") or [])},
         },
         "summary": {
             "sections": len(out_sections),
@@ -647,7 +682,7 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                 "extra_words": sum(s["content"].get("extra_words", 0) for s in out_sections),
                 "spacing_issues": sum(s["content"].get("spacing_issues", 0) for s in out_sections),
                 "pass": cstatus["pass"], "warn": cstatus["warn"], "fail": cstatus["fail"],
-                "pass_pct": ccfg.get("pass_pct", 98.0), "warn_pct": ccfg.get("warn_pct", 90.0),
+                "pass_pct": ccfg.get("pass_pct", 95.0), "warn_pct": ccfg.get("warn_pct", 90.0),
             },
             "critical": {"total": sum(crit_kinds.values()), "by_kind": dict(crit_kinds.most_common())},
             "genuine": {"total": sum(s["genuine"] for s in out_sections),
@@ -661,7 +696,13 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
                                 "types": dict(Counter(t for s in out_sections for f in s["findings"]
                                                       if f["category"] == c for t in f["types"]).most_common())}
                             for c in all_categories},
-            "result": "fail" if status["fail"] else "pass",
+            # The publication's own verdict - the metric at the top of a report and the row in the
+            # consolidated / combined reports - follows its content score: at or above [content]
+            # pass_pct the publication PASSES. The sections inside keep their own status, so a section
+            # with a critical issue still reads FAIL in the report where it is listed.
+            # ("fail" if status["fail"] else "pass" = any failing section fails the publication.)
+            "result": ("pass" if _issue_score(sum(s["content"]["counted_issues"] for s in out_sections), ccfg)
+                       >= ccfg.get("pass_pct", 95.0) else "fail"),
         },
         "sync": _monotonic(sync_points, A, B, _scope_end(A, scope)),
         "toc": toc_info,
@@ -1069,6 +1110,7 @@ def _doc_meta(d: Doc, anchors: list[Anchor]) -> dict:
                     "even": [d.pages[min(1, len(d.pages) - 1)].left, round(d.pages[min(1, len(d.pages) - 1)].right, 1)]},
         "removed_header_footer_lines": d.removed_lines,
         "non_latin_script": _non_latin_script(d),
+        "non_latin_pages": _non_latin_pages(d),
         # glyphs of fonts without a Unicode map, read back from the page (OCR + shape)
         **({"decoded_glyphs": d.decoded} if getattr(d, "decoded", None) else {}),
     }
@@ -1079,12 +1121,32 @@ _NON_LATIN_SCRIPT_RE = re.compile(
     "\u0e00-\u0e7f\u0600-\u06ff\u0750-\u077f\u0590-\u05ff\u0900-\u097f]")
 
 
+def _mostly_non_latin(text: str) -> bool:
+    return len(text) >= 20 and len(_NON_LATIN_SCRIPT_RE.findall(text)) > 0.3 * len(text)
+
+
 def _non_latin_script(d: Doc) -> bool:
     """True when the document's own text is mostly a dense non-Latin script (CJK, Thai, Arabic,
     Hebrew, Devanagari, ...): the viewer's bordered highlight boxes get cramped and hard to read
-    character by character on such scripts, so it draws an underline there instead of a full box."""
-    sample = "".join(w.text for w in d.words[:4000])
-    return len(sample) >= 20 and len(_NON_LATIN_SCRIPT_RE.findall(sample)) > 0.3 * len(sample)
+    character by character on such scripts, so it draws an underline there instead of a full box.
+
+    Sampled across the whole document, not off the front: a regulatory booklet opens with pages of
+    English and turns to Chinese later, and sampling only the start called it a Latin document."""
+    step = max(1, len(d.words) // 4000)
+    return _mostly_non_latin("".join(w.text for w in d.words[::step]))
+
+
+def _non_latin_pages(d: Doc) -> list[int]:
+    """The pages whose own text is mostly such a script (0-based).
+
+    One flag for the document is too coarse for the manuals that carry the same safety notice in a
+    dozen languages: its English pages want boxes and its Chinese pages want underlines. The viewer
+    decides per page from this list.
+    """
+    by_page: dict[int, list[str]] = {}
+    for w in d.words:
+        by_page.setdefault(w.page, []).append(w.text)
+    return sorted(p for p, ws in by_page.items() if _mostly_non_latin("".join(ws)))
 
 
 

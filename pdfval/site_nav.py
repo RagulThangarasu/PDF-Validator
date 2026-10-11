@@ -262,7 +262,13 @@ CHROME_JS = r"""
     const r = e.getBoundingClientRect();
     if (r.width < 40) continue;
     const over = Math.max(r.right + scrollX - R[1], R[0] - (r.left + scrollX));
-    const scrolls = /(auto|scroll)/.test(getComputedStyle(e.parentElement || e).overflowX);
+    // a responsive table is deliberately scrollable: the overflow-x:auto/scroll rule can sit on the
+    // element itself or on one of a few wrapper divs around it, not only its immediate parent
+    let scrolls = false;
+    for (let a = e; a; a = a.parentElement) {
+      if (/(auto|scroll)/.test(getComputedStyle(a).overflowX)) { scrolls = true; break; }
+      if (a === root) break;
+    }
     if (over > 4 && !scrolls)
       layout.push({ kind: 'block-overflow', text: (e.tagName.toLowerCase() + (e.className && typeof e.className === 'string' ? '.' + e.className.trim().split(/\s+/)[0] : '')), detail: `runs ${Math.round(over)}px outside the content area: ${txt(e).slice(0, 60)}`, where: path(e), box: box(e) });
   }
@@ -649,13 +655,19 @@ LAYOUT_ISSUE = {"page-scroll": "Page scrolls sideways", "image-broken": "Picture
                 "breadcrumb-overlap": "Breadcrumb / H1 overlap", "empty-page": "Page has only a heading, no content",
                 "hanging-indent": "Wrapped line not indented under the text",
                 "sticky-overlap": "Jump target hidden under sticky header"}
-# kinds always checked (on the active validation list: broken / missing / pixelated images, table/content
-# breaking out of the page); "overlap" and "empty-page" are old checks, off by default - see [site]
-# check_overlap / check_empty_page. "breadcrumb-overlap" follows check_breadcrumb, on by default.
-CORE_LAYOUT_KINDS = {"page-scroll", "image-broken", "image-collapsed", "image-overflow", "image-stretched",
-                      "image-upscaled", "block-overflow", "hanging-indent", "sticky-overlap"}
-_EXTRA_LAYOUT_TOGGLE = {"overlap": "check_overlap", "breadcrumb-overlap": "check_breadcrumb", "empty-page": "check_empty_page"}
-_EXTRA_LAYOUT_DEFAULT = {"overlap": False, "breadcrumb-overlap": True, "empty-page": False}
+# kinds always checked (on the active validation list: a picture that is not there - it did not load or
+# collapsed to nothing - and content breaking out of the page). How a picture is laid out (stretched,
+# enlarged past its own resolution, running outside its area) is NOT checked for a site: a web page lays
+# its pictures out responsively - [site] check_picture_layout = true brings those three back. "overlap"
+# and "empty-page" are old checks, off by default - see [site] check_overlap / check_empty_page.
+# "breadcrumb-overlap" follows check_breadcrumb, on by default.
+CORE_LAYOUT_KINDS = {"page-scroll", "image-broken", "image-collapsed",
+                     "block-overflow", "hanging-indent", "sticky-overlap"}
+_EXTRA_LAYOUT_TOGGLE = {"overlap": "check_overlap", "breadcrumb-overlap": "check_breadcrumb", "empty-page": "check_empty_page",
+                        "image-overflow": "check_picture_layout", "image-stretched": "check_picture_layout",
+                        "image-upscaled": "check_picture_layout"}
+_EXTRA_LAYOUT_DEFAULT = {"overlap": False, "breadcrumb-overlap": True, "empty-page": False,
+                         "image-overflow": False, "image-stretched": False, "image-upscaled": False}
 
 _ROLE_LABEL = {"h1": "Headline 1", "h2": "Headline 2", "h3": "Headline 3", "body_default": "Body default",
                "body_strong": "Body strong", "body_hyperlink": "Body hyperlink", "table_header": "Table header",
@@ -1101,8 +1113,8 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
             if kind not in CORE_LAYOUT_KINDS and not cfg.get(_EXTRA_LAYOUT_TOGGLE.get(kind, ""), _EXTRA_LAYOUT_DEFAULT.get(kind, False)):
                 continue
             rows.append(_row("layout", "fail", LAYOUT_ISSUE.get(kind, kind), "", it.get("text", ""), p["url"],
-                             it.get("detail", ""), it.get("where", ""), shot=shot_of(p, it)))
-        if cfg.get("check_picture_alignment", True):
+                             it.get("detail", ""), it.get("where", ""), shot=shot_of(p, it), kind=kind))
+        if cfg.get("check_picture_alignment", False):
             pics = [im for im in p.get("images") or [] if im["width"] >= 60]  # icons aside
             sides = {im["align"] for im in pics} & {"left", "center", "right"}
             if len(sides) > 1 and len(pics) >= 2:
@@ -1114,7 +1126,7 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
                             rows.append(_row("layout", "warn", "Picture alignment", f"{usual} (as the page's other pictures)", f"{im['name']}: {a}",
                                              p["url"], f"{im['width']}×{im['height']}px, {im['share']}% of the content width", im["where"],
                                              shot=shot_of(p, im)))
-        if cfg.get("check_image_center", True):
+        if cfg.get("check_image_center", False):
             # design spec ("Image rules": Alignment = Center, every format): independent of what the page's
             # other pictures do - a picture left- or right-aligned is wrong even when every picture on the
             # page agrees with it (the relative check above only catches one picture disagreeing with the rest)
@@ -1125,7 +1137,8 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
                                  p["url"], f"{im['width']}×{im['height']}px, {im['share']}% of the content width", im["where"],
                                  shot=shot_of(p, im)))
         if "layout" in p and not [i for i in issues if i["kind"] in CORE_LAYOUT_KINDS]:
-            rows.append(_row("layout", "pass", "Page layout", "", f"{len(p.get('images') or [])} picture(s) checked", p["url"]))
+            rows.append(_row("layout", "pass", "Page layout", "",
+                             f"{len(p.get('images') or [])} picture(s) present", p["url"]))
 
     # ---- links in the content itself: every cross-reference opens (no broken link, no dead anchor).
     # Their text is a phrase in a sentence, not the target page's title, so only that the link opens is

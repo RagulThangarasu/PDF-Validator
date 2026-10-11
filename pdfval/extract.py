@@ -82,6 +82,9 @@ def _line_words(line, decode: dict | None = None) -> list[tuple[str, list[float]
                 c = symbols.get(c, c)
             if decode:  # a glyph of a font without a Unicode map, read back by OCR (glyphs.py)
                 c = decode.get((span["font"], c), c)
+            # a character raised or lowered by its code point ("²", "ᵒ", "₂", "™"): set in the same
+            # span at the same size as its neighbours, so geometry alone never sees it
+            cpos = normalize.SCRIPT_CHARS.get(c, pos) if pos == "." else pos
             if c.isspace():
                 if cur:
                     out.append(cur)
@@ -104,7 +107,7 @@ def _line_words(line, decode: dict | None = None) -> list[tuple[str, list[float]
                     # difference on the word is missed (or wrongly reported) by whatever glued onto its front
                     cur[2] = st
                 cur[0] += c
-                cur[4] += pos
+                cur[4] += cpos
                 b = cur[1]
                 cur[1] = [min(b[0], x0), min(b[1], y0), max(b[2], x1), max(b[3], y1)]
                 continue
@@ -113,7 +116,7 @@ def _line_words(line, decode: dict | None = None) -> list[tuple[str, list[float]
                 out.append(cur)
             elif out:
                 out[-1][3] = 1 if gap < 0 else gap
-            cur, gap = [c, [x0, y0, x1, y1], st, None, pos], 0
+            cur, gap = [c, [x0, y0, x1, y1], st, None, cpos], 0
     if cur:
         out.append(cur)
     for w in out[:-1]:
@@ -283,6 +286,15 @@ def _table_order(lines: list, found: list) -> list:
     and the two sides no longer line up. Lines outside tables keep their order."""
     if not found:
         return lines
+    # Per column, the rows its own cells really span. A row rule is drawn cell by cell and stops at a cell
+    # that spans the row below it, so a boundary that no rule crosses inside a column means the cell there
+    # continues: "SW series" over three rows is one cell, read where its span STARTS - as the same table
+    # reads on the web. Without that, its two wrapped lines fell into two different rows and were read
+    # between the other columns' text ("SW Validation series Monitor validation ..."), which scrambled the
+    # whole table against the other side: rows below it looked like missing and extra content.
+    from .checks.tables import cell_spans
+    spans = [cell_spans(t) for t in found]
+
     def where(ln):
         x0, y0, x1, y1 = ln[1]
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -296,7 +308,8 @@ def _table_order(lines: list, found: list) -> list:
                 lx = x0 + 2
                 c = min(range(len(grid)), key=lambda g: 0 if grid[g][0] - 1 <= lx <= grid[g][1] + 1
                         else min(abs(lx - grid[g][0]), abs(lx - grid[g][1]))) if grid else 0
-                return k, (r if r is not None else len(rows)), c
+                r = r if r is not None else len(rows)
+                return k, (spans[k].get((c, r), r) if spans[k] else r), c
         return None
     placed = [where(ln) for ln in lines]
     rtl = {}

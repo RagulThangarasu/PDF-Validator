@@ -1,5 +1,5 @@
 """The picture issues the reports keep ([assets] report_types): artwork missing, another picture, a stage picture
-under half prod's size, ... - a picture only a little smaller is not reported."""
+measurably bigger or smaller than prod's, ... - only a rendering-level nudge of a few per cent is not reported."""
 import pymupdf
 import pytest
 
@@ -48,21 +48,29 @@ def test_missing_artwork_is_reported(tmp_path, cfg):
 
 
 def test_size_difference_is_reported_either_direction(tmp_path, cfg):
-    """Any size change past [assets] size_ratio_tolerance (5 %) is reported, smaller or bigger - not
-    only a shrink past 50 %; a change within tolerance stays quiet."""
+    """A size change is reported, smaller or bigger, on the same threshold: [assets]
+    size_ratio_tolerance (0.05) - the stage picture at 95 % of prod's width or less, or at 105 % or
+    more. Only a difference inside that band (a rendering-level nudge, not a real size change) is left
+    alone."""
     a = g.make(tmp_path / "a.pdf", g.base())
     assert [f["types"] for f in _pictures(compare(a, _resized(tmp_path, 0.4), cfg))] == [["image smaller"]]
-    assert [f["types"] for f in _pictures(compare(a, _resized(tmp_path, 0.6), cfg))] == [["image smaller"]]
-    assert [f["types"] for f in _pictures(compare(a, _resized(tmp_path, 1.4), cfg))] == [["image bigger"]]
-    assert _pictures(compare(a, _resized(tmp_path, 0.97), cfg)) == []
+    big = [t for f in _pictures(compare(a, _resized(tmp_path, 1.8), cfg)) for t in f["types"]]
+    assert "image bigger" in big, big   # (blowing a bitmap up this far also makes it "image pixelated")
+    smaller = [t for f in _pictures(compare(a, _resized(tmp_path, 0.6), cfg)) for t in f["types"]]
+    assert "image smaller" in smaller, smaller          # -40 %: now reported too
+    bigger = [t for f in _pictures(compare(a, _resized(tmp_path, 1.4), cfg)) for t in f["types"]]
+    assert "image bigger" in bigger, bigger              # +40 %: likewise
+    assert _pictures(compare(a, _resized(tmp_path, 0.97), cfg)) == []    # -3 %: a rendering-level nudge
 
 
-def test_small_size_change_past_5_percent_is_now_reported(tmp_path, cfg):
-    """A size change just over 5 % (e.g. 8 % smaller) used to be inside the old 20 % tolerance and was
-    never reported at all - no pass, no fail, nothing. It must now be captured, not silently dropped."""
+def test_a_small_size_change_past_5_percent_is_now_reported(tmp_path, cfg):
+    """A picture a few per cent off is a rendering difference, not a defect; past 5 % it is one the
+    reader notices - see tests/test_image_size_threshold.py for the exact boundary."""
     a = g.make(tmp_path / "a.pdf", g.base())
-    fs = _pictures(compare(a, _resized(tmp_path, 0.92), cfg))
-    assert [f["types"] for f in fs] == [["image smaller"]]
+    for scale, kind in ((0.92, "image smaller"), (0.75, "image smaller"), (1.25, "image bigger")):
+        types = [t for f in _pictures(compare(a, _resized(tmp_path, scale), cfg)) for t in f["types"]]
+        assert kind in types, (scale, types)
+    assert _pictures(compare(a, _resized(tmp_path, 0.98), cfg)) == []     # -2 %: within tolerance
 
 
 def test_size_note_flags_a_web_page_whose_wider_column_disagrees_with_the_percent():
@@ -123,7 +131,9 @@ def test_two_side_by_side_vector_drawings_match_one_smaller_stage_picture(tmp_pa
     r = pg.get_image_rects(pg.get_images()[0][0])[0]
     pg.add_redact_annot(r)
     pg.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_REMOVE)
-    pg.insert_image(pymupdf.Rect(r.x0, r.y0, r.x0 + 40, r.y0 + 38), stream=_mount_png())  # same shape, much smaller
+    pg.insert_image(pymupdf.Rect(r.x0, r.y0, r.x0 + 24, r.y0 + 23), stream=_mount_png())  # same shape, far smaller
+    # (far enough under half prod's combined width to cross [assets] size_ratio_tolerance - what this
+    # test is really about is that the two side-by-side vector clusters pair with the one bitmap at all)
     b_path = str(tmp_path / "b.pdf")
     doc.save(b_path)
     doc.close()

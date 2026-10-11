@@ -79,9 +79,14 @@ def _from_outline(doc: Doc, scfg: dict) -> list[Anchor]:
     anchors, min_line = [], 0
     tos = getattr(doc, "outline_to", None) or []
     flat = lambda t: "".join(t.lower().split())
-    for n_entry, (level, title, page) in enumerate(doc.outline):
-        if page < 1:
-            continue
+    # Locating walks the lines forward (min_line), so the entries must be visited in document order.
+    # An outline is not always written in that order - a PDF assembled from topics can list a chapter
+    # on page 3 before the ones on pages 1-2 - and taken as given, every later entry would be searched
+    # for past where its heading really is, land unlocated, and hand its pages to the wrong section.
+    # A stable sort by the bookmark's own page fixes that and changes nothing for an ordered outline.
+    entries = [(n, level, title, page) for n, (level, title, page) in enumerate(doc.outline) if page >= 1]
+    entries.sort(key=lambda e: e[3])
+    for pos, (n_entry, level, title, page) in enumerate(entries):
         norm = normalize.title(title)
         to_y = tos[n_entry] if n_entry < len(tos) else None
         best = None
@@ -90,8 +95,7 @@ def _from_outline(doc: Doc, scfg: dict) -> list[Anchor]:
         # the next bookmark's own page (or a configurable cap, for a very distant next bookmark), so this
         # entry can't steal the heading that really belongs to it, and a run-away scan stays bounded
         cap = scfg.get("locate_forward_pages", 60)
-        next_page = next((doc.outline[k][2] for k in range(n_entry + 1, len(doc.outline)) if doc.outline[k][2] >= 1),
-                         len(doc.pages))
+        next_page = entries[pos + 1][3] if pos + 1 < len(entries) else len(doc.pages)
         search_pages = [page - 1, page] + list(range(page + 1, max(page + 1, min(next_page, page + 1 + cap))))
 
         for p in search_pages:  # bookmark page, then next page, then forward to the next bookmark's own page
@@ -132,13 +136,40 @@ def _from_outline(doc: Doc, scfg: dict) -> list[Anchor]:
             ln = doc.lines[li]
             anchors.append(Anchor(title.strip(), norm, level, ln.page, ln.bbox[1], ln.first_word, located=False))
             min_line = li
+    anchors.sort(key=lambda a: (a.word, a.y))
+    return _empty_unfound(doc, anchors)
+
+
+def _empty_unfound(doc: Doc, anchors: list[Anchor]) -> list[Anchor]:
+    """A bookmark whose heading text is nowhere on its page, on a page that already holds a located
+    heading (a map topic that rendered no heading of its own, or none at all), must not cut that
+    section's text in two and claim the rest of the page: the text belongs to the heading the reader
+    sees. Give it an empty span at the next anchor's position instead."""
+    for i, a in enumerate(anchors):
+        if a.located or not any(b.located and b.page == a.page and b.word <= a.word for b in anchors):
+            continue
+        nxt = next((b for b in anchors[i + 1:] if b.word > a.word), None)
+        a.word = nxt.word if nxt else len(doc.words)
+        w = doc.words[a.word] if a.word < len(doc.words) else None
+        a.page, a.y = (w.page, w.bbox[1]) if w else (len(doc.pages) - 1, 0.0)
+    anchors.sort(key=lambda a: (a.word, a.y))
     return anchors
 
 
 def _from_headings(doc: Doc) -> list[Anchor]:
-    """Fallback when there is no outline: lines set noticeably larger than body text."""
+    """Fallback when there is no outline: lines set noticeably larger than body text.
+
+    A multi-language manual bundled as one PDF often marks where each language starts with the
+    language's own name set in a size of its own ("简体中文", "日本語", "English") - a caption under
+    the real chapter heading ("介绍"), not a heading of its own. Sized well above body text, it would
+    otherwise become a section with no counterpart in a stage document that is bookmarked (so never
+    reads the caption as a heading at all): the whole chapter under it then reports as "not found in
+    candidate", though every word of it is there. Skipped by exact name match against a closed list
+    of language autonyms - not a generic size/weight rule, which would just as easily drop a real
+    one-word heading."""
     heads = [ln for ln in doc.lines
-             if ln.size >= doc.body_size + 1.5 and len(ln.text.split()) <= 15 and not ln.text.strip().isdigit()]
+             if ln.size >= doc.body_size + 1.5 and len(ln.text.split()) <= 15 and not ln.text.strip().isdigit()
+             and normalize.norm_lang(ln.text) not in normalize.LANGUAGE_NAMES]
     sizes = sorted({round(ln.size) for ln in heads}, reverse=True)
     return [Anchor(ln.text, normalize.title(ln.text), sizes.index(round(ln.size)) + 1,
                    ln.page, ln.bbox[1], ln.first_word) for ln in heads]

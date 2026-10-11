@@ -269,11 +269,18 @@ def compare(ta: Toc, tb: Toc, cfg: dict) -> tuple[dict, list[Finding]]:
     tcfg = cfg.get("toc", {})
     sev = tcfg.get("severity", {})
     thr = tcfg.get("title_match_threshold", 0.8)
+    # the order of the entries is a TOC issue only when prod really prints a table of contents. With no
+    # TOC of its own, prod's entries come from its PDF bookmarks (`detect`): that is the document's
+    # reading order, not a printed list, so stage listing them in another order is not a TOC defect -
+    # the content checks report content that moved. [toc] compare_sequence_always = true compares the
+    # order anyway. (The stage side may well be a web page's headings - "navigation": that order is the
+    # page's own, and comparing it against prod's printed TOC is exactly the point.)
+    compare_order = tcfg.get("compare_sequence_always", False) or ta.source == "printed"
     rows_out, findings = [], []
     for i, j, s, moved in _sequence(_align(ta.entries, tb.entries, thr), ta.entries, tb.entries, thr):
         ea = ta.entries[i] if i is not None else None
         eb = tb.entries[j] if j is not None else None
-        if ea and eb and moved:
+        if ea and eb and moved and compare_order:
             status = "order differs"
         elif ea and eb:
             status = "match" if s == 1.0 and ea.level == eb.level else \
@@ -325,7 +332,10 @@ def compare(ta: Toc, tb: Toc, cfg: dict) -> tuple[dict, list[Finding]]:
                else "warn" if st["level differs"] or st["title differs"] or st["extra in stage"] else "pass")
     summary = {
         "status": verdict,
-        "sequence_ok": not st["order differs"],
+        "sequence_ok": (not st["order differs"]) if compare_order else None,
+        "sequence_compared": compare_order,
+        "sequence_why": "" if compare_order else
+            f"prod has no printed table of contents (its entries come from the PDF {ta.source or 'none'})",
         "order differs": st["order differs"],
         "baseline_entries": len(ta.entries), "candidate_entries": len(tb.entries),
         "match": st["match"], "level differs": st["level differs"], "title differs": st["title differs"],

@@ -25,8 +25,10 @@ GROUPS = [
     ("aem-link-guid", "Link contains a GUID"),
     ("aem-list-margin", "List out of the text margin"),
 ]
-ROW_KINDS = {"link-broken": "aem-link-broken", "link-wrong-target": "aem-link-broken",
-             "link-guid": "aem-link-guid", "list-margin": "aem-list-margin"}
+# "link-wrong-target" (a working link whose target page is titled differently) is deliberately not
+# here: where a working link lands is not reported - see [ignore] types "link to wrong section"
+ROW_KINDS = {"link-broken": "aem-link-broken", "link-guid": "aem-link-guid",
+             "list-margin": "aem-list-margin"}
 # findings of the comparison that are a missing link ("Link not clickable in stage: …")
 MISSING_LINK_TYPES = {"missing link"}
 BROKEN_LINK_TYPES = {"broken link"}

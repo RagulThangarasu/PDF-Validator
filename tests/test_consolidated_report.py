@@ -16,26 +16,30 @@ def _stub(tmp_path, *names, baseline="EW-version_UM_EN_safety.pdf"):
 
 
 def test_every_report_is_merged_under_the_pdf_name(tmp_path):
+    # css-issues.pdf is written here on purpose: there is no CSS report any more, and one left behind
+    # by an older run must not be merged in (see tests/test_no_css_report.py). site.pdf is written here
+    # on purpose too: a site run's own checklist is its own deliverable, no longer folded in here.
     result = _stub(tmp_path, "genuine-issues.pdf", "css-issues.pdf", "image-issues.pdf", "site.pdf")
     out = writer.write_consolidated(result, tmp_path)
     assert out == tmp_path / "EW-version_UM_EN_safety-validation-report.pdf" and out.exists()
     doc = pymupdf.open(out)
-    assert doc.page_count == 4
+    assert doc.page_count == 2
     text = "\n".join(p.get_text() for p in doc)
-    for n in ("genuine-issues.pdf", "css-issues.pdf", "image-issues.pdf", "site.pdf"):
+    for n in ("genuine-issues.pdf", "image-issues.pdf"):
         assert f"this is {n}" in text, n
+    assert "this is css-issues.pdf" not in text
+    assert "this is site.pdf" not in text
     # each part is a bookmark, in the order the reader works through them
-    assert [page for _, _, page in doc.get_toc()] == [1, 2, 3, 4]
+    assert [page for _, _, page in doc.get_toc()] == [1, 2]
 
 
 def test_missing_parts_are_skipped_not_faked(tmp_path):
-    """A run with no pictures and no CSS report still gets a consolidated file - of the parts it has."""
-    result = _stub(tmp_path, "genuine-issues.pdf", "site.pdf")
+    """A run with no image report still gets a consolidated file - of the parts it has."""
+    result = _stub(tmp_path, "genuine-issues.pdf")
     out = writer.write_consolidated(result, tmp_path)
     doc = pymupdf.open(out)
-    assert doc.page_count == 2
-    assert [t for _, t, _ in doc.get_toc()] == ["Issues — content, design spec and layout",
-                                                "Site checks — navigation, links, layout, CSS per page"]
+    assert doc.page_count == 1
+    assert [t for _, t, _ in doc.get_toc()] == ["Issues — content, design spec and layout"]
 
 
 def test_a_clean_run_writes_no_consolidated_report(tmp_path):
@@ -45,7 +49,7 @@ def test_a_clean_run_writes_no_consolidated_report(tmp_path):
 
 def test_rebuilding_does_not_merge_the_previous_copy_into_itself(tmp_path):
     """Running twice into the same directory must not fold the last consolidated file into the new one."""
-    result = _stub(tmp_path, "genuine-issues.pdf", "site.pdf")
+    result = _stub(tmp_path, "genuine-issues.pdf", "image-issues.pdf")
     first = pymupdf.open(writer.write_consolidated(result, tmp_path)).page_count
     second = pymupdf.open(writer.write_consolidated(result, tmp_path)).page_count
     assert first == second == 2

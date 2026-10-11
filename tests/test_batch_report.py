@@ -43,3 +43,41 @@ def test_batch_mode_builds_only_the_delivered_reports_then_the_rest_on_demand(tm
     writer.build_deferred(out, "report.pdf")
     assert set(writer.DEFERRED) <= {p.name for p in out.glob("*.pdf")}
     assert json.loads((out / "results.json").read_text())["meta"]["deferred"] == []
+
+
+class _Jobs:
+    """The slice of the UI's Jobs object that _batch_zip uses."""
+
+    def __init__(self, directory, jobs):
+        self.dir, self._jobs = directory, jobs
+
+    def list(self):
+        return self._jobs
+
+    def path(self, jid):
+        return self.dir / jid
+
+
+def test_the_batch_zip_carries_the_consolidated_report_for_all_publications(tmp_path):
+    """The zip is what gets handed on, so the overview of the whole batch belongs in it - including the
+    publications that passed cleanly and therefore have no report of their own."""
+    import zipfile
+
+    from pdfval.app.server import _batch_zip
+
+    jobs = [{**_job("r1", "gw2291 (en)", 99.1), "batch": "batch-x"},
+            {**_job("r2", "ma270s (en)", 25.0), "batch": "batch-x"}]
+    for j in jobs:
+        (tmp_path / j["id"]).mkdir()
+    (tmp_path / "r2" / "genuine-issues.pdf").write_bytes(b"%PDF-1.4\n%issues\n")  # r1 passed: no report
+    path = _batch_zip(_Jobs(tmp_path, jobs), "batch-x")
+    try:
+        z = zipfile.ZipFile(path)
+        names = set(z.namelist())
+        overview = z.read("Consolidated report - all publications.csv").decode("utf-8-sig")
+    finally:
+        path.unlink(missing_ok=True)
+    assert "Consolidated report - all publications.pdf" in names
+    assert "ma270s (en) - PDF report.pdf" in names
+    assert not any(n.startswith("gw2291") for n in names)  # the clean run has no report of its own...
+    assert "gw2291 (en)" in overview and "ma270s (en)" in overview  # ...but is in the overview

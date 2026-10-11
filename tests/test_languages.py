@@ -19,8 +19,10 @@ TEXT = {
 }
 
 
-def build(path, lang, paras=None, overflow=False):
-    c = TEXT[lang]
+def build(path, lang, paras=None, overflow=False, rows=None):
+    c = dict(TEXT[lang])
+    if rows is not None:
+        c["t"] = rows
     style = f"font-size:11pt;{'direction:rtl;text-align:right;' if c['rtl'] else ''}"
     doc, toc = pymupdf.open(), []
     for k in range(2):
@@ -155,3 +157,56 @@ def test_changed_row_label_in_wrapped_cell(tmp_path, cfg):
     g = genuine(r)
     assert [f["issue"] for f in g] == ["Text changed"], [f["message"] for f in g]
     assert "面板" in g[0]["message"] and "螢幕" in g[0]["message"] and g[0]["baseline"] and g[0]["candidate"]
+
+
+# ---- every word validated: extra words, and the marks that carry meaning in other scripts ----
+
+@pytest.mark.parametrize("lang", list(TEXT))
+def test_extra_words_are_reported(tmp_path, cfg, lang):
+    """A word stage adds to a sentence is reported as extra content, in every script - not only in
+    English (Chinese counts the added characters, Arabic and Russian the added word)."""
+    p, extra = TEXT[lang]["p"], {"zh": "并且非常重要", "ar": "وبشكل دائم", "ru": "и это обязательно"}[lang]
+    r = compare(build(tmp_path / "a.pdf", lang),
+                build(tmp_path / "b.pdf", lang, [p[0], p[1] + " " + extra], ), cfg)
+    g = [f for f in genuine(r) if f["issue"] == "Extra content"]
+    assert g, [f["message"] for f in genuine(r)]
+    assert any(extra.split()[-1][:3] in f["message"] for f in g), [f["message"] for f in g]
+
+
+def test_full_width_punctuation_is_genuine(tmp_path, cfg):
+    """“，” → “,” is the wrong character in Chinese text, so it is in the genuine report - unlike the
+    ASCII quote / dash style ("punctuation" in [ignore] types), which stays house style."""
+    p = TEXT["zh"]["p"]
+    r = compare(build(tmp_path / "a.pdf", "zh"), build(tmp_path / "b.pdf", "zh", [p[0], p[1].replace("，", ",")]), cfg)
+    g = [f for f in genuine(r) if "punctuation character" in (f.get("types") or [])]
+    assert g, [f["message"] for f in genuine(r)]
+    assert "，" in g[0]["message"] and "," in g[0]["message"]
+
+
+def test_arabic_harakat_dropped_is_reported(tmp_path, cfg):
+    """A mark above the letter that stage does not set (an Arabic harakat) spells the word
+    differently: it is not the ASCII punctuation style, so it is reported."""
+    p = TEXT["ar"]["p"]
+    a = [p[0], "حَافظ على فتحات التهوية مفتوحة حتى يخرج الهواء الساخن بسهولة."]
+    b = [p[0], "حافظ على فتحات التهوية مفتوحة حتى يخرج الهواء الساخن بسهولة."]
+    r = compare(build(tmp_path / "a.pdf", "ar", a), build(tmp_path / "b.pdf", "ar", b), cfg)
+    g = [f for f in genuine(r) if "diacritic" in (f.get("types") or []) or f["issue"] == "Text changed"]
+    assert g, [f["message"] for f in genuine(r)]
+
+
+_ROWS = {
+    "zh": [["设置", "数值"], ["亮度", "五十"], ["对比度", "六十"], ["色温", "正常"]],
+    "ar": [["الإعداد", "القيمة"], ["السطوع", "خمسون"], ["التباين", "ستون"], ["الحرارة", "عادي"]],
+    "ru": [["Параметр", "Значение"], ["Яркость", "пятьдесят"], ["Контраст", "шестьдесят"], ["Температура", "обычная"]],
+}
+
+
+@pytest.mark.parametrize("lang", list(_ROWS))
+def test_table_rows_in_another_order_are_reported(tmp_path, cfg, lang):
+    """The sequence of the rows is content the reader follows: the same rows published in another
+    order in stage is a genuine issue, in every script (type "row order")."""
+    rows = _ROWS[lang]
+    moved = [rows[0], rows[1], rows[3], rows[2]]
+    r = compare(build(tmp_path / "a.pdf", lang, rows=rows), build(tmp_path / "b.pdf", lang, rows=moved), cfg)
+    assert [f for f in genuine(r) if "row order" in (f.get("types") or [])], \
+        [(f["issue"], f["message"]) for f in genuine(r)]

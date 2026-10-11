@@ -155,13 +155,17 @@ def test_content_in_wrong_section(tmp_path, cfg):
     assert hits and hits[0][0] == "Overview" and "Maintenance" in hits[0][1]["message"]
 
 
-def test_link_to_wrong_section(tmp_path, cfg):
+def test_a_link_landing_in_another_section_is_not_reported(tmp_path, cfg):
+    """Where a WORKING link lands is left out of the validation ([ignore] types "link to wrong
+    section"): the PDF and the site number and split their pages differently, so this fired on
+    documents whose links all work. A link that does not work is still reported (test above)."""
     a = make(tmp_path / "a.pdf", base())
     secs = base()
     secs[0]["link"] = "Maintenance"
     r = compare(a, make(tmp_path / "b.pdf", secs), cfg)
-    hits = [f for _, f in genuine(r) if f["issue"] == "Link to wrong section"]
-    assert hits and "Setup" in hits[0]["message"] and "Maintenance" in hits[0]["message"]
+    assert not [f for _, f in genuine(r) if f["issue"] == "Link to wrong section"]
+    assert not [f for s in r["sections"] for f in s["findings"]
+                if "link to wrong section" in (f.get("types") or [])]
 
 
 def test_broken_image(tmp_path, cfg):

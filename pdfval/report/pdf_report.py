@@ -34,17 +34,38 @@ CAT_ORDER = {c: k for k, (c, _) in enumerate(CATS)}
 # the report lists the issues in this order, each group on its own pages
 GROUPS = [("content", "Content", "text: missing, extra, changed words, case, punctuation, spacing"),
           ("links", "Links", "links, attachments, broken characters, text off the page"),
-          ("formatting", "Formatting", "sections and headings, tables, images, TOC, layout, bullets and lists"),
+          # pictures are their own group, not part of "formatting": the artwork issues go in the image
+          # report, but everything else about a picture (missing, extra, bigger / smaller, placed
+          # elsewhere, blacked out, mirrored) is reported nowhere else, and dropping the formatting
+          # group must not drop them with it
+          ("images", "Images", "pictures: missing, extra, another size, placed elsewhere, blurred, mirrored"),
+          ("formatting", "Formatting", "sections and headings, tables, TOC, layout, bullets and lists"),
           ("css", "CSS", "fonts, sizes, weights and colours")]
 GROUP_ORDER = {g: k for k, (g, _, _) in enumerate(GROUPS)}
+# groups the PDF reports do not list, when the run's config does not say otherwise ([report] exclude_groups).
+# The findings are still produced and still in results.json, the CSVs and the site report.
+DEFAULT_EXCLUDE_GROUPS = ("formatting",)
+
+
+def excluded_groups(result: dict) -> set[str]:
+    cfg = ((result.get("meta") or {}).get("report") or {})
+    return set(cfg["exclude_groups"] if "exclude_groups" in cfg else DEFAULT_EXCLUDE_GROUPS)
+
+
+def group_number(group: str, excluded: set[str]) -> tuple[int, str, str]:
+    """The group's number and heading as the report prints them, counting only the groups it lists:
+    with "formatting" dropped, CSS is "3. CSS", not "4. CSS"."""
+    shown = [g for g in GROUPS if g[0] not in excluded]
+    k = next((i for i, g in enumerate(shown) if g[0] == group), 0)
+    return k + 1, shown[k][1], shown[k][2]
 
 
 def group_of(f: dict) -> str:
-    """Report group of a finding: content, links, formatting or css (style only; layout is formatting)."""
+    """Report group of a finding: content, links, images, formatting or css (style only; layout is formatting)."""
     if f.get("check") == "style":
         return "css"
     cat = f.get("category")
-    return cat if cat in ("content", "links") else "formatting"
+    return cat if cat in ("content", "links", "images") else "formatting"
 CSS = """
 * { font-family: sans-serif; font-size: 9px; color: #1d2330; }
 h1 { font-size: 20px; margin: 0 0 2px 0; } h2 { font-size: 13px; margin: 14px 0 2px 0; }
@@ -77,12 +98,27 @@ PDF_IMAGE_TYPES = {"image smaller", "image bigger", "size / aspect", "image pixe
 # no overview tables (the issue pages say what each issue is)
 GENUINE = {"include": {"summary": True, "categories": False, "genuine": "counts", "css": False, "toc_compare": True,
                        "critical": False, "coverage": False, "truncated": True, "sections": False,
-                       "toc": False, "stylemap": False, "issues": True, "screenshots": True},
+                       # the TOC is compared entry by entry in this report too: it is the deliverable, and
+                       # a TOC the reader navigates by is not an overview table that can be looked up elsewhere
+                       "toc": True, "stylemap": False, "issues": True, "screenshots": True},
            # image issues are in image-issues.pdf only - except a picture's size (smaller / bigger in stage) and a
            # pixelated picture: the image report shows picture text and overlays, so these are reported here
            # ... and a picture's own text and artwork (callout numbers, labels, leader lines missing in stage): every
            # image issue is in this report as well, so nothing found about a picture has to be looked up elsewhere
            "filter": {"genuine_only": True, "no_images": True, "keep_types": sorted(PDF_IMAGE_TYPES), "picture_text": True}}
+
+# content.docx - the content review on its own. Is the text there, is it emphasised the same way, do the
+# hyperlinks work and arrive where prod's arrive, and is the text aligned the same. Nothing else: no
+# pictures, tables, TOC, fonts, colours, sizes, spacing, wrapping or page layout.
+CONTENT_TYPES = {
+    "missing text", "extra text", "missing section", "extra section",   # content missing from / added to stage
+    "emphasis",                                                         # bold / italic on one side only
+    "broken link", "missing link",                                      # a hyperlink that does not work
+    "link target differs", "link lands elsewhere",                      # ... or that goes somewhere else
+    "spec text-align", "list alignment", "row alignment",               # how the text itself is aligned
+}
+CONTENT_REPORT = {"include": {**GENUINE["include"]},
+                  "filter": {"genuine_only": True, "types": sorted(CONTENT_TYPES)}}
 
 # the CSS report: every CSS / typography / layout issue that is not in the PDF report (fonts, sizes, colours,
 # line heights, spec styles), with its screenshots
@@ -174,8 +210,42 @@ def is_image_issue(f: dict) -> bool:
     return bool(set(f.get("types") or []) & IMAGE_REPORT_TYPES)
 
 
+def _off_spec(st: dict, a: dict) -> list[str]:
+    """Which of this stage value's properties are off the design spec ("size 13.5 pt", "colour #000000")."""
+    off = []
+    if not a["font"].lower().startswith(st["font"].lower()):
+        off.append(f"font {a['font']}")
+    if a["weight"] != st["weight"]:
+        off.append(f"weight {a['weight']}")
+    if abs(a["size"] - st["size"]) > 0.25:
+        off.append(f"size {a['size']:g} pt")
+    if a.get("line_height") is not None and abs(a["line_height"] - st["line_height"]) > 1.0:
+        off.append(f"line height {a['line_height']:g} pt")
+    if a["color"] != (st["color"] or a["color"]):
+        off.append(f"colour {a['color']}")
+    return off
+
+
+def _where_text(where: list) -> str:
+    """"Video input (p. 3-4, 12 words) · Preset display mode (p. 5, 2 words)": the topics to go and fix."""
+    out = []
+    for w in where[:6]:
+        pages = w.get("pages") or []
+        span = ""
+        if pages:
+            span = (f"p. {pages[0]}" if len(pages) == 1
+                    else f"p. {pages[0]}\u2013{pages[-1]}" if pages[-1] - pages[0] == len(pages) - 1
+                    else "p. " + ", ".join(map(str, pages[:4])) + ("\u2026" if len(pages) > 4 else ""))
+        words = f"{w['words']} word" + ("s" if w["words"] != 1 else "")
+        out.append(f"{escape(w['section'])} ({span}, {words})" if span else f"{escape(w['section'])} ({words})")
+    if len(where) > 6:
+        out.append(f"and {len(where) - 6} more section(s)")
+    return " \u00b7 ".join(out)
+
+
 def _actual_cell(st: dict) -> str:
-    """Stage's most used style for a Figma style; differing values in red."""
+    """Stage's most used style for a Figma style; differing values in red, and under them the sections
+    (AEM topics) and pages that use them: a red value is a defect somebody has to go and find."""
     a = st.get("actual")
     if not a:
         return "<span class='muted'>not used in stage</span>"
@@ -184,10 +254,21 @@ def _actual_cell(st: dict) -> str:
              red(a["weight"] == st["weight"], escape(a["weight"])),
              red(abs(a["size"] - st["size"]) <= 0.25, f"{a['size']:g} pt"),
              (red(abs(a["line_height"] - st["line_height"]) <= 1.0, f"{a['line_height']:g} pt line height")
-              if a.get("line_height") is not None else "<span class='muted'>line height —</span>"),
+              if a.get("line_height") is not None else "<span class='muted'>line height \u2014</span>"),
              f"<span style='background-color:{a['color']};border:0.5px solid #9aa1ad'>&#160;&#160;&#160;</span> "
              + red(a["color"] == (st["color"] or a["color"]), escape(a["color"]))]
-    return " · ".join(parts) + f" <span class='muted'>({a['share']:.0%} of {a['words']} words)</span>"
+    cell = " \u00b7 ".join(parts) + f" <span class='muted'>({a['share']:.0%} of {a['words']} words)</span>"
+    # where the red comes from: this value where it is off the spec, then every other value stage uses
+    lines = []
+    off = _off_spec(st, a)
+    if off and a.get("where"):
+        lines.append(f"<b style='color:#dc2626'>{escape(', '.join(off))}</b> in: {_where_text(a['where'])}")
+    for o in (a.get("others") or []):
+        o_off = _off_spec(st, o)
+        if o_off and o.get("where"):
+            words = f"{o['words']} word" + ("s" if o["words"] != 1 else "")
+            lines.append(f"<b style='color:#dc2626'>{escape(', '.join(o_off))}</b> ({words}) in: {_where_text(o['where'])}")
+    return cell + "".join(f"<br/><span style='font-size:8px'>{l}</span>" for l in lines[:6])
 
 
 def _summary_html(result: dict, include: dict | None = None, note: str = "", n_issues: int | None = None) -> list[str]:
@@ -219,7 +300,6 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
         f"<tr><th>Critical / breaking</th><td><b style='color:{'#b42318' if sm['critical']['total'] else '#16a34a'}'>"
         f"{sm['critical']['total']}</b> " + (" · ".join(f"{v} × {escape(k)}" for k, v in sm["critical"]["by_kind"].items())
                                              or "— no missing sections, rows, images, files, links or glyphs") + "</td></tr>",
-        _missing_sections_row(result),
         (f"<tr><th>CSS / layout</th><td>{sm['css']['issues']} issues (style {sm['css']['style']}, layout {sm['css']['layout']}) "
          "— reported separately, not part of the content %</td></tr>" if inc.get("css", True) else ""),
         "<tr><th>All findings</th><td>" + " · ".join(f"<b style='color:{CHECK_COLOR.get(k, '#475569')}'>{k}</b> {v}"
@@ -308,7 +388,9 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
                 "missing in stage": "#d92d20", "extra in stage": "#64748b", "order differs": "#d92d20"}
         html.append(f"<h2>Table of contents: prod vs stage — <span style='color:{STATUS_COLOR.get(ts['status'], '#333')}'>"
                     f"{ts['status'].upper()}</span></h2><p><b>Sequence:</b> "
-                    + ("<b style='color:#16a34a'>same order</b>" if ts["sequence_ok"]
+                    + (f"<b style='color:#6a7282'>not compared — {ts.get('sequence_why', '')}</b>"
+                       if not ts.get("sequence_compared", True)
+                       else "<b style='color:#16a34a'>same order</b>" if ts["sequence_ok"]
                        else f"<b style='color:#d92d20'>{ts['order differs']} entries out of order</b>")
                     + f" · <b>levels matching:</b> {ts['levels_match_pct']}%</p>")
         html.append(f"<p class='muted'>Prod {ts['baseline_entries']} entries "
@@ -425,7 +507,9 @@ def _toc_section(c: "_Canvas", t: dict, web: bool, out: Path) -> None:
     c.runs([("TOC status  ", "#6a7282", True), (sm["status"].upper(), TOC_COLOR.get("match" if sm["status"] == "pass" else
                                                                    "level differs" if sm["status"] == "warn" else "order differs"), True),
             ("     Sequence  ", "#6a7282", True),
-            ("✓ same order" if sm["sequence_ok"] else f"✗ {sm['order differs']} out of order", "#16a34a" if sm["sequence_ok"] else "#d92d20", True),
+            ("— not compared (prod has no printed TOC)" if not sm.get("sequence_compared", True)
+             else "✓ same order" if sm["sequence_ok"] else f"✗ {sm['order differs']} out of order",
+             "#6a7282" if not sm.get("sequence_compared", True) else "#16a34a" if sm["sequence_ok"] else "#d92d20", True),
             ("     Levels matching  ", "#6a7282", True), (f"{sm['levels_match_pct']}%", "#1d2330", True),
             ("     Entries  ", "#6a7282", True), (f"{sm['baseline_entries']} prod · {sm['candidate_entries']} {other}", "#1d2330", True)], 9)
     c.runs([("TOC heading  ", "#6a7282", True), (f"“{head_b}” {'=' if same_head else '≠'} “{head_c}”", "#1d2330" if same_head else "#d92d20", True),
@@ -605,6 +689,197 @@ def _spec_section(c: "_Canvas", site: dict, out: Path | None = None) -> None:
     c.y += 6
 
 
+def _margin_break_section(c: "_Canvas", site: dict, out: Path | None = None) -> None:
+    """Content or a table that runs outside the page's own content area, or makes the whole page scroll
+    sideways: on a web page this is a structural break, not a cosmetic one - the reader cannot see the
+    rest of the row/line without scrolling past the margin. Carries the same Bug_NNN numbers as the rest
+    of the report - it used to be in site.pdf only, where a reader of the bug report never saw it."""
+    rows = [r for r in site.get("rows") or []
+            if r["group"] == "layout" and r.get("kind") in ("block-overflow", "page-scroll")
+            and r["status"] in ("fail", "warn")]
+    if not rows:
+        return
+    short = lambda u: (u or "").rsplit("/", 1)[-1].split("?")[0] or (u or "")
+    c.new_page()
+    c.runs([("Layout — breaking the page margins", "#1d2330", True),
+            (f"   {len(rows)} issue(s): content or a table running outside the page area, on the live stage pages", "#6a7282", False)], 14)
+    c.y += 10
+    w = c.width
+    xs = [c.M, c.M + 0.08 * w, c.M + 0.38 * w, c.M + 0.53 * w, c.M + 0.68 * w, c.M + 0.82 * w]
+    widths = [0.08 * w - 6, 0.30 * w - 6, 0.15 * w - 6, 0.15 * w - 6, 0.14 * w - 6, 0.18 * w]
+    for x, label in zip(xs, ("Bug", "Item", "Expected", "Actual", "Page", "On the page")):
+        _text(c, x, c.y, label, "#475569", True)
+    c.y += 14
+    # a row that points at one spot of the page is shown with a crop of that spot: "runs 32px outside
+    # the content area" says little without seeing the actual overflow
+    cache: dict = {}
+    for n, r in enumerate(rows):
+        cols = [c.wrap(r.get("bug", "—"), 8, c.regular, widths[0]),
+                c.wrap(r["item"], 8, c.regular, widths[1]),
+                c.wrap("within the page margins", 8, c.regular, widths[2]),
+                c.wrap(r["note"] or r["actual"] or "—", 8, c.bold, widths[3]),
+                c.wrap(short(r.get("page", "")), 8, c.regular, widths[4])]
+        crop = _spec_crop(out, r, 81000 + n, cache) if out is not None else None
+        img_h = min(crop[2] * widths[5] / crop[1], 110) if crop else 0
+        h = max(11 * max(len(x) for x in cols) + 3, img_h + 6)
+        if not c.room(h + 2):
+            c.new_page()
+        y = c.y
+        colour = "#b42318" if r["status"] == "fail" else "#b45309"
+        for k, (x, lines) in enumerate(zip(xs, cols)):
+            for j, line in enumerate(lines):
+                _text(c, x, y + 11 * j, line, colour if k == 3 else "#1d2330", k == 3)
+        if crop and img_h:
+            rect = pymupdf.Rect(xs[5], y, xs[5] + img_h * crop[1] / crop[2], y + img_h)
+            try:
+                c.page.insert_image(rect, filename=str(crop[0]))
+                c.page.draw_rect(rect, color=(0.82, 0.84, 0.87), width=0.5)
+            except Exception:  # a crop that will not render must not cost the whole report
+                pass
+        c.y = y + h
+    c.y += 6
+
+
+def _font_size_section(c: "_Canvas", site: dict, out: Path | None = None) -> None:
+    """A live page's font size against the Figma spec (config/typography.toml) - only the size mismatches,
+    not every CSS property (weight, colour, line height, ... stay in results.json / site-navigation.csv
+    only). Carries the same Bug_NNN numbers as the rest of the report."""
+    rows = [r for r in site.get("rows") or []
+            if r["group"] == "typography" and "font size" in r["item"] and r["status"] in ("fail", "warn")]
+    if not rows:
+        return
+    short = lambda u: (u or "").rsplit("/", 1)[-1].split("?")[0] or (u or "")
+    c.new_page()
+    c.runs([("Font size \u2014 design spec (Figma)", "#1d2330", True),
+            (f"   {len(rows)} issue(s): stage text not at the size the design spec sets for it, on the live stage pages", "#6a7282", False)], 14)
+    c.y += 10
+    w = c.width
+    xs = [c.M, c.M + 0.08 * w, c.M + 0.38 * w, c.M + 0.53 * w, c.M + 0.68 * w, c.M + 0.82 * w]
+    widths = [0.08 * w - 6, 0.30 * w - 6, 0.15 * w - 6, 0.15 * w - 6, 0.14 * w - 6, 0.18 * w]
+    for x, label in zip(xs, ("Bug", "Item", "Expected", "Actual", "Page", "On the page")):
+        _text(c, x, c.y, label, "#475569", True)
+    c.y += 14
+    cache: dict = {}
+    for n, r in enumerate(rows):
+        cols = [c.wrap(r.get("bug", "\u2014"), 8, c.regular, widths[0]),
+                c.wrap(r["item"], 8, c.regular, widths[1]),
+                c.wrap(r["expected"] or "\u2014", 8, c.regular, widths[2]),
+                c.wrap(r["actual"] or "\u2014", 8, c.bold, widths[3]),
+                c.wrap(short(r.get("page", "")), 8, c.regular, widths[4])]
+        crop = _spec_crop(out, r, 83000 + n, cache) if out is not None else None
+        img_h = min(crop[2] * widths[5] / crop[1], 110) if crop else 0
+        h = max(11 * max(len(x) for x in cols) + 3, img_h + 6)
+        if not c.room(h + 2):
+            c.new_page()
+        y = c.y
+        colour = "#b42318" if r["status"] == "fail" else "#b45309"
+        for k, (x, lines) in enumerate(zip(xs, cols)):
+            for j, line in enumerate(lines):
+                _text(c, x, y + 11 * j, line, colour if k == 3 else "#1d2330", k == 3)
+        if crop and img_h:
+            rect = pymupdf.Rect(xs[5], y, xs[5] + img_h * crop[1] / crop[2], y + img_h)
+            try:
+                c.page.insert_image(rect, filename=str(crop[0]))
+                c.page.draw_rect(rect, color=(0.82, 0.84, 0.87), width=0.5)
+            except Exception:  # a crop that will not render must not cost the whole report
+                pass
+        c.y = y + h
+    c.y += 6
+
+
+def _image_section(c: "_Canvas", site: dict, out: Path | None = None) -> None:
+    """A picture that does not load or has collapsed on the live page: is it there, not how it is
+    aligned, sized or scaled (a web page lays its pictures out responsively). Carries the same Bug_NNN
+    numbers as the rest of the report."""
+    rows = [r for r in site.get("rows") or []
+            if r["group"] == "layout" and str(r.get("kind", "")).startswith("image-") and r["status"] in ("fail", "warn")]
+    if not rows:
+        return
+    short = lambda u: (u or "").rsplit("/", 1)[-1].split("?")[0] or (u or "")
+    c.new_page()
+    c.runs([("Images \u2014 not loading on the live page", "#1d2330", True),
+            (f"   {len(rows)} issue(s), on the live stage pages", "#6a7282", False)], 14)
+    c.y += 10
+    w = c.width
+    xs = [c.M, c.M + 0.08 * w, c.M + 0.38 * w, c.M + 0.53 * w, c.M + 0.68 * w, c.M + 0.82 * w]
+    widths = [0.08 * w - 6, 0.30 * w - 6, 0.15 * w - 6, 0.15 * w - 6, 0.14 * w - 6, 0.18 * w]
+    for x, label in zip(xs, ("Bug", "Item", "Expected", "Actual", "Page", "On the page")):
+        _text(c, x, c.y, label, "#475569", True)
+    c.y += 14
+    cache: dict = {}
+    for n, r in enumerate(rows):
+        cols = [c.wrap(r.get("bug", "\u2014"), 8, c.regular, widths[0]),
+                c.wrap(r["item"], 8, c.regular, widths[1]),
+                c.wrap("loads, not collapsed", 8, c.regular, widths[2]),
+                c.wrap(r["note"] or r["actual"] or "\u2014", 8, c.bold, widths[3]),
+                c.wrap(short(r.get("page", "")), 8, c.regular, widths[4])]
+        crop = _spec_crop(out, r, 84000 + n, cache) if out is not None else None
+        img_h = min(crop[2] * widths[5] / crop[1], 110) if crop else 0
+        h = max(11 * max(len(x) for x in cols) + 3, img_h + 6)
+        if not c.room(h + 2):
+            c.new_page()
+        y = c.y
+        colour = "#b42318" if r["status"] == "fail" else "#b45309"
+        for k, (x, lines) in enumerate(zip(xs, cols)):
+            for j, line in enumerate(lines):
+                _text(c, x, y + 11 * j, line, colour if k == 3 else "#1d2330", k == 3)
+        if crop and img_h:
+            rect = pymupdf.Rect(xs[5], y, xs[5] + img_h * crop[1] / crop[2], y + img_h)
+            try:
+                c.page.insert_image(rect, filename=str(crop[0]))
+                c.page.draw_rect(rect, color=(0.82, 0.84, 0.87), width=0.5)
+            except Exception:  # a crop that will not render must not cost the whole report
+                pass
+        c.y = y + h
+    c.y += 6
+
+
+def _hyperlinks_section(c: "_Canvas", site: dict, out: Path | None = None) -> None:
+    """Every hyperlink problem the site run found: the left navigation's own links, a DITA GUID left in
+    an address or label, and the content's own cross-reference links. Carries the same Bug_NNN numbers
+    as the rest of the report."""
+    rows = [r for r in site.get("rows") or [] if r["group"] == "links" and r["status"] in ("fail", "warn")]
+    if not rows:
+        return
+    short = lambda u: (u or "").rsplit("/", 1)[-1].split("?")[0] or (u or "")
+    c.new_page()
+    c.runs([("Hyperlinks", "#1d2330", True),
+            (f"   {len(rows)} issue(s): links that do not open, land elsewhere, or still carry a GUID, on the live stage pages", "#6a7282", False)], 14)
+    c.y += 10
+    w = c.width
+    xs = [c.M, c.M + 0.08 * w, c.M + 0.38 * w, c.M + 0.53 * w, c.M + 0.68 * w, c.M + 0.82 * w]
+    widths = [0.08 * w - 6, 0.30 * w - 6, 0.15 * w - 6, 0.15 * w - 6, 0.14 * w - 6, 0.18 * w]
+    for x, label in zip(xs, ("Bug", "Item", "Expected", "Actual", "Page", "On the page")):
+        _text(c, x, c.y, label, "#475569", True)
+    c.y += 14
+    cache: dict = {}
+    for n, r in enumerate(rows):
+        cols = [c.wrap(r.get("bug", "\u2014"), 8, c.regular, widths[0]),
+                c.wrap(r["item"], 8, c.regular, widths[1]),
+                c.wrap(r["expected"] or "\u2014", 8, c.regular, widths[2]),
+                c.wrap(r["actual"] or r["note"] or "\u2014", 8, c.bold, widths[3]),
+                c.wrap(short(r.get("page", "")), 8, c.regular, widths[4])]
+        crop = _spec_crop(out, r, 85000 + n, cache) if out is not None else None
+        img_h = min(crop[2] * widths[5] / crop[1], 110) if crop else 0
+        h = max(11 * max(len(x) for x in cols) + 3, img_h + 6)
+        if not c.room(h + 2):
+            c.new_page()
+        y = c.y
+        colour = "#b42318" if r["status"] == "fail" else "#b45309"
+        for k, (x, lines) in enumerate(zip(xs, cols)):
+            for j, line in enumerate(lines):
+                _text(c, x, y + 11 * j, line, colour if k == 3 else "#1d2330", k == 3)
+        if crop and img_h:
+            rect = pymupdf.Rect(xs[5], y, xs[5] + img_h * crop[1] / crop[2], y + img_h)
+            try:
+                c.page.insert_image(rect, filename=str(crop[0]))
+                c.page.draw_rect(rect, color=(0.82, 0.84, 0.87), width=0.5)
+            except Exception:  # a crop that will not render must not cost the whole report
+                pass
+        c.y = y + h
+    c.y += 6
+
+
 def _spec_crop(out: Path, row: dict, idx: int, cache: dict):
     """(path, width, height) of the crop for a design-spec row, or None when it points at no one spot."""
     if not row.get("shot") or out is None:
@@ -647,8 +922,9 @@ def _section_header(c: _Canvas, s: dict, cont: bool = False):
     c.runs([(s["title"] + (" (cont.)" if cont else "") + "   ", "#1d2330", True), *status], 13)
     c.runs([(f"Prod p.{s['baseline']['start']['page'] + 1}–{s['baseline']['end']['page'] + 1}  ·  "
              f"Stage p.{s['candidate']['start']['page'] + 1}–{s['candidate']['end']['page'] + 1}  ·  "
-             f"score {s['content']['match_pct']:.2f}% ({s['content'].get('issues', 0)} issues)  ·  "
-             f"CSS issues {s['css']['issues']}" + (f"  ·  {s['critical']} CRITICAL" if s['critical'] else ""),
+             f"score {s['content']['match_pct']:.2f}% ({s['content'].get('issues', 0)} issues)"
+             # no "CSS issues N": fonts, sizes and colours are not reported as a deliverable any more
+             + (f"  ·  {s['critical']} CRITICAL" if s['critical'] else ""),
              "#6a7282", False)], 8.5)
     c.y += 4
 
@@ -832,6 +1108,7 @@ def select_issues(result: dict, flt: dict | None = None, severities: set[str] | 
     q = (flt.get("q") or "").lower()
     ids = set(flt["ids"]) if flt.get("ids") is not None else None  # exactly the issues picked in the UI
     keep = set(flt.get("keep_types") or [])  # types shown whatever genuine_only / no_images say
+    dropped = excluded_groups(result)  # [report] exclude_groups: whole issue groups the reports do not list
     out = []
     picture_ids: set = set()
     if flt.get("picture_text") and ids is None:
@@ -845,7 +1122,8 @@ def select_issues(result: dict, flt: dict | None = None, severities: set[str] | 
         if secs and s["id"] not in secs:
             continue
         out += [(s, f) for f in s.get("image_findings", []) if f.get("id") in picture_ids and f["severity"] in sev
-                and (not q or q in f["message"].lower() or q in s["title"].lower())]
+                and (not q or q in f["message"].lower() or q in s["title"].lower())
+                and group_of(f) not in dropped]
         for f in s["findings"] + (s.get("image_findings", []) if flt.get("image_issues") else []):
             if ids is not None:
                 if f["id"] in ids:
@@ -863,6 +1141,8 @@ def select_issues(result: dict, flt: dict | None = None, severities: set[str] | 
                     or (flt.get("no_images") and image_related(result, f) and not (keep & set(f.get("types") or []))):
                 continue
             out.append((s, f))
+    if dropped:
+        out = [(s, f) for s, f in out if group_of(f) not in dropped]
     # content first, then links, formatting and CSS last; in each group the document's section
     # order, critical issues first within a section
     pos = {id(s): k for k, s in enumerate(result["sections"])}
@@ -910,6 +1190,10 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
     toc_issues = [x for x in issues if x[1]["check"] == "toc"] if toc and toc.get("rows") else []
     if toc_issues:  # the TOC is compared entry by entry in its own section, like the UI's TOC tab
         issues = [x for x in issues if x[1]["check"] != "toc"]
+    # ... and that comparison is printed whenever the two PDFs have a TOC, even when no TOC finding
+    # survived the report's filters ([report] exclude_groups drops the "formatting" group, which the
+    # TOC belongs to): "no TOC issue" and "the TOC was never compared here" must not look the same
+    show_toc = bool(toc and toc.get("rows"))
 
     # --- summary, sections table, style map: HTML flow (Story)
     buf = io.BytesIO()
@@ -940,21 +1224,24 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
 
     # --- issues: direct drawing, prod | stage screenshots side by side
     c = _Canvas(doc)
-    if toc_issues:
+    if show_toc:
         _toc_section(c, toc, result["meta"].get("mode") == "html", out)
     site = result.get("site")
     if site and not site.get("error"):
         _nav_section(c, site)
-        _spec_section(c, site, out)
+        _margin_break_section(c, site, out)
+        _font_size_section(c, site, out)
+        _image_section(c, site, out)
+        _hyperlinks_section(c, site, out)
     col_w, gap, max_h = (c.width - 16) / 2, 16, 320
     current = group = None
     for k, (s, f) in enumerate(issues):
         if group_of(f) != group:  # each group starts on a new page with its heading
             group = group_of(f)
-            gk = GROUP_ORDER[group]
+            n, label, about = group_number(group, excluded_groups(result))
             c.new_page()
             n_g = sum(1 for _, x in issues if group_of(x) == group)
-            c.runs([(f"{gk + 1}. {GROUPS[gk][1]}", "#1d2330", True), (f"   {n_g} issue(s) · {GROUPS[gk][2]}", "#6a7282", False)], 14)
+            c.runs([(f"{n}. {label}", "#1d2330", True), (f"   {n_g} issue(s) · {about}", "#6a7282", False)], 14)
             c.y += 6
             current = None
         if progress and k % 50 == 0:

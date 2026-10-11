@@ -22,19 +22,47 @@ its words are genuinely absent from stage (not merely in another order).
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from difflib import SequenceMatcher
 
+from .. import normalize
 from ..model import Finding, Loc
 from . import Unit, insertion_loc, insertion_loc_by, locs, paired_locs, snippet
 
 _KIND = {"replace": "Changed text", "delete": "Missing text", "insert": "Extra text"}
 _TYPE_LABEL = {"case": "Uppercase/lowercase differs", "punctuation": "Punctuation differs",
-               "case + punctuation": "Uppercase/lowercase and punctuation differ", "spacing": "Word gap differs"}
+               "case + punctuation": "Uppercase/lowercase and punctuation differ", "spacing": "Word gap differs",
+               "punctuation character": "Punctuation character differs", "diacritic": "Mark on a character differs"}
+
+
+def _mark_type(A: str, B: str) -> str | None:
+    """A difference that only the punctuation / marks carry, but not the ASCII punctuation style the
+    house ignores ("punctuation" in [ignore] types). Two kinds matter in the other languages:
+
+    - a combining mark that one side does not set at all - an Arabic harakat ("نَص" vs "نص"), a Thai
+      tone mark, a Hebrew niqqud: it does not compose into its letter, so NFKC leaves it standing on
+      its own and the plain punctuation test strips it away with the commas. The reader sees the
+      character above (or below) the letter, so it is reported: type "diacritic".
+    - a punctuation mark outside ASCII - CJK and full-width punctuation ("，" vs ",", "（" vs "(",
+      "。" vs "."): in Chinese or Japanese text that is the wrong character, not a typesetter's
+      choice of quote or dash. Reported as "punctuation character".
+
+    Returns the type, or None when every differing character is plain ASCII punctuation (the house
+    style difference that stays ignored)."""
+    ca, cb = Counter(re.sub(r"\s+", "", A)), Counter(re.sub(r"\s+", "", B))
+    diff = list(((ca - cb) + (cb - ca)).elements())
+    if any(unicodedata.category(c) in ("Mn", "Mc", "Me") for c in diff):
+        return "diacritic"
+    if any(ord(c) > 0x7F and unicodedata.category(c)[0] in ("P", "S") for c in diff):
+        return "punctuation character"
+    return None
 
 
 def classify(a: list[str], b: list[str]) -> str:
-    """Type of a replaced text run: spacing / case / punctuation / case + punctuation / changed text."""
+    """Type of a replaced text run: spacing / case / punctuation / case + punctuation / changed text.
+    A punctuation-only difference carried by a non-ASCII mark - a full-width comma, a combining
+    diacritic - is its own type (see _mark_type): those are content in the other languages."""
     A, B = " ".join(a), " ".join(b)
     nospace = lambda t: re.sub(r"\s+", "", t)
     nopunct = lambda t: re.sub(r"[^\w\s]|_", "", t)
@@ -45,9 +73,9 @@ def classify(a: list[str], b: list[str]) -> str:
     if A.lower() == B.lower():
         return "case"
     if nospace(nopunct(A)) == nospace(nopunct(B)):
-        return "punctuation"
+        return _mark_type(A, B) or "punctuation"
     if nospace(nopunct(A)).lower() == nospace(nopunct(B)).lower():
-        return "case + punctuation"
+        return _mark_type(A, B) or "case + punctuation"
     return "changed text"
 
 
@@ -99,6 +127,30 @@ def _wrap_only(u: Unit, a_idx: list[int], b_idx: list[int]) -> bool:
     if "".join(u.a.words[i].norm for i in a_idx).replace(" ", "") != "".join(u.b.words[j].norm for j in b_idx).replace(" ", ""):
         return False
     ba, bb = bounds(u.a, a_idx), bounds(u.b, b_idx)
+    diff = [ba[o] for o in ba.keys() - bb.keys()] + [bb[o] for o in bb.keys() - ba.keys()]
+    return bool(diff) and all(diff)
+
+
+def _wrap_gap(u: Unit, a_idx: list[int], b_idx: list[int]) -> bool:
+    """Same characters on both sides, and every gap that differs falls where one side breaks the line.
+
+    A line break IS the separator: the PDF cannot say whether a space was typed there, so a gap that
+    differs only at a break carries no information. Prod wraps "Support.BenQ." / "com" across two
+    lines where stage sets "Support.BenQ.com" on one - the same text, laid out differently.
+
+    _wrap_only forgives such a break only after a hyphen, slash or dash, which is right for deciding
+    whether a WORD was split; this is the looser rule for a gap, and is used for spacing alone.
+    """
+    def breaks(doc, idx) -> dict:
+        out, off = {}, 0
+        for k, i in enumerate(idx[:-1]):
+            off += len(re.sub(r"\s+", "", doc.words[i].norm))
+            out[off] = doc.words[i].line != doc.words[idx[k + 1]].line
+        return out
+    if "".join(u.a.words[i].norm for i in a_idx).replace(" ", "") \
+            != "".join(u.b.words[j].norm for j in b_idx).replace(" ", ""):
+        return False     # not the same characters: a real content difference, not a gap
+    ba, bb = breaks(u.a, a_idx), breaks(u.b, b_idx)
     diff = [ba[o] for o in ba.keys() - bb.keys()] + [bb[o] for o in bb.keys() - ba.keys()]
     return bool(diff) and all(diff)
 
@@ -799,7 +851,8 @@ def check(u: Unit) -> list[Finding]:
             pool.subtract(bt[j1:j2])
             hyphen_matched += i2 - i1
             continue
-        if ctype == "hyphenation" or (ctype == "spacing" and (_wrap_only(u, a_idx, b_idx) or sup_gap
+        if ctype == "hyphenation" or (ctype == "spacing" and (_wrap_only(u, a_idx, b_idx)
+                                                               or _wrap_gap(u, a_idx, b_idx) or sup_gap
                 or _code_wrap(u, a_idx, b_idx))) \
                 or (ctype == "punctuation" and (_break_hyphen_only(u, a_idx, b_idx) or _code_wrap(u, a_idx, b_idx))):
             # a word split / wrapped across lines on one side only: same text, a layout difference
@@ -1584,16 +1637,27 @@ def _scripts(u: Unit, sev: str) -> list[Finding]:
         what = (f"“{raised}” is {'superscript' if '^' in wb.script else 'subscript'} in stage" if raised else "") + \
                ("; " if raised and lowered else "") + \
                (f"“{lowered}” is {'superscript' if '^' in wa.script else 'subscript'} in prod" if lowered else "")
+        # The same characters, one side raised by the typesetter ("MacBook®" vs "MacBook^®"), looks
+        # the same to a reader: that is the "superscript" type, which [ignore] types drops by default.
+        # Different characters that only compare equal because NFKC folds the raised code point
+        # ("m²" → "m2", "H₂O" → "H2O", "Nº" → "No", "USB-C™" → "USB-CTM") is a difference the reader
+        # does see, in any language, so it is reported as its own type.
+        folded = wa.text != wb.text
         out.append(Finding(
             "content", sev,
-            f"Superscript / subscript differs: “{_show_script(wa.text, wa.script)}” → “{_show_script(wb.text, wb.script)}” ({what})",
+            (f"Raised / lowered character differs: “{wa.text}” → “{wb.text}” ({what})" if folded else
+             f"Superscript / subscript differs: “{_show_script(wa.text, wa.script)}” → “{_show_script(wb.text, wb.script)}” ({what})"),
             [Loc(wa.page, wa.bbox)], [Loc(wb.page, wb.bbox)],
-            {"op": "script", "baseline_script": wa.script, "candidate_script": wb.script},
-            types=["superscript"], links=[(Loc(wa.page, wa.bbox), Loc(wb.page, wb.bbox))]))
+            {"op": "script", "baseline_script": wa.script, "candidate_script": wb.script,
+             "baseline_text": wa.text, "candidate_text": wb.text},
+            types=["superscript character"] if folded else ["superscript"],
+            links=[(Loc(wa.page, wa.bbox), Loc(wb.page, wb.bbox))]))
     return out
 
 
-_SUPER_CHARS = set("®™©℠¹²³⁰⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ*†‡")
+# raised by their code point (normalize.SCRIPT_CHARS: ¹ ² ⁿ º ᵒ ™ … in any language),
+# plus the marks a typesetter raises without a code point of their own
+_SUPER_CHARS = {c for c, p in normalize.SCRIPT_CHARS.items() if p == "^"} | set("®™©℠*†‡")
 
 
 def _lone_footnote_mark(d, idx: list[int]) -> bool:

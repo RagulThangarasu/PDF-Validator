@@ -18,6 +18,21 @@ INK, MUTED, RULE = "1D2330", "6A7282", "CBD2DC"
 # the report runs in priority order, 1 first; the picture issues come last
 PRIORITIES = {1: "Content", 2: "Links and spacing", 3: "TOC, sections, tables and layout", 4: "Fonts and colours",
               5: "Images (size, pixelated, icons, extra images)"}
+# content.docx groups its issues by what they are, not by the generic report priority: bold / italic is
+# a style finding and would otherwise sit under "Content" (see pdf_report.CONTENT_TYPES)
+CONTENT_GROUPS = {1: "Content — missing and extra", 2: "Hyperlinks — broken and redirected",
+                  3: "Alignment", 4: "Bold / italic", 5: "Other"}
+CONTENT_BUCKETS = {1: {"missing text", "extra text", "missing section", "extra section"},
+                   2: {"broken link", "missing link", "link target differs", "link lands elsewhere"},
+                   3: {"spec text-align", "list alignment", "row alignment"},
+                   4: {"emphasis"}}
+
+
+def content_bucket(f: dict) -> int:
+    """Which part of content.docx an issue belongs to. An issue carrying more than one type goes to the
+    first bucket that claims one of them, so it is listed once."""
+    types = set(f.get("types") or [])
+    return next((n for n, ts in CONTENT_BUCKETS.items() if types & ts), 5)
 # the issues named by the reviewer, by label (f["issue"]); every other issue takes the priority of its group
 ISSUE_PRIORITY = {"Text changed": 1, "Data missing + Extra content": 1, "Space after a word differs": 2,
                   "Table header not centred": 3, "Extra image": 5, "Image differs": 5}
@@ -47,6 +62,10 @@ def _run(par, text: str, *, bold: bool = False, colour: str = INK, size: float =
     r.font.color.rgb = _rgb(colour)
     if highlight is not None:
         r.font.highlight_color = highlight
+    # Word collapses a run of spaces unless the run says to keep them: a word-gap issue ("Timing  Support"
+    # with two spaces) would otherwise read exactly like the correct text in the .docx
+    for t in r._r.findall("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"):
+        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
     return r
 
 
@@ -224,6 +243,194 @@ def _toc(doc, result: dict, seq: int) -> int:
     return seq
 
 
+def _margin_breaks(doc, result: dict, out: Path) -> None:
+    """Content or a table that runs outside the page's own content area, or makes the whole page scroll
+    sideways, as a table: the Bug number, what broke and where. Written here because a reader of the bug
+    report never opens site.pdf, where this used to be reported alone."""
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.shared import Inches
+
+    from .site_report import _crop
+
+    rows = [r for r in (result.get("site") or {}).get("rows", [])
+            if r["group"] == "layout" and r.get("kind") in ("block-overflow", "page-scroll")
+            and r["status"] in ("fail", "warn")]
+    if not rows:
+        return
+    n_fail = sum(1 for r in rows if r["status"] == "fail")
+    doc.add_heading(f"Layout — breaking the page margins ({n_fail} fail · {len(rows) - n_fail} warn)", level=1)
+    table = doc.add_table(rows=1, cols=5)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    widths = [Inches(0.8), Inches(2.4), Inches(2.6), Inches(1.4), Inches(2.2)]
+    _header_row(table.rows[0], repeat=True)
+    for cell, label in zip(table.rows[0].cells, ("Bug", "Item", "Detail", "Page", "On the page")):
+        _cell(cell, label, bold=True, colour="FFFFFF", fill="475569", align_centre=True)
+    short = lambda u: (u or "").rsplit("/", 1)[-1].split("?")[0] or (u or "")
+    cache: dict = {}
+    for n, r in enumerate(rows):
+        cells = table.add_row().cells
+        _header_row(table.rows[-1])
+        _cell(cells[0], r.get("bug", "—"), bold=True)
+        _cell(cells[1], r["item"] + (f'  —  “{r["actual"]}”' if r.get("actual") else ""), bold=False)
+        _cell(cells[2], r["note"] or "—", bold=True, colour="B42318" if r["status"] == "fail" else "B45309")
+        _cell(cells[3], short(r.get("page", "")), bold=False, colour=MUTED)
+        rel = _crop(out, r["shot"], 91000 + n, cache) if r.get("shot") else None
+        if rel and (out / rel).exists():
+            _cell(cells[4])
+            try:
+                cells[4].paragraphs[0].add_run().add_picture(str(out / rel), width=Inches(2.1))
+            except Exception:  # a crop that Word will not take must not cost the whole report
+                _cell(cells[4], "—", colour=MUTED)
+        else:
+            _cell(cells[4], "—", colour=MUTED)
+    for row in table.rows:
+        for c, w in zip(row.cells, widths):
+            c.width = w
+
+
+def _font_size_table(doc, result: dict, out: Path) -> None:
+    """A live page's font size against the Figma spec (config/typography.toml) - only the size
+    mismatches, not every CSS property (weight, colour, line height, ... stay in results.json /
+    site-navigation.csv only). Written here because a reader of the bug report never opens site.pdf,
+    where this used to be reported alone."""
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.shared import Inches
+
+    from .site_report import _crop
+
+    rows = [r for r in (result.get("site") or {}).get("rows", [])
+            if r["group"] == "typography" and "font size" in r["item"] and r["status"] in ("fail", "warn")]
+    if not rows:
+        return
+    n_fail = sum(1 for r in rows if r["status"] == "fail")
+    doc.add_heading(f"Font size — design spec (Figma) ({n_fail} fail · {len(rows) - n_fail} warn)", level=1)
+    table = doc.add_table(rows=1, cols=6)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    widths = [Inches(0.8), Inches(2.4), Inches(1.6), Inches(1.6), Inches(1.4), Inches(2.2)]
+    _header_row(table.rows[0], repeat=True)
+    for cell, label in zip(table.rows[0].cells,
+                           ("Bug", "Item", "Expected (spec)", "Actual (stage)", "Page", "On the page")):
+        _cell(cell, label, bold=True, colour="FFFFFF", fill="475569", align_centre=True)
+    short = lambda u: (u or "").rsplit("/", 1)[-1].split("?")[0] or (u or "")
+    cache: dict = {}
+    for n, r in enumerate(rows):
+        cells = table.add_row().cells
+        _header_row(table.rows[-1])
+        _cell(cells[0], r.get("bug", "—"), bold=True)
+        _cell(cells[1], r["item"], bold=False)
+        _cell(cells[2], r["expected"] or "—", bold=False, colour="2563EB")
+        _cell(cells[3], r["actual"] or "—", bold=True, colour="B42318" if r["status"] == "fail" else "B45309")
+        _cell(cells[4], short(r.get("page", "")), bold=False, colour=MUTED)
+        rel = _crop(out, r["shot"], 93000 + n, cache) if r.get("shot") else None
+        if rel and (out / rel).exists():
+            _cell(cells[5])
+            try:
+                cells[5].paragraphs[0].add_run().add_picture(str(out / rel), width=Inches(2.1))
+            except Exception:  # a crop that Word will not take must not cost the whole report
+                _cell(cells[5], "—", colour=MUTED)
+        else:
+            _cell(cells[5], "—", colour=MUTED)
+    for row in table.rows:
+        for c, w in zip(row.cells, widths):
+            c.width = w
+
+
+def _image_table(doc, result: dict, out: Path) -> None:
+    """A picture that does not load or has collapsed on the live page: is it there, not how it is
+    aligned, sized or scaled (a web page lays its pictures out responsively). Written here because a
+    reader of the bug report never opens site.pdf, where this used to be reported alone."""
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.shared import Inches
+
+    from .site_report import _crop
+
+    rows = [r for r in (result.get("site") or {}).get("rows", [])
+            if r["group"] == "layout" and str(r.get("kind", "")).startswith("image-") and r["status"] in ("fail", "warn")]
+    if not rows:
+        return
+    n_fail = sum(1 for r in rows if r["status"] == "fail")
+    doc.add_heading(f"Images — not loading on the live page ({n_fail} fail · {len(rows) - n_fail} warn)", level=1)
+    table = doc.add_table(rows=1, cols=5)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    widths = [Inches(0.8), Inches(2.4), Inches(2.6), Inches(1.4), Inches(2.2)]
+    _header_row(table.rows[0], repeat=True)
+    for cell, label in zip(table.rows[0].cells, ("Bug", "Item", "Detail", "Page", "On the page")):
+        _cell(cell, label, bold=True, colour="FFFFFF", fill="475569", align_centre=True)
+    short = lambda u: (u or "").rsplit("/", 1)[-1].split("?")[0] or (u or "")
+    cache: dict = {}
+    for n, r in enumerate(rows):
+        cells = table.add_row().cells
+        _header_row(table.rows[-1])
+        _cell(cells[0], r.get("bug", "—"), bold=True)
+        _cell(cells[1], r["item"] + (f'  —  “{r["actual"]}”' if r.get("actual") else ""), bold=False)
+        _cell(cells[2], r["note"] or "—", bold=True, colour="B42318" if r["status"] == "fail" else "B45309")
+        _cell(cells[3], short(r.get("page", "")), bold=False, colour=MUTED)
+        rel = _crop(out, r["shot"], 94000 + n, cache) if r.get("shot") else None
+        if rel and (out / rel).exists():
+            _cell(cells[4])
+            try:
+                cells[4].paragraphs[0].add_run().add_picture(str(out / rel), width=Inches(2.1))
+            except Exception:  # a crop that Word will not take must not cost the whole report
+                _cell(cells[4], "—", colour=MUTED)
+        else:
+            _cell(cells[4], "—", colour=MUTED)
+    for row in table.rows:
+        for c, w in zip(row.cells, widths):
+            c.width = w
+
+
+def _hyperlinks_table(doc, result: dict, out: Path) -> None:
+    """Every hyperlink problem the site run found: the left navigation's own links, a DITA GUID left in
+    an address or label, and the content's own cross-reference links. Written here because a reader of
+    the bug report never opens site.pdf, where this used to be reported alone."""
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.shared import Inches
+
+    from .site_report import _crop
+
+    rows = [r for r in (result.get("site") or {}).get("rows", []) if r["group"] == "links" and r["status"] in ("fail", "warn")]
+    if not rows:
+        return
+    n_fail = sum(1 for r in rows if r["status"] == "fail")
+    doc.add_heading(f"Hyperlinks ({n_fail} fail · {len(rows) - n_fail} warn)", level=1)
+    table = doc.add_table(rows=1, cols=6)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    widths = [Inches(0.8), Inches(2.4), Inches(1.6), Inches(1.6), Inches(1.4), Inches(2.2)]
+    _header_row(table.rows[0], repeat=True)
+    for cell, label in zip(table.rows[0].cells, ("Bug", "Item", "Expected", "Actual", "Page", "On the page")):
+        _cell(cell, label, bold=True, colour="FFFFFF", fill="475569", align_centre=True)
+    short = lambda u: (u or "").rsplit("/", 1)[-1].split("?")[0] or (u or "")
+    cache: dict = {}
+    for n, r in enumerate(rows):
+        cells = table.add_row().cells
+        _header_row(table.rows[-1])
+        _cell(cells[0], r.get("bug", "—"), bold=True)
+        _cell(cells[1], r["item"] + (f'  —  “{r["note"]}”' if r.get("note") else ""), bold=False)
+        _cell(cells[2], r["expected"] or "—", bold=False, colour="2563EB")
+        _cell(cells[3], r["actual"] or "—", bold=True, colour="B42318" if r["status"] == "fail" else "B45309")
+        _cell(cells[4], short(r.get("page", "")), bold=False, colour=MUTED)
+        rel = _crop(out, r["shot"], 95000 + n, cache) if r.get("shot") else None
+        if rel and (out / rel).exists():
+            _cell(cells[5])
+            try:
+                cells[5].paragraphs[0].add_run().add_picture(str(out / rel), width=Inches(2.1))
+            except Exception:  # a crop that Word will not take must not cost the whole report
+                _cell(cells[5], "—", colour=MUTED)
+        else:
+            _cell(cells[5], "—", colour=MUTED)
+    for row in table.rows:
+        for c, w in zip(row.cells, widths):
+            c.width = w
+
+
 def _spec(doc, result: dict, out: Path) -> None:
     """The live page's CSS / typography / layout against the design spec (the Figma stylesheet), as a
     table: the Bug number, what was measured, what the spec asks for and what stage draws. Written here
@@ -303,15 +510,22 @@ def _screenshots(doc, out: Path, f: dict, shots: dict, img_w):
             p.add_run().add_picture(io.BytesIO(data), height=int(max_h))
 
 
-def build(result: dict, out_dir: str | Path, filename: str = "genuine-issues.docx") -> Path:
+def build(result: dict, out_dir: str | Path, filename: str = "genuine-issues.docx", *,
+          options: dict | None = None, title: str | None = None, groups: dict | None = None,
+          bucket=None, extras: bool = True) -> Path:
+    """options: a pdf_report preset (GENUINE by default; CONTENT_REPORT for content.docx).
+    extras=False leaves out the parts that are not this report's subject: the TOC table, the picture
+    issues of the image report, anything else carrying a bug number, and the design-spec appendix."""
     from docx import Document
     from docx.enum.section import WD_ORIENT
     from docx.shared import Inches, Pt
 
     out = Path(out_dir)
-    flt = pdf_report.GENUINE["filter"]
+    labels = groups or PRIORITIES
+    flt = (options or pdf_report.GENUINE)["filter"]
     issues = pdf_report.select_issues(result, flt, None)
-    toc_in_own_part = bool((result.get("toc") or {}).get("rows")) and any(f["check"] == "toc" for _, f in issues)
+    toc_in_own_part = extras and bool((result.get("toc") or {}).get("rows")) \
+        and any(f["check"] == "toc" for _, f in issues)
     if toc_in_own_part:  # as in the PDF report: the TOC is compared entry by entry in its own part
         issues = [x for x in issues if x[1]["check"] != "toc"]
 
@@ -329,13 +543,15 @@ def build(result: dict, out_dir: str | Path, filename: str = "genuine-issues.doc
     img_w = (sec.page_width - sec.left_margin - sec.right_margin - Inches(0.4)) / 2
 
     name = (result.get("meta") or {}).get("name") or ""
-    title = doc.add_heading(f"PDF report - issues{' - ' + name if name else ''}", level=0)
-    title.paragraph_format.space_after = Pt(4)
+    head = doc.add_heading(f"{title or 'PDF report - issues'}{' - ' + name if name else ''}", level=0)
+    head.paragraph_format.space_after = Pt(4)
 
-    buckets = {p: [] for p in PRIORITIES}
+    buckets = {p: [] for p in labels}
+    into = bucket or _priority
     for s, f in issues:
-        buckets[_priority(f)].append((s, f))
-    _cover(doc, result)
+        buckets.setdefault(into(f), []).append((s, f))
+    if extras:  # the cover check (sheet title / version) is not one of this report's checks
+        _cover(doc, result)
     seq = 0  # the issues are numbered in the order of the report
     n_toc = 0
     shown: set[str] = set()  # ids of the issues written so far: nothing that has a bug number may be left out
@@ -347,11 +563,12 @@ def build(result: dict, out_dir: str | Path, filename: str = "genuine-issues.doc
         # marked as shown so it does not fall through to "Other issues" below
         toc_issues = [(sec, f) for sec, f in every if f.get("check") == "toc" and (f.get("genuine") or f.get("bug"))]
         shown.update(f["id"] for _, f in toc_issues)
-    for p, label in PRIORITIES.items():
-        items = buckets[p]
+    for p, label in labels.items():
+        items = buckets.get(p) or []
         if not items:
             continue
-        doc.add_heading(f"Priority {p} · {label}" + (f" ({len(items)})" if items else ""), level=1)
+        doc.add_heading((f"Priority {p} · {label}" if extras else label)
+                        + (f" ({len(items)})" if items else ""), level=1)
         current = None
         for s, f in items:
             if s is not current:
@@ -362,7 +579,7 @@ def build(result: dict, out_dir: str | Path, filename: str = "genuine-issues.doc
             _issue(doc, out, f, img_w, seq)
     # whatever has a bug number and is not in the report yet: the picture issues of the image report (callout
     # numbers, labels, leader lines, red overlay, artwork missing) and any other issue - no issue is dropped
-    rest = [(sec, f) for sec, f in every if f.get("bug") and f["id"] not in shown]
+    rest = [(sec, f) for sec, f in every if f.get("bug") and f["id"] not in shown] if extras else []
     for title, part in (("Images: numbers, labels, overlays and artwork (image report)", [x for x in rest if x[1].get("check") == "assets"]),
                         ("Other issues", [x for x in rest if x[1].get("check") != "assets"])):
         if not part:
@@ -376,7 +593,11 @@ def build(result: dict, out_dir: str | Path, filename: str = "genuine-issues.doc
             seq += 1
             shown.add(f["id"])
             _issue(doc, out, f, img_w, seq)
-    _spec(doc, result, out)
+    if extras:
+        _margin_breaks(doc, result, out)
+        _font_size_table(doc, result, out)
+        _image_table(doc, result, out)
+        _hyperlinks_table(doc, result, out)
     if not issues and not n_toc and not rest and not (result.get("site") or {}).get("rows"):
         _run(_par(doc), "No issues.", colour="16A34A")
     path = out / filename
@@ -460,13 +681,17 @@ def _issue(doc, out: Path, f: dict, img_w, seq: int):
     ea = _expected_actual(f)
     if ea:  # expected = what prod has, actual = what stage has; the words that differ are red
         left, right = _diff_words(*ea)
-        for label, pieces, colour in (("Expected (prod): ", left, "2563EB"), ("Actual (stage): ", right, "0F766E")):
+        for label, pieces, colour, text_ in (("Expected (prod): ", left, "2563EB", ea[0]),
+                                             ("Actual (stage): ", right, "0F766E", ea[1])):
+            quoted = text_.startswith("“")  # already quoted by prod_stage: no second pair of quotes around it
             p = _par(doc, after=0)
             _run(p, label, bold=True, colour=colour)
-            _run(p, "“", colour=INK)
+            if not quoted:
+                _run(p, "“", colour=INK)
             for text, changed in pieces:  # (each piece carries its own spacing)
                 _run(p, text, bold=changed, colour="B42318" if changed else INK)
-            _run(p, "”", colour=INK)
+            if not quoted:
+                _run(p, "”", colour=INK)
     a = f.get("aem")
     if a:
         p = _par(doc, after=0)

@@ -24,14 +24,20 @@ def test_site_report_captures_every_group_and_row(tmp_path, serve):
     doc = pymupdf.open(out)
     text = "\n".join(p.get_text() for p in doc)
     doc.close()
-    # a fail row (left nav) and a pass row (CSS vs spec is on by default; the bad H1 made it fail too)
+    # the site checks are reported ...
     assert "Left navigation" in text
     assert "Basic operations" in text
-    assert "Headline 1" in text
-    assert "bold missing" in text.lower() or "font weight" in text.lower()
+    # ... and the design-spec sections are not: an AEM site validation does not report spec compliance
+    # (site_report.SKIP_GROUPS - see tests/test_site_report_groups.py). The rows are still produced:
+    assert "Headline 1" not in text
+    assert [row for row in r["site"]["rows"] if row["group"] == "typography"], \
+        "the CSS-vs-spec rows must still be computed, only left out of the report"
 
 
-def test_site_report_embeds_a_screenshot_crop_for_a_broken_image(tmp_path, serve):
+def test_a_broken_image_row_still_carries_its_shot_even_though_layout_is_not_printed(tmp_path, serve):
+    """"layout" (picture missing, margins) is one of the groups site.pdf leaves out (SKIP_GROUPS) - the
+    row and its shot are still fully captured in results.json, just never turned into a crop file or
+    printed, since nothing ever calls _card()/_crop() for a group that isn't shown."""
     pdf = make_site(tmp_path)
     page = tmp_path / "guide" / "overview.html"
     page.write_text(page.read_text().replace('<div class="pager">',
@@ -42,7 +48,8 @@ def test_site_report_embeds_a_screenshot_crop_for_a_broken_image(tmp_path, serve
     assert out and out.exists()
     layout_rows = [row for row in r["site"]["rows"] if row["group"] == "layout" and row["item"] == "Picture not loaded"]
     assert layout_rows and layout_rows[0].get("shot")
-    assert (run_dir / "site-shots" / "crops" / "0001.png").exists()
+    assert not (run_dir / "site-shots" / "crops" / "0001.png").exists()
     doc = pymupdf.open(out)
-    assert any(p.get_images() for p in doc)
+    text = "\n".join(p.get_text() for p in doc)
+    assert "Page layout and pictures" not in text and "Picture not loaded" not in text
     doc.close()

@@ -70,6 +70,24 @@ def _raw(doc: Doc, page: int) -> list:
     return _RAW[key]
 
 
+class Table(tuple):
+    """(table no, table bbox, [(row bbox, first cell bbox)], column grid) - unpacks like the plain tuple
+    it has always been, and says where its cells really are: `cells` (a grid table: the cell rectangles
+    per row, None where a cell above or beside covers the spot) or `cuts` (a table drawn with rules
+    only: [(y, x0, x1)], and a rule stopping short is what marks a cell spanning the row below).
+    cell_spans() turns either into "this column's cell here starts in row N", so a merged cell is read
+    as one cell at the top of its span - the way the same table reads on the web - instead of having
+    its text split over the rows it spans."""
+
+    cuts: list
+    cells: list
+
+    def __new__(cls, items, cuts=(), cells=()):
+        t = super().__new__(cls, items)
+        t.cuts, t.cells = list(cuts), list(cells)
+        return t
+
+
 def detect(page: pymupdf.Page) -> list:
     """Tables on a page: [(table no, table bbox, [(row bbox, first cell bbox)], column grid)].
     Also used by the extractor to read table text in row/cell order."""
@@ -81,14 +99,59 @@ def detect(page: pymupdf.Page) -> list:
                 # (usually the header: tables without vertical rules still have a shaded header)
                 grid_row = max(tb.rows, key=lambda r: sum(1 for c in r.cells if c))
                 grid = sorted((c[0], c[2]) for c in grid_row.cells if c)
-                out.append((t, tuple(tb.bbox), [(tuple(r.bbox), next((tuple(c) for c in r.cells if c), None))
-                                                 for r in tb.rows], grid))
+                # a row's band is where its own cells end, not where its bbox does: a cell spanning the
+                # rows below it makes the row bbox as tall as the whole span, and every row it covers was
+                # swallowed into the first one ("SW series" + 5 rows read as a single row)
+                rows, cells = [], []
+                for r in tb.rows:
+                    cs = [tuple(c) if c else None for c in r.cells]
+                    ends = [c[3] for c in cs if c and c[3] > r.bbox[1] + 2]
+                    y1 = min(ends) if ends else r.bbox[3]
+                    rows.append(((r.bbox[0], r.bbox[1], r.bbox[2], y1), next((c for c in cs if c), None)))
+                    cells.append(cs)
+                out.append(Table((t, tuple(tb.bbox), rows, grid), cells=cells))
     except Exception:
         pass
     try:
         out += _ruled(page, out)
     except Exception:
         pass
+    return out
+
+
+
+def cell_spans(t) -> dict:
+    """{(column, row): the row the cell covering it starts in} for the columns of `t` whose cells span
+    several rows. Read from the table's own row rules (Table.cuts): a rule is drawn cell by cell and
+    stops at a cell that spans the row below, so a row boundary no rule crosses inside a column is not a
+    cell boundary there - the rows on either side of it are one cell, belonging to the first of them
+    (which is where the same table starts that cell on the web). {} for a table with no rules to go by."""
+    _, _, rows, grid = t
+    cuts, cells = getattr(t, "cuts", None), getattr(t, "cells", None)
+    out: dict = {}
+    if cells:  # a grid table: the cell rectangles say which rows a cell covers
+        boxes = [(r, c) for r, cs in enumerate(cells) for c in (cs or []) if c]
+        for c, (gx0, gx1) in enumerate(grid):
+            for r, (rb, _) in enumerate(rows):
+                mid = (rb[1] + rb[3]) / 2
+                owner = next((rr for rr, cell in boxes
+                              if cell[1] - 2 <= mid <= cell[3] + 2
+                              and cell[0] - 2 <= gx0 + 2 and gx1 - 2 <= cell[2] + 2), None)
+                if owner is not None and owner != r:
+                    out[(c, r)] = owner
+        return out
+    if not cuts:
+        return {}
+    for c, (gx0, gx1) in enumerate(grid):
+        start = 0
+        for r, (rb, _) in enumerate(rows):
+            if r == 0:
+                continue
+            cut = any(abs(cy - rb[1]) <= 2 and cx0 - 2 <= gx0 + 2 and gx1 - 2 <= cx1 + 2 for cy, cx0, cx1 in cuts)
+            if cut:
+                start = r
+            elif start != r:
+                out[(c, r)] = start
     return out
 
 
@@ -126,23 +189,35 @@ def _ruled(page: pymupdf.Page, found: list) -> list:
     icons = [pymupdf.Rect(i["bbox"]) for i in page.get_image_info() if pymupdf.Rect(i["bbox"]).width <= 60]
     taken = [pymupdf.Rect(t[1]) for t in found if len(t[2]) >= 2]
     out = []
-    groups: dict = {}
-    for y, x0, x1 in rules:
-        key = next((k for k in groups if abs(k[0] - x0) <= 4 and abs(k[1] - x1) <= 4), (x0, x1))
-        groups.setdefault(key, []).append(y)
-    for (x0, x1), ys in groups.items():
-        ys = sorted(set(round(y, 1) for y in ys))
+    # One table's row rules do not all have the same width: a rule is drawn cell by cell, so it stops
+    # short wherever a cell spans the row below it ("SW series" over three rows leaves that row's rule
+    # starting one column in). Grouping by an identical extent split such a table into two or three
+    # groups of one or two rules each - none of them a table - and its body was never detected at all,
+    # so its text was read line by line and the spanning cell's words landed between the other columns'.
+    # Rules that overlap each other horizontally belong to one table; the table spans their union.
+    groups: list[list] = []   # [[x0, x1, [(y, x0, x1), ...]], ...]
+    for y, x0, x1 in sorted(rules, key=lambda r: (-(r[2] - r[1]), r[0])):
+        g = next((g for g in groups
+                  if min(g[1], x1) - max(g[0], x0) >= 0.5 * min(g[1] - g[0], x1 - x0)), None)
+        if g is None:
+            groups.append([x0, x1, [(y, x0, x1)]])
+            continue
+        g[0], g[1] = min(g[0], x0), max(g[1], x1)
+        g[2].append((y, x0, x1))
+    for x0, x1, cuts in groups:
+        ys = sorted(set(round(y, 1) for y, _, _ in cuts))
         stack = [ys[0]]
         for y in ys[1:] + [None]:
             # one table: rules at most 160 pt apart; two rules a few points apart (the table's last line, then the
             # top line of a Tip / Note block under it) end it
             # a header bar starts a new table: the band above it (an “Output” heading between two tables) is no row
-            new_bar = y is not None and any(abs(y - by) <= 2 and abs(bx0 - x0) <= 4 for by, bx0, _ in bar_tops)
+            over = lambda bx0, bx1: min(x1, bx1) - max(x0, bx0) >= 0.5 * min(x1 - x0, bx1 - bx0)
+            new_bar = y is not None and any(abs(y - by) <= 2 and over(bx0, bx1) for by, bx0, bx1 in bar_tops)
             if y is not None and 6 <= y - stack[-1] <= 160 and not new_bar:
                 stack.append(y)
                 continue
             # a table starts at its header bar (rules alone also frame Tip / Note blocks)
-            starts_ok = any(abs(stack[0] - by) <= 2 and abs(bx0 - x0) <= 4 for by, bx0, _ in bar_tops)
+            starts_ok = any(abs(stack[0] - by) <= 2 and over(bx0, bx1) for by, bx0, bx1 in bar_tops)
             if not starts_ok:
                 stack = [y] if y is not None else []
                 continue
@@ -156,17 +231,27 @@ def _ruled(page: pymupdf.Page, found: list) -> list:
                     xs_ = {round(r.x0) for r, _ in lines if x0 - 2 <= r.x0 <= x1 and a <= (r.y0 + r.y1) / 2 <= b}
                     xs_ |= {round(r.x0) for r in icons if x0 - 2 <= r.x0 <= x1 and a <= (r.y0 + r.y1) / 2 <= b}
                     starts.append(xs_)
-                cand = sorted({x for st in starts for x in st})
+                # where a row rule starts is a column boundary too, and a sure one: the rule stops at the
+                # edge of the cell that spans the row below it ("Advanced" over two rows), so its left end
+                # is that column's x. Text starts alone miss such a column when only its two rows show it.
+                from_rules = {round(c[1]) for c in cuts if c[1] > x0 + 4}
+                cand = sorted({x for st in starts for x in st} | from_rules)
                 cols = []
                 for x in cand:
                     n = sum(1 for st in starts if any(abs(x - z) <= 4 for z in st))
-                    if n >= max(2, 0.4 * len(bands)) and (not cols or x - cols[-1] > 30):
+                    if (n >= max(2, 0.4 * len(bands)) or any(abs(x - r) <= 4 for r in from_rules)) \
+                            and (not cols or x - cols[-1] > 30):
                         cols.append(x)
-                if len(cols) >= 2:
-                    edges = [x0] + [c - 2 for c in cols[1:]] + [x1]
+                # the first candidate is usually the left padding of the first column, not a boundary -
+                # but only when it really sits at the table's left edge: dropping cols[0] blindly ate the
+                # first boundary of a table whose own first column was found by its rules alone
+                inner = [c for c in cols if c - x0 > 20]
+                if len(inner) >= 1 and len(cols) >= 2:
+                    edges = [x0] + [c - 2 for c in inner] + [x1]
                     grid = [(edges[k], edges[k + 1]) for k in range(len(edges) - 1)]
                     rows = [((x0, a, x1, b), (x0, a, grid[0][1], b)) for a, b in bands]
-                    out.append((100 + len(out), (x0, stack[0], x1, stack[-1]), rows, grid))
+                    out.append(Table((100 + len(out), (x0, stack[0], x1, stack[-1]), rows, grid),
+                                     cuts=[c for c in cuts if stack[0] - 1 <= c[0] <= stack[-1] + 1]))
             stack = [y] if y is not None else []
     return out
 
@@ -322,6 +407,11 @@ def diagram_boxes(doc: Doc, page: int) -> list[tuple]:
     return out
 
 
+def _entry(doc: Doc, page: int, t: int):
+    """The detected table `t` of this page, as detect() returned it (a Table that carries its rules)."""
+    return next((x for x in _raw(doc, page) if x[0] == t), None)
+
+
 def tables(doc: Doc, rng: tuple[int, int], loose: bool = False) -> list[TTable]:
     """loose: also the grids that are not a table of rows on their own - the part of a table that runs on over
     a page with one tall label cell beside several bordered parts (text in two columns, but only one column
@@ -333,17 +423,36 @@ def tables(doc: Doc, rng: tuple[int, int], loose: bool = False) -> list[TTable]:
         for t, tbox, rows, grid in _raw(doc, p):
             if tuple(tbox) in figures:
                 continue  # a layout diagram drawn as a grid: a figure, not a table to compare row by row
+            spans = cell_spans(_entry(doc, p, t))
             trows, taken = [], set()
+            geo = []
             for box, first in rows:
                 # a row spans the whole table: the detector only reports the cells it can see
                 # (e.g. just the shaded label column when a table has no vertical rules)
                 box = (tbox[0], box[1], tbox[2], box[3])
                 # a word belongs to one row: the detector can report nested/overlapping rows
                 idx = [i for i in _inside(doc, rng, p, box) if i not in taken]
+                taken.update(idx)
+                geo.append([box, first, idx])
+            # a cell spanning several rows belongs to the row its span starts in, with all of its text -
+            # not to the row its (vertically centred) words happen to sit in, which split one cell over
+            # two rows and made the rows of both sides look merged / different
+            if spans:
+                moved: dict = {}
+                for r, (_, _, idx) in enumerate(geo):
+                    for i in idx:
+                        lx = doc.words[i].bbox[0] + 2
+                        c = min(range(len(grid)), key=lambda g: 0 if grid[g][0] - 1 <= lx <= grid[g][1] + 1
+                                else min(abs(lx - grid[g][0]), abs(lx - grid[g][1]))) if grid else 0
+                        moved.setdefault(spans.get((c, r), r), []).append(i)
+                for r, g in enumerate(geo):
+                    g[2] = sorted(moved.get(r, []))
+            for box, first, idx in geo:
                 if not idx:
                     continue
-                taken.update(idx)
-                first_idx = _inside(doc, rng, p, first) if first else []
+                first_idx = [i for i in _inside(doc, rng, p, first) if i in idx] if first else []
+                if spans and not first_idx and grid:
+                    first_idx = [i for i in idx if grid[0][0] - 1 <= doc.words[i].bbox[0] + 2 <= grid[0][1] + 1]
                 label = first_idx or idx[:3]
                 cols = _columns(doc, idx, grid)
                 trows.append(TRow((p, t), p, box, idx, label, _bag(doc, idx), _bag(doc, label), len(cols), cols,
@@ -865,9 +974,10 @@ def check(u: Unit) -> list[Finding]:
         findings += _row_background(u, tb_pages)
     if tcfg.get("check_header_align", True):
         findings += _header_align(u, tb_pages)
-    # off by default: unlike a header (always left-aligned, see _header_align), a narrow ID/number
-    # column legitimately centred on its own is common in real tables - this would flag it every time
-    if tcfg.get("check_cell_align", False):
+    # on: table cell text must be left-aligned (design spec), a narrow centred ID/number column
+    # included - [tables] check_cell_align = false brings back the old behaviour of not reporting it
+    # (a web page's PDF is a screenshot of a reflowed page: its cell geometry is not the design spec's)
+    if tcfg.get("check_cell_align", True) and not web:
         findings += _cell_align(u, tb_pages)
     if tcfg.get("check_font_size", True):
         findings += _uniform_font_size(u, tb_pages)
@@ -996,11 +1106,20 @@ def _header_align(u: Unit, tb: list) -> list[Finding]:
 
 
 def _cell_align(u: Unit, tb: list) -> list[Finding]:
-    """Table data cells: like a header (_header_align), every line of a data cell's text must be
-    left-aligned in its column - an absolute design-spec rule, judged on its own, not against what
-    prod happens to do. A right-aligned number column is still a stage-only deviation from the spec."""
-    tol = u.cfg["tables"].get("header_align_tolerance", 4.0)
-    sev = u.cfg["tables"].get("header_align_severity", "error")
+    """Every row of a table column starts at the same left edge - the header rows included.
+
+    Judged on stage alone (an absolute rule, not against what prod happens to do), and read from the
+    table itself: whatever cell padding a column uses, all of its rows must use it. Reported when they
+    do not - the header rows set against the cell border while the data rows are indented, one header
+    row indented and the next not, or a column whose text is centred (its rows then sit at as many left
+    edges as they have widths). One finding per table, naming the columns and the rows that are off.
+
+    [tables] check_cell_align, cell_align_tolerance (pt two left edges may differ and still be one
+    edge), cell_align_min_rows, cell_align_severity.
+    """
+    tol = u.cfg["tables"].get("cell_align_tolerance", 4.0)
+    sev = u.cfg["tables"].get("cell_align_severity", "error")
+    min_rows = int(u.cfg["tables"].get("cell_align_min_rows", 3))
     A, B = u.a, u.b
     b2a = {j: i for i, j in u.pairs}
     rcfg = u.cfg["report"]
@@ -1009,38 +1128,49 @@ def _cell_align(u: Unit, tb: list) -> list[Finding]:
         raw = next((r for r in _raw(B, t.page) if r[0] == t.key[1]), None)
         if not raw or not is_data_table(B, t):
             continue
-        grid = raw[3]
-        head = t.rows[0]
-        data_rows = t.rows[1:] if _is_header_bar(B, head) else t.rows
-        bad = []
-        for row in data_rows:
-            for x0, x1 in grid:
+        cols = []
+        for ci, (x0, x1) in enumerate(raw[3]):
+            cells = []
+            for row in t.rows:
                 words = [i for i in row.idx if x0 - 1 <= (B.words[i].bbox[0] + B.words[i].bbox[2]) / 2 <= x1 + 1]
                 if not words:
                     continue
+                # a cell is judged on its first line - the one that sets the left edge; a wrapped line
+                # further in, or a second text run on the same line, is not an edge of its own
                 by_line: dict[int, list[int]] = defaultdict(list)
                 for i in words:
                     by_line[B.words[i].line].append(i)
-                for ln, ws in by_line.items():
-                    left = min(B.words[i].bbox[0] for i in ws) - x0
-                    right = x1 - max(B.words[i].bbox[2] for i in ws)
-                    if left < 0 or left <= tol:
-                        continue  # at (or past) the column's left edge: left-aligned, as the spec requires
-                    how = ("centred" if right >= 0 and abs(left - right) <= 2 * tol else "right-aligned" if 0 <= right <= tol
-                          else f"indented {left:.0f}pt from the left edge")
-                    bad.append((sorted(ws, key=lambda i: B.words[i].bbox[0]), how))
-        if not bad:
+                ws = by_line[min(by_line)]
+                cells.append((sorted(words, key=lambda i: (B.words[i].line, B.words[i].bbox[0])),
+                              min(B.words[i].bbox[0] for i in ws) - x0))
+            if len(cells) < min_rows or max(l for _, l in cells) - min(l for _, l in cells) <= tol:
+                continue  # too few filled cells to read an edge from, or one edge for the whole column
+            # the edge most of the rows sit at is the column's own; the rest are named with theirs
+            groups: dict[int, list] = defaultdict(list)
+            for ws, l in cells:
+                groups[int(round(l / max(tol, 1)))].append((ws, l))
+            main = max(groups.values(), key=len)
+            home = sum(l for _, l in main) / len(main)
+            off = sorted((x for g in groups.values() if g is not main for x in g), key=lambda x: x[1])
+            cols.append((ci, home, len(main), off))
+        if not cols:
             continue
-        idx = [i for ws, _ in bad for i in ws]
-        names = "; ".join(f"“{' '.join(B.words[i].text for i in ws)}” {how}" for ws, how in bad[:6])
-        more = f" (+{len(bad) - 6} more)" if len(bad) > 6 else ""
+        idx = [i for _, _, _, off in cols for ws, _ in off for i in ws]
+        say = lambda ws: " ".join(B.words[i].text for i in ws)
+        names = "; ".join(
+            f"column {ci + 1}: {n} row(s) at {home:.0f}pt, "
+            + ", ".join(f"“{say(ws)}” at {l:.0f}pt" for ws, l in off[:3])
+            + (f" (+{len(off) - 3} more row(s))" if len(off) > 3 else "")
+            for ci, home, n, off in cols[:3])
+        more = f" (+{len(cols) - 3} more column(s))" if len(cols) > 3 else ""
         a_idx = [b2a[j] for j in idx if j in b2a]
         out.append(Finding(
             "tables", sev,
-            f"Table cell(s) not left-aligned in stage ({len(bad)} cell{'s' if len(bad) > 1 else ''}): {names}{more}"
-            + " — table cell text must be left-aligned (design spec)",
+            f"Table cells not aligned in stage ({len(cols)} column(s)): {names}{more}"
+            + " — every row of a column, its header rows included, must start at the same left edge",
             locs(A, a_idx, rcfg["max_locs"]) if a_idx else [], locs(B, idx, rcfg["max_locs"]),
-            {"kind": "table cell alignment", "cells": len(bad)}, types=["table cell alignment"]))
+            {"kind": "table cell alignment", "columns": len(cols),
+             "rows_off": sum(len(off) for *_, off in cols)}, types=["table cell alignment"]))
     return out
 
 

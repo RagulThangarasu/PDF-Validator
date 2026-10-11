@@ -390,6 +390,41 @@ def test_bullet_alignment_is_an_indent_issue(tmp_path, cfg):
     assert not same  # same alignment, bullet only stored elsewhere in reading order
 
 
+def _list_pdf_no_intro(path, bullet_dx, gap=6):
+    """Same three-item list as _list_pdf, far below an unrelated paragraph that never moves - too far
+    to be "the line introducing the list" (bullet_intro_max_gap_em), so the list itself has nothing
+    close above it to measure its own indent against. The paragraph (fixed at the page's own margin,
+    regardless of bullet_dx) is what checks/extract.py::_measure reads the page's content margin from."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "Overview", fontsize=18, fontname="hebo")
+    page.insert_text((72, 120), "This paragraph sits at the page's own left margin and never moves.", fontsize=11, fontname="helv")
+    page.insert_text((72, 136), "A second line of the same paragraph, so the margin is well established.", fontsize=11, fontname="helv")
+    y = 300
+    for t in ("Keep the box for transport.", "Do not leave bags near children.", "Recycle the carton."):
+        page.insert_text((72 + bullet_dx, y), "•", fontsize=11, fontname="helv")
+        page.insert_text((72 + bullet_dx + gap, y), t, fontsize=11, fontname="helv")
+        y += 14
+    doc.set_toc([[1, "Overview", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_a_list_with_nothing_to_introduce_it_is_checked_against_the_page_margin(tmp_path, cfg):
+    """A list beside a picture (or anywhere with no paragraph right above it) used to be measured
+    against its own first marker - always "0", so the whole list sliding right or left between prod
+    and stage (same relative spacing between its own items) went uncaught. It is now measured against
+    the page's own content margin instead."""
+    cfg["layout"]["compare_with_prod"] = True
+    a = _list_pdf_no_intro(tmp_path / "a.pdf", 0)
+    b = _list_pdf_no_intro(tmp_path / "b.pdf", 36)  # the whole list shifted right, same spacing inside it
+    bullets = [f for f in checks(compare(a, b, cfg), "layout") if f["detail"].get("kind") == "bullet indent"]
+    assert bullets and bullets[0]["detail"]["lines"] == 3
+    same = [f for f in checks(compare(a, _list_pdf_no_intro(tmp_path / "c.pdf", 0), cfg), "layout")
+            if f["detail"].get("kind") == "bullet indent"]
+    assert not same  # no shift: nothing to report
+
+
 def _list_pdf_marker(path, marker):
     """Same list as _list_pdf, with a chosen marker glyph instead of "•"."""
     doc = pymupdf.open()
@@ -438,6 +473,72 @@ def test_list_numbering_style_format_and_sequence(tmp_path, cfg):
     paren = kinds(_numbered_pdf(tmp_path / "c.pdf", ["a)", "b)", "c)"]))
     assert {k for k, _, _ in paren} == {"numbering format"}
     assert not kinds(_numbered_pdf(tmp_path / "d.pdf", ["a.", "b.", "c."]))
+
+
+def _nested_list_pdf(path, sub_markers):
+    """A 3-level nested list: "3." (top) -> sub_markers[0] (indented once) -> sub_markers[1] (indented
+    twice) - the exact shape of a numbered step with lettered sub-steps."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "Overview", fontsize=18, fontname="hebo")
+    page.insert_text((72, 130), "Mounting the stand.", fontsize=11, fontname="helv")
+    page.insert_text((72, 150), "3.", fontsize=11, fontname="helv")
+    page.insert_text((88, 150), "Decide the way to install the ergo arm.", fontsize=11, fontname="helv")
+    page.insert_text((92, 168), sub_markers[0], fontsize=11, fontname="helv")
+    page.insert_text((108, 168), "Clamp mounting", fontsize=11, fontname="helv")
+    page.insert_text((112, 186), sub_markers[1], fontsize=11, fontname="helv")
+    page.insert_text((128, 186), "Attach the stand arm to the edge of the desk.", fontsize=11, fontname="helv")
+    doc.set_toc([[1, "Overview", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_nested_list_numbering_style_differs_per_level(tmp_path, cfg):
+    """Prod nests a numbered step as 3. -> A. -> a. (number, capital letter, lowercase letter); stage
+    flattens every level to plain numbers (3. -> 1. -> 1.) - each nested level is its own numbering
+    style mismatch, not lost in the outer "3." matching fine. Both differences land in one combined
+    finding (the same marker text also counts as "changed text") - its message names both levels, even
+    though the structured detail of a merged finding only keeps one baseline/candidate pair."""
+    a = _nested_list_pdf(tmp_path / "a.pdf", ["A.", "a."])
+    b = _nested_list_pdf(tmp_path / "b.pdf", ["1.", "1."])
+    messages = [f["message"] for f in checks(compare(a, b, cfg), "content") if "numbering style" in f["types"]]
+    assert any("A, B, C" in m and "1, 2, 3" in m for m in messages)   # the 2nd-level marker
+    assert any("a, b, c" in m and "1, 2, 3" in m for m in messages)   # the 3rd-level marker
+    same = [f["message"] for f in checks(compare(a, _nested_list_pdf(tmp_path / "c.pdf", ["A.", "a."]), cfg), "content")
+            if "numbering style" in f["types"]]
+    assert not same
+
+
+def _list_with_sub_heading_pdf(path, heading_x):
+    """A 2-item list whose second item has its own sub-heading right under it: nested in its item's
+    text column at heading_x=88, or flush left (body text, not nested) at heading_x=72."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "Overview", fontsize=18, fontname="hebo")
+    page.insert_text((72, 130), "Steps to follow.", fontsize=11, fontname="helv")
+    page.insert_text((72, 150), "1.", fontsize=11, fontname="helv")
+    page.insert_text((88, 150), "Open the panel.", fontsize=11, fontname="helv")
+    page.insert_text((72, 168), "2.", fontsize=11, fontname="helv")
+    page.insert_text((88, 168), "Replace the battery.", fontsize=11, fontname="helv")
+    page.insert_text((heading_x, 186), "Battery safety", fontsize=12, fontname="hebo")
+    page.insert_text((88, 204), "Use only the specified battery type.", fontsize=11, fontname="helv")
+    doc.set_toc([[1, "Overview", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_a_heading_nested_in_a_list_item_that_becomes_body_text_is_reported(tmp_path, cfg):
+    """A sub-heading set under a list item's own text column in prod (part of that step) printed flush
+    left in stage (plain body text, no longer part of the step) is a list-structure break, not a
+    cosmetic nudge - "List level differs", regardless of it being a heading rather than a paragraph."""
+    cfg["layout"]["compare_with_prod"] = True
+    a = _list_with_sub_heading_pdf(tmp_path / "a.pdf", 88)   # nested under item 2 in prod
+    b = _list_with_sub_heading_pdf(tmp_path / "b.pdf", 72)   # flush left in stage: body text
+    found = [f for f in checks(compare(a, b, cfg), "layout") if "list level" in f["types"]]
+    assert found and "Battery safety" in found[0]["message"] and "body text" in found[0]["message"]
+    same = [f for f in checks(compare(a, _list_with_sub_heading_pdf(tmp_path / "c.pdf", 88), cfg), "layout")
+            if "list level" in f["types"]]
+    assert not same  # both nested the same way: nothing to report
 
 
 def _note_pdf(path, image_inside):
@@ -1029,3 +1130,179 @@ def test_table_continued_with_its_header_repeated_is_one_table(tmp_path, cfg):
     c = _paged_table_pdf(tmp_path / "c.pdf", TIMINGS, break_after=6, drop=("3840x2160 (4K UHD)", "144 Hz with DSC"))
     miss = [f for f in checks(compare(a, c, cfg), "tables") if "missing row" in f["types"]]
     assert miss and "3840x2160" in miss[0]["message"], [f["message"] for f in checks(compare(a, c, cfg), "tables")]
+
+
+def _merged_cell_table_pdf(path, *, ruled: bool):
+    """A table whose first column holds one cell over three rows ("SW series"), drawn either with
+    cell-by-cell rules (an InDesign export: the row rule stops where the spanning cell continues) or
+    with a full grid. The spanning label is set vertically centred, as both tools set it."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "Specs", fontsize=18, fontname="hebo")
+    x0, xm, x1, top = 72, 180, 520, 110
+    rows = [("Color Calibration", "Complete hardware calibration."),
+            ("Advance Color Adjust", "Fine-tune of a calibration mode."),
+            ("Validation", "Monitor validation against a standard.")]
+    h = 30
+    page.draw_rect(pymupdf.Rect(x0, top, x1, top + h), color=(0, 0, 0), fill=(0.6, 0.6, 0.6), width=0.7)
+    page.insert_text((x0 + 6, top + 20), "Monitor", fontsize=10, fontname="helv")
+    page.insert_text((xm + 6, top + 20), "Description", fontsize=10, fontname="helv")
+    for k, (label, text) in enumerate(rows):
+        y = top + h * (k + 1)
+        if ruled:  # the row line starts at the second column while the first column's cell runs on
+            page.draw_line((x0 if k == 0 else xm, y), (x1, y), color=(0, 0, 0), width=0.7)
+        else:
+            page.draw_rect(pymupdf.Rect(xm, y, x1, y + h), color=(0, 0, 0), width=0.7)
+        page.insert_text((xm + 6, y + 20), label, fontsize=10, fontname="helv")
+        page.insert_text((xm + 120, y + 20), text, fontsize=10, fontname="helv")
+    bottom = top + h * (len(rows) + 1)
+    page.draw_line((x0, bottom), (x1, bottom), color=(0, 0, 0), width=0.7)
+    if not ruled:
+        page.draw_rect(pymupdf.Rect(x0, top + h, xm, bottom), color=(0, 0, 0), width=0.7)
+    # the spanning label, centred over its three rows and wrapped over two lines - the centre falls on a
+    # row boundary, so its two lines sit in two different rows (exactly how such a label is set in print)
+    page.insert_text((x0 + 6, top + h * 2 + 9), "SW", fontsize=10, fontname="helv")
+    page.insert_text((x0 + 6, top + h * 2 + 21), "series", fontsize=10, fontname="helv")
+    doc.set_toc([[1, "Specs", 1]])
+    doc.save(path)
+    return str(path)
+
+
+@pytest.mark.parametrize("ruled", [True, False], ids=["rules only", "full grid"])
+def test_a_cell_spanning_rows_does_not_swallow_the_rows_below_it(tmp_path, cfg, ruled):
+    """A label cell over three rows is one cell at the top of its span, and the rows it covers stay
+    rows of their own. Before, each way of drawing such a table broke differently: drawn with rules
+    cell by cell (the rule stops where the spanning cell runs on) the table was not detected at all,
+    so its text was read line by line and the label's wrapped lines landed between the other columns';
+    drawn as a full grid, the spanning cell made the row as tall as its whole span and every row under
+    it was swallowed into the first. Either way the rows below the label came out as missing content."""
+    import pymupdf
+
+    from pdfval import extract
+    from pdfval.checks import tables as tmod
+
+    path = _merged_cell_table_pdf(tmp_path / "t.pdf", ruled=ruled)
+    assert tmod.detect(pymupdf.open(path)[0]), "the table is not detected at all"
+    doc = extract.load(path, "baseline", cfg)
+    rows = [" ".join(doc.words[i].text for i in r.idx)
+            for tb in tmod.tables(doc, (0, len(doc.words))) for r in tb.rows]
+    assert len(rows) == 4, rows
+    assert rows[1].startswith("SW series Color Calibration")       # the label, at the top of its span
+    assert rows[2].startswith("Advance Color Adjust")              # the rows it covers are still rows
+    assert rows[3].startswith("Validation")
+
+
+def test_cell_spans_reads_a_merged_cell_from_rules_and_from_a_grid():
+    """Both ways a PDF can say "this cell covers the rows below": a row rule that stops at the spanning
+    cell, and a cell rectangle as tall as its span. Either gives {(column, row): first row of the span}."""
+    from pdfval.checks.tables import Table, cell_spans
+
+    rows = [((0, 0, 300, 20), None), ((0, 20, 300, 40), None), ((0, 40, 300, 60), None), ((0, 60, 300, 80), None)]
+    grid = [(0, 100), (100, 300)]
+    ruled = Table((0, (0, 0, 300, 80), rows, grid),
+                  cuts=[(0, 0, 300), (20, 0, 300), (40, 100, 300), (60, 100, 300), (80, 0, 300)])
+    assert cell_spans(ruled) == {(0, 2): 1, (0, 3): 1}  # column 0's cell of row 1 covers rows 2 and 3
+    grid_table = Table((0, (0, 0, 300, 80), rows, grid),
+                       cells=[[(0, 0, 100, 20), (100, 0, 300, 20)],
+                              [(0, 20, 100, 80), (100, 20, 300, 40)],   # the tall cell
+                              [None, (100, 40, 300, 60)],
+                              [None, (100, 60, 300, 80)]])
+    assert cell_spans(grid_table) == {(0, 2): 1, (0, 3): 1}
+    assert cell_spans(Table((0, (0, 0, 300, 80), rows, grid))) == {}  # nothing to go by: every row its own
+
+
+@pytest.mark.parametrize("ruled", [True, False], ids=["rules only", "full grid"])
+def test_a_table_with_a_spanning_cell_is_not_reported_against_itself(tmp_path, cfg, ruled):
+    """The same table on both sides: no missing / extra content and no merged rows, whichever way the
+    two sides happen to draw it."""
+    a = _merged_cell_table_pdf(tmp_path / "a.pdf", ruled=ruled)
+    b = _merged_cell_table_pdf(tmp_path / "b.pdf", ruled=not ruled)
+    r = compare(a, b, cfg)
+    bad = [f["message"] for s in r["sections"] for f in s["findings"]
+           if f["check"] in ("content", "tables") and f["severity"] in ("error", "warning")]
+    assert not bad, bad
+
+
+def _note_above_heading_pdf(path, *, note_gap: float):
+    """Two bookmarked sections; the first ends with a note line set `note_gap` pt above the second
+    heading. Set tight, the note's glyph box reaches past the heading's top edge although the note is
+    a whole line higher - the shape of every CJK page, where a glyph box is about two and a half times
+    the type it holds."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 100), "Warnings", fontsize=14, fontname="hebo")
+    page.insert_text((72, 125), "Complete the firmware update as described in this document.", fontsize=10, fontname="helv")
+    page.insert_text((72, 140), "Keep the product powered until the update is complete.", fontsize=10, fontname="helv")
+    note_y = 160
+    page.insert_text((92, note_y), "Not following these warnings will damage the product.", fontsize=10, fontname="helv")
+    page.insert_text((72, note_y + note_gap), "System requirements", fontsize=14, fontname="hebo")
+    page.insert_text((72, note_y + note_gap + 25), "Windows 10 32/64 bit and Windows 11.", fontsize=10, fontname="helv")
+    doc.set_toc([[1, "Warnings", 1], [1, "System requirements", 1]])
+    doc.save(path)
+    return str(path)
+
+
+def test_a_note_just_above_the_next_heading_stays_in_its_own_section(tmp_path, cfg):
+    """The last line of a section must not be pulled into the next one because the next heading's
+    glyph box happens to reach up to it. Pulled across, the note read as missing from the section it
+    belongs to and extra in the one below - with both documents having the text exactly where it
+    belongs. (Real case: every CJK page, whose glyph boxes are far taller than their type.)"""
+    a = _note_above_heading_pdf(tmp_path / "a.pdf", note_gap=10)
+    b = _note_above_heading_pdf(tmp_path / "b.pdf", note_gap=28)   # the same manual, set with more air
+    r = compare(a, b, cfg)
+    bad = [f["message"] for s in r["sections"] for f in s["findings"]
+           if {"missing text", "extra text", "content in wrong section"} & set(f.get("types") or [])]
+    assert not bad, bad
+    warnings = next(s for s in r["sections"] if s["title"] == "Warnings")
+    assert warnings["content"]["match_pct"] == 100.0
+
+
+def test_beside_or_below_keeps_the_line_above_a_heading_out():
+    """The rule itself: tops compared, with a margin of half the word's own type size - not a window
+    measured from glyph boxes, which are taller than their type (two and a half times in CJK)."""
+    from types import SimpleNamespace
+
+    from pdfval.engine import beside_or_below
+
+    w = lambda top, bottom, size: SimpleNamespace(bbox=(60, top, 300, bottom), style=SimpleNamespace(size=size))
+    heading = w(133.6, 167.0, 14)
+    # a CJK line above the heading: its box reaches 23 pt past the heading's top, its text does not
+    assert not beside_or_below(w(122.8, 157.0, 11), heading)
+    # text set beside the heading, in the other column: the tops line up (or start just above it)
+    assert beside_or_below(w(133.6, 167.0, 11), heading)
+    assert beside_or_below(w(130.0, 160.0, 11), heading)
+    # anything under the heading
+    assert beside_or_below(w(180.0, 200.0, 11), heading)
+
+
+def _repeat_pdf(path, copies):
+    """A guide whose "Specifications" chapter is bookmarked `copies` times (the same heading repeated)."""
+    doc = pymupdf.open()
+    toc = []
+    for n in range(copies):
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((72, 90), "Specifications", fontsize=18, fontname="hebo")
+        page.insert_text((72, 130), BODY, fontsize=11, fontname="helv")
+        toc.append([1, "Specifications", n + 1])
+    doc.set_toc(toc)
+    doc.save(path)
+    return str(path)
+
+
+def test_section_repeated_in_stage_only_is_reported_as_a_duplicate(tmp_path, cfg):
+    """Prod bookmarks “Specifications” once, stage three times: the two extra copies are duplicates
+    (critical, genuine), not merely “extra sections”."""
+    r = compare(_repeat_pdf(tmp_path / "a.pdf", 1), _repeat_pdf(tmp_path / "b.pdf", 3), cfg)
+    dups = [f for f in checks(r, "structure") if "Duplicate section" in f["message"]]
+    assert len(dups) == 2, [f["message"] for f in checks(r, "structure")]
+    assert all(f["critical"] and "duplicate section" in f["types"] for f in dups)
+    assert "appears 3 times in stage but 1 time(s) in prod" in dups[0]["message"]
+
+
+def test_section_repeated_as_often_as_in_prod_is_reported_without_being_genuine(tmp_path, cfg):
+    """Both sides repeat the heading twice: still listed in the report, but not a genuine issue."""
+    r = compare(_repeat_pdf(tmp_path / "a.pdf", 2), _repeat_pdf(tmp_path / "b.pdf", 2), cfg)
+    dups = [f for f in checks(r, "structure") if "Duplicate section" in f["message"]]
+    assert len(dups) == 1, [f["message"] for f in checks(r, "structure")]
+    assert not dups[0]["critical"] and dups[0]["types"] == ["repeated section"]
+    assert "appears 2 times in stage as in prod" in dups[0]["message"]

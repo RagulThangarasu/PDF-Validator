@@ -117,7 +117,7 @@ def _english(pc: "_PageCache", page: int) -> bool:
     return _ENGLISH[key]
 
 
-_UNDERLINE_OVER = 4  # more text lines than this marked in one view: underlined, not boxed
+_WASH_OVER = 4  # more text lines than this marked in one view: tinted without an outline, not boxed
 
 
 def _crop(pc: _PageCache, page: int, boxes: list, color, note: str | None, window: tuple[float, float],
@@ -137,12 +137,12 @@ def _crop(pc: _PageCache, page: int, boxes: list, color, note: str | None, windo
     marks = [(b, (b[1] - 2 - y0) * z) for b in boxes]
     if cont is not None:
         marks += [(b, cont + (b[1] - 2) * z) for b in (next_boxes or [])]
-    # many lines of text marked in one view (a whole paragraph in another weight): boxes on every line bury the
-    # text under their outlines - the lines are underlined instead, the text stays as printed. A few places
-    # (a word, a line or two) keep their box: easier to spot on a full page.
+    # many lines of text marked in one view (a whole paragraph in another weight): an outline on every line
+    # buries the text - those lines keep the tint and lose the outline, so they read like text under a
+    # highlighter pen. A few places (a word, a line or two) keep their box: easier to spot on a full page.
     # ... and always on a page that is not English: accents and non-Latin letters fill the line's height, so a box
     # drawn round them cuts through the text
-    dense = sum(1 for b, _ in marks if b[3] - b[1] <= 30) > _UNDERLINE_OVER or not _english(pc, page)
+    dense = sum(1 for b, _ in marks if b[3] - b[1] <= 30) > _WASH_OVER or not _english(pc, page)
     for b, top in marks:
         r = [(b[0] - 2) * z, top, (b[2] + 2) * z, top + (b[3] - b[1] + 4) * z]
         if r[3] < 0 or r[1] > img.height or (cont is not None and b in boxes and r[1] >= cont - 26):
@@ -151,8 +151,7 @@ def _crop(pc: _PageCache, page: int, boxes: list, color, note: str | None, windo
         # a text line is tinted; a picture or block (taller than a few lines) is only outlined, so its
         # colours and detail are shown exactly as in the PDF
         if dense and b[3] - b[1] <= 30:
-            y = top + (b[3] - b[1] + 3) * z
-            d.line([(b[0] * z, y), (b[2] * z, y)], fill=color + (255,), width=3)
+            d.rectangle(r, fill=color + (56,))   # the wash alone: a little stronger, nothing to outline it
             continue
         tint = color + (38,) if b[3] - b[1] <= 30 else None
         d.rectangle(r, fill=tint, outline=color + (255,), width=3)

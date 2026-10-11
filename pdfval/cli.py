@@ -99,8 +99,9 @@ def main(argv: list[str] | None = None) -> int:
         pdf, csv_ = combined_report.build(args.runs, args.out or (Path(args.runs) / "_combined"))
         ps = combined_report.pairs(args.runs)
         t = combined_report.totals(ps)
-        print(f"{t['products']} product(s), {t['both']} validated both ways "
-              f"(PDF: {t['pdf']['runs']} run(s), site: {t['site']['runs']} run(s))")
+        n_ok = len(combined_report.passed(ps))
+        print(f"{n_ok} publication(s) passed and are listed; "
+              f"{t['products'] - n_ok} not listed (did not pass, or no finished run)")
         print(f"report: {pdf}\n   csv: {csv_}")
         return 0
     if args.cmd == "classes":

@@ -68,11 +68,46 @@ def _gray(doc: Doc, page: int, rect, px_per_pt: float) -> "np.ndarray":
     return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.stride)[:, :pix.width].astype(np.float32)
 
 
-def _has_artwork(doc: Doc, page: int, rect) -> bool:
-    """The spot holds drawn artwork: an embedded picture over part of it, or vector shapes that are
-    not just table / box rules (curves, slanted strokes, filled shapes) - at least a few of them."""
+_TABLES: dict = {}
+
+
+def _table_boxes(doc: Doc, page: int) -> list:
+    """The tables drawn on the page. A table is not artwork: its rules, its header bar and its filled
+    rows are drawn shapes like any other, so without this a table of specifications counts as several
+    "filled shapes" and passes for a picture - and a prod table stage rebuilds as a real table is then
+    reported as a picture missing from stage."""
+    key = (doc.path, page)
+    if key not in _TABLES:
+        try:
+            pdf = _DOCS.get(doc.path) or _DOCS.setdefault(doc.path, pymupdf.open(doc.path))
+            _TABLES[key] = [pymupdf.Rect(t.bbox) for t in pdf[page].find_tables().tables]
+        except Exception:
+            _TABLES[key] = []
+    return _TABLES[key]
+
+
+def _is_table(doc: Doc, page: int, rect, covered: float = 0.85, of_table: float = 0.5) -> bool:
+    """`rect` is a table (not a drawing inside one): a table covers nearly all of it, and it is most of
+    that table. A small illustration drawn in one cell is only a fraction of the table's area and so
+    stays artwork."""
     r = pymupdf.Rect(rect)
     if r.is_empty:
+        return False
+    for t in _table_boxes(doc, page):
+        inter = (t & r).get_area() if t.intersects(r) else 0.0
+        if inter >= covered * r.get_area() and t.get_area() > 0 and inter >= of_table * t.get_area():
+            return True
+    return False
+
+
+def _has_artwork(doc: Doc, page: int, rect) -> bool:
+    """The spot holds drawn artwork: an embedded picture over part of it, or vector shapes that are
+    not just table / box rules (curves, slanted strokes, filled shapes) - at least a few of them.
+    A table is never artwork, however many rules and filled cells it draws."""
+    r = pymupdf.Rect(rect)
+    if r.is_empty:
+        return False
+    if _is_table(doc, page, r):
         return False
     if any((pymupdf.Rect(im.bbox) & r).get_area() >= 0.3 * r.get_area() for im in doc.images if im.page == page):
         return True
@@ -1592,6 +1627,10 @@ def check(u: Unit) -> list[Finding]:
     # (the drawn pairs are measured above only: the artwork search frames a drawing loosely, too loosely to say
     # whether it stands inside a note box or in a line of text - the placement check keeps to bitmap pairs)
     u.image_pairs = [(x, y) for x, y, _ in pairs]
+    # the drawn pairs are kept apart for the checks that need a tight box, but a check that only asks
+    # whether the text stands beside the picture or above it can use them: being framed a few points
+    # loosely does not move a whole text column from one side to the other
+    u.drawn_pairs = list(drawn_pairs)
     # a matched picture flipped in stage: the hash/correlation above tolerates it (same shapes, same ink
     # mass), so a real left-right or top-bottom flip would otherwise pass as "the same picture" unreported
     mirror_gap = acfg.get("mirrored_min_gap", 0.15)

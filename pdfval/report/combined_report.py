@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pymupdf
 
-from .batch_report import CSS, GREEN, GREY, RED, _cats, _dur, _img, _pct, rows
+from .batch_report import CSS, GREEN, GREY, RED, rows
 
 SIDES = ("pdf", "site")
 SIDE_LABEL = {"pdf": "PDF validation", "site": "AEM site validation"}
@@ -99,70 +99,79 @@ def pairs(runs_dir: str | Path) -> list[dict]:
         pcts = [row[s]["match_pct"] for s in SIDES if row[s] and row[s]["match_pct"] is not None]
         row["worst"] = min(pcts) if pcts else None
         out.append(row)
-    out.sort(key=lambda r: (r["worst"] is None, r["worst"] if r["worst"] is not None else 0, r["product"].lower()))
+    # failures first (that is what the reader is looking for), then runs that did not finish, then
+    # the publications that passed; alphabetical inside each group
+    rank = {"FAIL": 0, "PASS": 2, "not validated": 3}
+    out.sort(key=lambda r: (min(rank.get(verdict(r[s]), 1) for s in SIDES), r["product"].lower()))
     return out
 
 
 def totals(ps: list[dict]) -> dict:
     t = {"products": len(ps), "both": sum(1 for p in ps if p["pdf"] and p["site"])}
-    for s in SIDES:
-        rs = [p[s] for p in ps if p[s]]
-        done = [r for r in rs if r["match_pct"] is not None]
-        pcts = sorted(r["match_pct"] for r in done)
-        t[s] = {"runs": len(rs), "done": len(done), "error": sum(r["status"] == "error" for r in rs),
-                "pending": sum(r["status"] in ("queued", "running") for r in rs),
-                "missing": len(ps) - len(rs),  # products never validated this way
-                "average": round(sum(pcts) / len(pcts), 2) if pcts else None,
-                "median": pcts[len(pcts) // 2] if pcts else None,
-                "pass": sum(r["band"] == "pass" for r in rs), "warn": sum(r["band"] == "warn" for r in rs),
-                "fail": sum(r["band"] == "fail" for r in rs),
-                "genuine": sum(r["genuine"] or 0 for r in rs)}
+    for side in SIDES:
+        vs = [verdict(p[side]) for p in ps]
+        t[side] = {"pass": vs.count("PASS"), "fail": vs.count("FAIL"),
+                   "not_validated": vs.count("not validated"),
+                   "incomplete": sum(1 for v in vs if v not in ("PASS", "FAIL", "not validated"))}
     return t
 
 
-def _cell(r: dict | None) -> str:
-    """One side of a product's row: match %, issue breakdown, image verdict - or why there is nothing."""
+def verdict(r: dict | None) -> str:
+    """PASS / FAIL for one side of a product, or why there is no verdict.
+
+    A publication passes when its content score is at or above [content] pass_pct - the same verdict
+    its own report shows at the top. A run that did not finish has no verdict at all; saying FAIL for
+    it would read as "this publication is wrong" when nothing was ever checked.
+    """
     if r is None:
-        return f'<span style="color:{GREY}">not validated</span>'
+        return "not validated"
     if r["status"] != "done":
-        return (f'<span style="color:{RED}">{escape(r["status"])}</span>'
-                f'<br/><span class="muted">{escape((r["message"] or "")[:140])}</span>')
-    return f'{_pct(r)}<br/><span class="muted">{_cats(r)}</span>'
+        return r["status"]            # error / queued / running / stopped
+    return (r.get("result") or "").upper() or "—"
+
+
+_VERDICT_COLOUR = {"PASS": GREEN, "FAIL": RED}
+
+
+def _cell(r: dict | None) -> str:
+    v = verdict(r)
+    colour = _VERDICT_COLOUR.get(v)
+    return f'<b style="color:{colour}">{v}</b>' if colour else f'<span style="color:{GREY}">{escape(v)}</span>'
+
+
+def passed(ps: list[dict]) -> list[dict]:
+    """The publications whose PDF validation passed.
+
+    The report lists these alone. Anything else - a publication that failed, one whose run errored or
+    is still going, one never validated - is left out, so the page is a clean list of what is good.
+    The count of what was left out is printed under it, because a report that silently shrinks when a
+    publication starts failing would read as "nothing to see here".
+    """
+    return [p for p in ps if verdict(p["pdf"]) == "PASS"]
 
 
 def build_pdf(ps: list[dict], out: str | Path) -> Path:
-    t = totals(ps)
-    fmt = lambda v: "—" if v is None else f"{v:.2f} %"
-    html = [f"""<h1>PDF and AEM site validation — combined report</h1>
-<p class="muted">{datetime.now().strftime('%Y-%m-%d %H:%M')} · one row per product, lowest content match first.
-Each side is that product's most recent run of its kind. Content match = share of the prod words found
-unchanged (missing, changed and extra words count against it).</p>
-<table><tr><th>Validation</th><th class="n">Products</th><th class="n">Finished</th><th class="n">Failed</th>
-<th class="n">Still running</th><th class="n">Never run</th><th class="n">Pass</th><th class="n">Warn</th>
-<th class="n">Fail</th><th class="n">Average</th><th class="n">Median</th></tr>"""]
-    for s in SIDES:
-        d = t[s]
-        html.append(f'<tr><td><b>{SIDE_LABEL[s]}</b></td><td class="n">{d["runs"]}</td><td class="n">{d["done"]}</td>'
-                    f'<td class="n" style="color:{RED if d["error"] else "#1d2330"}">{d["error"]}</td>'
-                    f'<td class="n">{d["pending"]}</td><td class="n">{d["missing"]}</td>'
-                    f'<td class="n" style="color:{GREEN}">{d["pass"]}</td><td class="n">{d["warn"]}</td>'
-                    f'<td class="n" style="color:{RED if d["fail"] else "#1d2330"}">{d["fail"]}</td>'
-                    f'<td class="n"><b>{fmt(d["average"])}</b></td><td class="n">{fmt(d["median"])}</td></tr>')
-    html.append(f"""</table>
-<p class="muted">{t['both']} of {t['products']} product(s) validated both ways.</p>
-<h2>Products</h2>
-<table><tr><th class="n">#</th><th>Product</th><th>{SIDE_LABEL['pdf']}</th><th>Images</th>
-<th>{SIDE_LABEL['site']}</th><th>Images</th></tr>""")
-    for k, p in enumerate(ps, 1):
+    """One line per publication that passed: its name and PASS. Nothing else - no score, no issue
+    counts, no breakdown by images / layout / tables, and no AEM site column."""
+    ok = passed(ps)
+    left_out = len(ps) - len(ok)
+    html = [f"""<h1>PDF validation report</h1>
+<p class="muted">{datetime.now().strftime('%Y-%m-%d %H:%M')} \u00b7 {len(ok)} publication(s) passed \u00b7 each row is that publication's most recent PDF run."""
+            + (f' <b style="color:{RED}">{left_out} not listed</b> (did not pass, or has no finished run).'
+               if left_out else "") + """</p>
+<h2>Publications</h2>
+<table><tr><th class="n">#</th><th>Publication</th><th>Status</th></tr>"""]
+    for k, p in enumerate(ok, 1):
         html.append(f'<tr><td class="n">{k}</td><td><b>{escape(p["product"])}</b></td>'
-                    f'<td>{_cell(p["pdf"])}</td><td>{_img(p["pdf"]) if p["pdf"] else ""}</td>'
-                    f'<td>{_cell(p["site"])}</td><td>{_img(p["site"]) if p["site"] else ""}</td></tr>')
+                    f'<td><b style="color:{GREEN}">PASS</b></td></tr>')
     html.append("</table>")
+    if not ok:
+        html.append(f'<p class="muted">No publication passed.</p>')
     out = Path(out)
     story = pymupdf.Story("".join(html), user_css=CSS)
     writer = pymupdf.DocumentWriter(str(out))
-    page = pymupdf.paper_rect("a4-l")
-    where = page + (28, 28, -28, -36)
+    page = pymupdf.paper_rect("a4")
+    where = page + (36, 36, -36, -40)
     more, n = 1, 0
     while more and n < 400:
         dev = writer.begin_page(page)
@@ -174,25 +183,13 @@ unchanged (missing, changed and extra words count against it).</p>
     return out
 
 
-_CSV_HEAD = ["Status", "Content match %", "Content result", "Issues (genuine)", "Issues by category",
-             "Image issues (PASS/FAIL)", "Number of image issues", "Run", "Message"]
-
-
-def _csv_cells(r: dict | None) -> list:
-    if r is None:
-        return ["not validated", "", "", "", "", "", "", "", ""]
-    cats = " · ".join(f"{c} {v.get('total')}" for c, v in (r["by_category"] or {}).items() if v.get("total"))
-    return [r["status"], "" if r["match_pct"] is None else r["match_pct"], r["band"], r["genuine"], cats,
-            r["image_result"].upper(), "" if r["image_issues"] is None else r["image_issues"], r["run"], r["message"]]
-
-
 def write_csv(ps: list[dict], out: str | Path) -> Path:
     out = Path(out)
     with open(out, "w", newline="", encoding="utf-8-sig") as fh:  # opens in Excel
         w = csv.writer(fh)
-        w.writerow(["Product"] + [f"{SIDE_LABEL[s]} — {h}" for s in SIDES for h in _CSV_HEAD])
-        for p in ps:
-            w.writerow([p["product"]] + [c for s in SIDES for c in _csv_cells(p[s])])
+        w.writerow(["Publication", "Status"])
+        for p in passed(ps):
+            w.writerow([p["product"], "PASS"])
     return out
 
 

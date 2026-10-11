@@ -69,10 +69,19 @@
   .crit { background: #b42318; color: #fff; border-radius: 999px; font-size: 9px; font-weight: 700; padding: 0 6px; text-transform: uppercase; }
   .hl.structure { border-color: var(--c-structure); background: rgb(37 99 235 / .10); }
   .hl.at { border-width: 0; border-top: 3px dashed; background: none; height: 0 !important; }
-  /* dense non-Latin scripts (CJK, Thai, Arabic, ...): a full box per character is cramped and hard to
-     read - an underline marks the same span without covering the glyphs (.at markers stay untouched,
-     they are already a thin line, not a box) */
-  .pane.non-latin .hl:not(.at) { border-width: 0 0 2px 0 !important; border-radius: 0; background: none !important; }
+  /* Dense non-Latin scripts (CJK, Thai, Arabic, ...): what buries the text is the outline, not the tint -
+     a 1.5px border per line cuts straight through glyphs that fill the line's height. These pages keep a
+     background wash and lose the border: the marked words read like text under a highlighter pen.
+     Applied per page (.hl.nl), because a manual carries the same notice in a dozen languages: its English
+     pages still get boxes. (.at markers are left alone - they are a thin line, not a box.) */
+  .pane.non-latin .hl:not(.at), .hl.nl:not(.at) { border-width: 0 !important; border-radius: 2px; }
+  .pane.non-latin .hl.content:not(.at), .hl.nl.content:not(.at) { background: rgb(225 29 72 / .22); }
+  .pane.non-latin .hl.style:not(.at), .hl.nl.style:not(.at) { background: rgb(124 58 237 / .20); }
+  .pane.non-latin .hl.layout:not(.at), .hl.nl.layout:not(.at) { background: rgb(234 88 12 / .20); }
+  .pane.non-latin .hl.assets:not(.at), .hl.nl.assets:not(.at) { background: rgb(13 148 136 / .18); }
+  .pane.non-latin .hl.tables:not(.at), .hl.nl.tables:not(.at) { background: rgb(2 132 199 / .20); }
+  .pane.non-latin .hl.integrity:not(.at), .hl.nl.integrity:not(.at) { background: rgb(185 28 28 / .20); }
+  .pane.non-latin .hl.structure:not(.at), .hl.nl.structure:not(.at) { background: rgb(37 99 235 / .20); }
   .hl.focus { outline: 3px solid #facc15; outline-offset: 2px; animation: pulse 1s ease 2; z-index: 3; }
   /* the issue's description written beside its box, on both PDFs (same number on both sides) */
   .note { position: absolute; z-index: 4; max-width: 340px; font: 10.5px/1.35 system-ui, sans-serif; color: #111;
@@ -185,7 +194,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
 class Pane {
   // range: [first, last] 0-based pages to show (a web page covers one chapter of the PDF)
   // textScale(pdfPage viewport) -> scale: draw at a given text size instead of fitting the width
-  constructor(el, url, range = null) { this.el = el; this.url = url; this.range = range; this.pages = []; this.textScale = null; }
+  constructor(el, url, range = null, nonLatin = null) {
+    this.el = el; this.url = url; this.range = range; this.pages = []; this.textScale = null;
+    this.nonLatin = new Set(nonLatin || []);   // 0-based pages whose text is a dense non-Latin script
+  }
   async load() {
     this.pdf = this.pdf || await pdfjsLib.getDocument({ url: this.url }).promise;
     this.el.querySelectorAll('.page').forEach(n => n.remove());  // re-layout (scale changed)
@@ -235,7 +247,7 @@ class Pane {
   box(loc, cls, fi, title, sid, note) {
     const pg = this.pages[loc.page]; if (!pg) return;
     const s = pg.scale, b = loc.bbox, pad = 2, d = document.createElement('div');
-    d.className = 'hl ' + cls; d.dataset.f = fi; d.dataset.s = sid; d.title = title;
+    d.className = 'hl ' + cls + (this.nonLatin.has(loc.page) ? ' nl' : ''); d.dataset.f = fi; d.dataset.s = sid; d.title = title;
     Object.assign(d.style, { left: b[0] * s - pad + 'px', top: b[1] * s - pad + 'px',
       width: (b[2] - b[0]) * s + 2 * pad + 'px', height: (b[3] - b[1]) * s + 2 * pad + 'px' });
     const open = () => openFinding(sid, fi);
@@ -279,8 +291,8 @@ class Pane {
 }
 
 const SCOPE = DATA.meta.baseline.scope;  // web page run: the chapter of the PDF the page covers
-const A = new Pane($('#pane-a'), 'baseline.pdf', SCOPE ? SCOPE.pages : null);
-const B = new Pane($('#pane-b'), 'candidate.pdf');
+const A = new Pane($('#pane-a'), 'baseline.pdf', SCOPE ? SCOPE.pages : null, DATA.meta.baseline.non_latin_pages);
+const B = new Pane($('#pane-b'), 'candidate.pdf', null, DATA.meta.candidate.non_latin_pages);
 // dense non-Latin scripts (CJK, Thai, Arabic, ...): bordered boxes get cramped - underline instead
 A.el.classList.toggle('non-latin', !!DATA.meta.baseline.non_latin_script);
 B.el.classList.toggle('non-latin', !!DATA.meta.candidate.non_latin_script);
@@ -448,7 +460,7 @@ function renderSide() {
   if (!s) { body.innerHTML = '<div class="empty">Select a section.</div>'; return; }
   const fs = s.findings.map((f, i) => [f, i]).filter(([f]) => state.cats.has(f.category));
   body.innerHTML = `<div class="sechead"><h2>${esc(s.title)}</h2>
-    <div class="meta">Baseline p.${s.baseline.start.page + 1}–${s.baseline.end.page + 1} · Candidate p.${s.candidate.start.page + 1}–${s.candidate.end.page + 1} · score <b>${s.content.match_pct.toFixed(2)}%</b> (${s.content.issues ?? 0} issues) · ${s.content.missing_words} missing / ${s.content.extra_words} extra words · CSS issues ${s.css.issues}${s.critical ? ` · <span class="crit">${s.critical} critical</span>` : ''}</div></div>
+    <div class="meta">Baseline p.${s.baseline.start.page + 1}–${s.baseline.end.page + 1} · Candidate p.${s.candidate.start.page + 1}–${s.candidate.end.page + 1} · score <b>${s.content.match_pct.toFixed(2)}%</b> (${s.content.issues ?? 0} issues) · ${s.content.missing_words} missing / ${s.content.extra_words} extra words${s.critical ? ` · <span class="crit">${s.critical} critical</span>` : ''}</div></div>
     <div class="checks" style="grid-template-columns:repeat(7,1fr)">${CATS.map(([c, l]) => `<div style="border-top:3px solid ${CAT_COLOR[c]}"><b>${s.categories?.[c] ?? 0}</b>${l}</div>`).join('')}</div>` +
     (fs.map(([f, i]) => {
       const pa = f.baseline[0] ? 'p.' + (f.baseline[0].page + 1) : '—', pb = f.candidate[0] ? 'p.' + (f.candidate[0].page + 1) : '—';

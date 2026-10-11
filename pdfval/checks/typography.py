@@ -220,13 +220,20 @@ def check(u: Unit) -> list[Finding]:
     size_tol, lh_tol = t.get("size_tolerance", 0.25), t.get("line_height_tolerance", 1.0)
     color_tol = t.get("color_tolerance", 24)
     role = _roles(u, t, styles, fonts)
-    # what stage actually uses per style, over the whole document (for the report's Figma table)
+    # what stage actually uses per style, over the whole document (for the report's Figma table) - and
+    # where: a value printed in red there is a defect, and "which topic, which page" is the first thing
+    # a reviewer needs in order to go and fix it
     seen = u.cfg.setdefault("_typo_actual", {})
+    where = u.cfg.setdefault("_typo_where", {})
     for i, r in role.items():
         w = doc.words[i]
         if r and w.norm and _latin(w.text):
             st = w.style
-            seen.setdefault(r, Counter())[(st.family, st.weight, st.size, st.color.upper())] += 1
+            key = (st.family, st.weight, st.size, st.color.upper())
+            seen.setdefault(r, Counter())[key] += 1
+            spot = where.setdefault((r, key), {}).setdefault(u.title, {"words": 0, "pages": set()})
+            spot["words"] += 1
+            spot["pages"].add(w.page + 1)
     groups: dict[tuple, list[int]] = defaultdict(list)
     for i, r in role.items():
         spec, w = styles.get(r), doc.words[i]
@@ -371,7 +378,20 @@ def _stage_actual(cfg: dict, role: str, weights: dict) -> dict | None:
     lh = (cfg.get("_typo_lh") or {}).get(role)  # line height: the most common between wrapped lines of the style
     return {"font": fam, "weight": names.get(wt, str(wt)), "size": size, "color": col,
             "line_height": lh.most_common(1)[0][0] if lh else None,
-            "share": round(n / sum(c.values()), 2), "words": sum(c.values())}
+            "share": round(n / sum(c.values()), 2), "words": sum(c.values()),
+            "where": _where(cfg, role, (fam, wt, size, col)),
+            # the other values stage uses for this style, each with where it is used: what the share
+            # that is not the most common one ("55% of 22 words") is actually made of
+            "others": [{"font": f2, "weight": names.get(w2, str(w2)), "size": s2, "color": c2, "words": n2,
+                        "where": _where(cfg, role, k)}
+                       for k, n2 in c.most_common()[1:] for (f2, w2, s2, c2) in [k]]}
+
+
+def _where(cfg: dict, role: str, key: tuple) -> list[dict]:
+    """The sections (AEM topics) this style value is used in, the biggest first: {"section", "words", "pages"}."""
+    spots = (cfg.get("_typo_where") or {}).get((role, key)) or {}
+    return [{"section": title, "words": v["words"], "pages": sorted(v["pages"])}
+            for title, v in sorted(spots.items(), key=lambda kv: -kv[1]["words"])]
 
 
 def document(B: Doc, cfg: dict) -> list[Finding]:

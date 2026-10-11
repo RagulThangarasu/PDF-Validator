@@ -4,7 +4,7 @@ import pymupdf
 
 from pdfval import load_config
 from pdfval.engine import compare_url
-from test_site_nav import make_site, serve  # noqa: F401  (the fixture)
+from test_site_nav import AEM_BODY, make_site, serve  # noqa: F401  (the fixture)
 
 
 def _png(path, w, h):
@@ -13,13 +13,14 @@ def _png(path, w, h):
     pm.save(str(path))
 
 
-def _site(tmp_path, base, extra_html):
+def _site(tmp_path, base, extra_html, **site_cfg):
     pdf = make_site(tmp_path)
     page = tmp_path / "guide" / "overview.html"
     _png(tmp_path / "guide" / "pic.png", 200, 100)
     page.write_text(page.read_text().replace('<div class="pager">', extra_html + '<div class="pager">'))
     cfg = load_config()
     cfg["site"]["check_otp"] = True  # otp is off by default (old check) - this file tests it directly
+    cfg["site"].update(site_cfg)
     return compare_url(str(pdf), base + "overview.html", str(tmp_path / "run"), cfg)["site"]
 
 
@@ -33,12 +34,27 @@ def test_h4_missing_from_on_this_page_is_reported(tmp_path, serve):
     assert missing.get("Touch layer") == "h4 not listed" and missing.get("Panel") == "h3 not listed"
 
 
-def test_picture_and_layout_breaks_are_reported(tmp_path, serve):
-    site = _site(tmp_path, serve,
-                 '<p>Good picture:</p><img src="pic.png" alt="good" width="200" height="100">'
-                 '<p>Stretched:</p><img src="pic.png" alt="stretched" style="width:200px;height:200px">'
-                 '<p>Too wide:</p><img src="pic.png" alt="wide" style="width:900px;height:450px;max-width:none">'
-                 '<p>Missing:</p><img src="nope.png" alt="gone" width="100" height="50">')
+_PICTURES = ('<p>Good picture:</p><img src="pic.png" alt="good" width="200" height="100">'
+             '<p>Stretched:</p><img src="pic.png" alt="stretched" style="width:200px;height:200px">'
+             '<p>Too wide:</p><img src="pic.png" alt="wide" style="width:900px;height:450px;max-width:none">'
+             '<p>Missing:</p><img src="nope.png" alt="gone" width="100" height="50">')
+
+
+def test_a_picture_that_is_not_there_is_reported(tmp_path, serve):
+    """A site run asks one thing of a picture: is it there? A picture that does not load is reported;
+    one that is stretched or runs wide is not - a web page reflows its pictures, so how one is sized
+    or scaled is not validated against a printed page's rules."""
+    got = {(r["item"], r["actual"]) for r in rows(_site(tmp_path, serve, _PICTURES), "layout")}
+    assert ("Picture not loaded", "gone") in got
+    assert not {i for i, _ in got} & {"Picture stretched", "Picture outside its area",
+                                      "Picture enlarged (blurred)", "Picture alignment",
+                                      "Picture alignment (design spec)"}, got
+    assert not any(a == "good" for _, a in got)
+
+
+def test_picture_layout_breaks_are_reported_when_asked_for(tmp_path, serve):
+    """[site] check_picture_layout = true brings the layout checks back, unchanged."""
+    site = _site(tmp_path, serve, _PICTURES, check_picture_layout=True)
     got = {(r["item"], r["actual"]) for r in rows(site, "layout")}
     assert ("Picture stretched", "stretched") in got
     assert ("Picture outside its area", "wide") in got
@@ -53,11 +69,21 @@ def test_clean_page_has_no_layout_failure(tmp_path, serve):
     assert not rows(site, "layout") and rows(site, "layout", "pass")
 
 
-def test_left_aligned_picture_fails_the_design_spec(tmp_path, serve):
-    """Design spec ("Image rules": Alignment = Center): a picture left in its column is reported even
-    though it is the only picture on the page (check_picture_alignment's relative/majority check would
-    see nothing to disagree with - this is the separate, absolute check_image_center)."""
-    site = _site(tmp_path, serve, '<p>Picture:</p><img src="pic.png" alt="left" width="200" height="100">')
+_LEFT_PICTURE = '<p>Picture:</p><img src="pic.png" alt="left" width="200" height="100">'
+
+
+def test_a_left_aligned_picture_is_not_a_site_issue(tmp_path, serve):
+    """Where a picture sits in the text column is a printed page's rule: a web page places its pictures
+    by its own stylesheet, so alignment is not validated for a site."""
+    assert not [r for r in rows(_site(tmp_path, serve, _LEFT_PICTURE), "layout")
+                if r["item"].startswith("Picture alignment")]
+
+
+def test_left_aligned_picture_fails_the_design_spec_when_asked_for(tmp_path, serve):
+    """Design spec ("Image rules": Alignment = Center) with [site] check_image_center = true: a picture
+    left in its column is reported even though it is the only picture on the page (check_picture_alignment's
+    relative/majority check would see nothing to disagree with - this is the separate, absolute check)."""
+    site = _site(tmp_path, serve, _LEFT_PICTURE, check_image_center=True)
     bad = rows(site, "layout")
     assert any(r["item"] == "Picture alignment (design spec)" and r["expected"] == "centred" and "left" in r["actual"] for r in bad)
 
@@ -125,9 +151,10 @@ def test_empty_on_this_page_box_does_not_swallow_the_page(tmp_path, serve):
 
 
 
-def test_a_design_spec_issue_is_reported_with_the_picture(tmp_path, serve):
-    """A picture left in its column fails the design spec. The bug report must show the picture, not only
-    say "centred -> left": the reader has to see the spot to judge and to fix it."""
+def test_a_design_spec_issue_still_carries_its_shot_though_the_docx_no_longer_lists_it(tmp_path, serve):
+    """A picture left in its column fails the design spec and the row still carries a shot (the data to
+    show it exists), even though genuine-issues.docx no longer prints a design-spec appendix for it -
+    removed on request: it duplicated site.pdf's own "Page layout and pictures" section."""
     from docx import Document
 
     from pdfval.report import writer
@@ -137,13 +164,119 @@ def test_a_design_spec_issue_is_reported_with_the_picture(tmp_path, serve):
     page.write_text(page.read_text().replace(
         '<div class="pager">', '<p>Picture:</p><img src="pic.png" alt="left" width="200" height="100"><div class="pager">'))
     run_dir = tmp_path / "run"
-    result = compare_url(str(pdf), serve + "overview.html", str(run_dir), load_config())
+    cfg = load_config()
+    cfg["site"]["check_image_center"] = True  # off by default: a site's pictures are checked for being there
+    result = compare_url(str(pdf), serve + "overview.html", str(run_dir), cfg)
     rows = [r for r in result["site"]["rows"] if r["item"] == "Picture alignment (design spec)"]
     assert rows and rows[0].get("shot"), rows
     writer.write_pdf_report(result, run_dir)
     doc = Document(run_dir / "genuine-issues.docx")
+    assert not any(t.rows[0].cells[0].text == "Bug" for t in doc.tables)
+
+
+def test_a_margin_break_is_reported_in_the_bug_report_with_its_picture(tmp_path, serve):
+    """A table running outside the page's own content area is a structural break on a web page, not a
+    cosmetic one - it gets its own "Layout — breaking the page margins" section in the bug report
+    (genuine-issues.pdf and .docx), with a crop of the actual overflow, not only in site.pdf."""
+    from docx import Document
+
+    from pdfval.report import writer
+    pdf = make_site(tmp_path, extra_body='<table style="width:2000px"><tr><td>Overflow</td><td>cell</td></tr></table>')
+    run_dir = tmp_path / "run"
+    result = compare_url(str(pdf), serve + "overview.html", str(run_dir), load_config())
+    rows = [r for r in result["site"]["rows"] if r["group"] == "layout" and r.get("kind") == "block-overflow"]
+    assert rows and rows[0].get("shot"), rows
+    writer.write_pdf_report(result, run_dir)
+    pdf_doc = pymupdf.open(run_dir / "genuine-issues.pdf")
+    pdf_text = "\n".join(p.get_text() for p in pdf_doc)
+    pdf_doc.close()
+    assert "Layout — breaking the page margins" in pdf_text
+    # the column wraps long detail text onto its own lines - compare with whitespace collapsed
+    assert "outside the content area" in " ".join(pdf_text.split())
+    doc = Document(run_dir / "genuine-issues.docx")
     table = next(t for t in doc.tables if t.rows[0].cells[0].text == "Bug")
-    assert table.rows[0].cells[5].text == "On the page"
-    blip = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
-    assert any(c.paragraphs[0].runs and c.paragraphs[0].runs[0]._element.findall(f".//{blip}")
-               for r in table.rows[1:] for c in [r.cells[5]]), "no design-spec row carries its picture"
+    assert any("outside the content area" in r.cells[2].text for r in table.rows[1:])
+
+
+def test_a_scrollable_table_is_not_reported_as_breaking_the_margins(tmp_path, serve):
+    """A wide table whose container scrolls (overflow-x: auto on a wrapper, not the table's own
+    immediate parent) is a deliberate, responsive pattern - not a structural break."""
+    wrapped = ('<div class="table-wrap"><div class="table-scroll" style="overflow-x:auto">'
+              '<table style="width:2000px"><tr><td>Overflow</td><td>cell</td></tr></table></div></div>')
+    site = _site(tmp_path, serve, wrapped)
+    assert not [r for r in site["rows"] if r["group"] == "layout" and r.get("kind") == "block-overflow"]
+
+
+def test_a_table_scrollable_on_itself_is_not_reported_as_breaking_the_margins(tmp_path, serve):
+    """overflow-x: auto can also sit directly on the table, with no wrapper div at all."""
+    wrapped = '<table style="width:2000px;overflow-x:auto;display:block"><tr><td>Overflow</td><td>cell</td></tr></table>'
+    site = _site(tmp_path, serve, wrapped)
+    assert not [r for r in site["rows"] if r["group"] == "layout" and r.get("kind") == "block-overflow"]
+
+
+def test_a_font_size_issue_is_reported_in_the_bug_report(tmp_path, serve):
+    """The H1's font size against the Figma spec gets its own "Font size — design spec (Figma)" section
+    in the bug report (genuine-issues.pdf and .docx) - only the size mismatch, not every CSS property
+    the page also gets wrong (font family, weight, colour, ... stay in results.json only)."""
+    from docx import Document
+
+    from pdfval.report import writer
+    pdf = make_site(tmp_path, bad_h1_css=True)
+    run_dir = tmp_path / "run"
+    result = compare_url(str(pdf), serve + "overview.html", str(run_dir), load_config())
+    rows = [r for r in result["site"]["rows"]
+            if r["group"] == "typography" and "font size" in r["item"] and r["status"] == "fail"]
+    assert rows, [r["item"] for r in result["site"]["rows"] if r["group"] == "typography"]
+    writer.write_pdf_report(result, run_dir)
+    pdf_doc = pymupdf.open(run_dir / "genuine-issues.pdf")
+    pdf_text = "\n".join(p.get_text() for p in pdf_doc)
+    pdf_doc.close()
+    assert "Font size — design spec (Figma)" in pdf_text
+    assert "Headline 1 — font size" in pdf_text
+    doc = Document(run_dir / "genuine-issues.docx")
+    table = next(t for t in doc.tables if t.rows[0].cells[0].text == "Bug")
+    assert any("Headline 1 — font size" in r.cells[1].text for r in table.rows[1:])
+
+
+def test_an_image_not_loading_is_reported_in_the_bug_report(tmp_path, serve):
+    """A picture that does not load on the live page gets its own "Images — not loading on the live
+    page" section in the bug report, with a crop of the broken spot."""
+    from docx import Document
+
+    from pdfval.report import writer
+    pdf = make_site(tmp_path, extra_body='<img src="nope.png" alt="gone" width="100" height="50">')
+    run_dir = tmp_path / "run"
+    result = compare_url(str(pdf), serve + "overview.html", str(run_dir), load_config())
+    rows = [r for r in result["site"]["rows"] if r["group"] == "layout" and r.get("kind") == "image-broken"]
+    assert rows and rows[0].get("shot"), rows
+    writer.write_pdf_report(result, run_dir)
+    pdf_doc = pymupdf.open(run_dir / "genuine-issues.pdf")
+    pdf_text = "\n".join(p.get_text() for p in pdf_doc)
+    pdf_doc.close()
+    assert "Images — not loading on the live page" in pdf_text
+    assert "Picture not loaded" in pdf_text
+    doc = Document(run_dir / "genuine-issues.docx")
+    table = next(t for t in doc.tables if t.rows[0].cells[0].text == "Bug")
+    assert any("Picture not loaded" in r.cells[1].text for r in table.rows[1:])
+
+
+def test_hyperlink_issues_are_reported_in_the_bug_report(tmp_path, serve):
+    """A link that still carries a DITA GUID, or does not open, gets its own "Hyperlinks" section in
+    the bug report - the left navigation's links and the content's own cross-references alike."""
+    from docx import Document
+
+    from pdfval.report import writer
+    pdf = make_site(tmp_path, extra_body=AEM_BODY)
+    run_dir = tmp_path / "run"
+    result = compare_url(str(pdf), serve + "overview.html", str(run_dir), load_config())
+    rows = [r for r in result["site"]["rows"] if r["group"] == "links" and r.get("kind") == "link-guid"]
+    assert rows, [r.get("kind") for r in result["site"]["rows"] if r["group"] == "links"]
+    writer.write_pdf_report(result, run_dir)
+    pdf_doc = pymupdf.open(run_dir / "genuine-issues.pdf")
+    pdf_text = "\n".join(p.get_text() for p in pdf_doc)
+    pdf_doc.close()
+    assert "Hyperlinks" in pdf_text
+    assert "GUID in the link" in pdf_text
+    doc = Document(run_dir / "genuine-issues.docx")
+    table = next(t for t in doc.tables if t.rows[0].cells[0].text == "Bug")
+    assert any("GUID in the link" in r.cells[1].text for r in table.rows[1:])

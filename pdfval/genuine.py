@@ -2027,6 +2027,13 @@ _WHY = {
     "case": ("Uppercase / lowercase differs", "The same words are written with different capital letters."),
     "punctuation": ("Punctuation differs", "A punctuation mark (. , : ; quotes, dashes, apostrophes) differs."),
     "case + punctuation": ("Case and punctuation differ", "Capital letters and punctuation marks differ."),
+    "punctuation character": ("Punctuation character differs",
+                              "A punctuation mark is another character in stage - a full-width or CJK mark "
+                              "against its ASCII one (“，” vs “,”, “（” vs “(”, “。” vs “.”). In Chinese, "
+                              "Japanese or Korean text that is the wrong character, not a typesetting style."),
+    "diacritic": ("Mark on a character differs",
+                  "A mark above or below a letter is set on one side only - an Arabic harakat, a Thai tone "
+                  "mark, a Hebrew niqqud - so the word is spelled differently in stage."),
     "spacing": ("Space after a word differs", "A space is missing, extra or doubled between two words."),
     "superscript": ("Superscript / subscript differs", "Text is raised or lowered (e.g. “Cr⁺⁶”, “H₂O”, a footnote mark) on one side only."),
     "paragraph break": ("Paragraph break differs", "Text is split into paragraphs differently."),
@@ -2141,6 +2148,7 @@ _WHY = {
     "spec pagination": ("Page break off the design spec", "A heading at a page bottom, a callout split over pages, or a table header alone / not repeated."),
     "spec page structure": ("Print page structure off the design spec", "The Print version has a cover, Q&A index or TOC, or the first page header is missing or repeated."),
     "table header alignment": ("Table header not left-aligned", "A table header cell's text is not left-aligned in its column (design spec: table headers are always left-aligned)."),
+    "table cell alignment": ("Table cells not aligned", "The rows of one table column do not all start at the same left edge - a header row set against the cell border while the data rows are indented, or a column whose text is centred."),
     "single column alignment": ("Single-column table cell not centred", "A one-column table's cell text is not centred (design spec: a single-column table's text is always centred)."),
     "row background": ("Table row background differs", "Rows that one side shades (group rows between the data rows) are plain on the other."),
     "spec text-align": ("Text not left-aligned", "Body text is centred or right-aligned; the design spec left-aligns all content."),
@@ -2197,7 +2205,7 @@ def tag(f: dict, genuine_types: set[str], data_min_words: int = 3, exclude_check
 RED, BLUE = "#dc2626", "#2563eb"
 _RED_TYPES = {"missing image", "broken image", "image changed", "image blacked out", "missing image label",
               "size / aspect", "image distorted", "placement", "image outside box", "image mirrored",   # image size / alignment
-              "image pixelated", "row order", "extra link", "missing link", "link to wrong section",
+              "image pixelated", "row order", "punctuation character", "diacritic", "extra link", "missing link", "link to wrong section",
               "image blurred", "image alignment", "label joined", "link lands elsewhere", "link page number", "link quotes", "page zero",
               "spec font-size", "font-size",                                            # text size
               "bullet marker", "numbering style", "numbering format", "numbering sequence",  # bullet, (-)
@@ -2396,6 +2404,19 @@ def expected_actual(f: dict) -> tuple[str, str]:
             return f"No “{mk}” before “{it}”{at_a}", f"“{mk}” before “{it}”{at_b}"
         return f"“{mk}” before “{it}”{at_a}", f"No “{mk}” before “{it}”{at_b}"
     # text: the full prod text vs the full stage text
+    # the word gap: "Timing  Support" (2 spaces) -> "Timing Support" (1 space). The two sides read the
+    # same once the spaces are collapsed - and _q collapses them, as Word does with a run of spaces - so
+    # the count is what carries the issue and it has to stay in the text, or the report shows two
+    # identical lines and the reader cannot see what is wrong.
+    if check == "content" and (d.get("op") == "spacing" or "spacing" in types):
+        n_a, n_b = d.get("baseline_spaces"), d.get("candidate_spaces")
+        arrow = re.search(r"“([^”]*)”\s*(\([^)]*\))?\s*→\s*“([^”]*)”\s*(\([^)]*\))?", m)
+        if arrow:
+            spaces = lambda n: f"{n} space{'' if n == 1 else 's'}" if isinstance(n, int) else ""
+            note_a = (arrow.group(2) or "").strip("()") or spaces(n_a)
+            note_b = (arrow.group(4) or "").strip("()") or spaces(n_b)
+            return (f"{_q(arrow.group(1))}{f' ({note_a})' if note_a else ''}{at_a}",
+                    f"{_q(arrow.group(3))}{f' ({note_b})' if note_b else ''}{at_b}")
     if check == "content" and d.get("op") in ("delete", "insert", "replace"):
         bt, ct = d.get("baseline_text") or "", d.get("candidate_text") or ""
         sa, sb = d.get("baseline_sentence") or "", d.get("candidate_sentence") or ""
@@ -2421,6 +2442,14 @@ def expected_actual(f: dict) -> tuple[str, str]:
             return "No such row in prod", f"Row {row}{at_b}"
         if kind == "row order":
             return f"The table rows in the prod order{at_a}", f"Rows in another order: {m.split(' (e.g. ', 1)[-1].rstrip(')')}{at_b}"
+        if kind == "extra table":
+            return f"No table here{at_a}", f"A table stage adds: {row}{at_b}" if row else f"A table stage adds{at_b}"
+        if kind == "table split":
+            return f"One table{at_a}", f"The same rows in several tables{at_b}"
+        if kind == "table to text":
+            return f"A table{at_a}", f"The same text, not in a table{at_b}"
+        if kind == "text to table":
+            return f"Plain text{at_a}", f"The same text set as a table{at_b}"
         if kind == "table-border":
             return f"Borders drawn: {', '.join(d.get('missing') or [])}{at_a}", f"Borders missing: {', '.join(d.get('missing') or [])}{at_b}"
         if kind == "table-border-added":

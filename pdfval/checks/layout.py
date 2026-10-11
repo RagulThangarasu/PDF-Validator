@@ -281,8 +281,10 @@ def _list_items(doc: Doc, rng: tuple[int, int], is_marker, tol_em: float, max_ga
     # column of a table first): the closest line physically above that overlaps the start
     # of the item (marker + first word) - the same column, never a callout further right.
     # A plain line is the list's introduction; an item line (or its wrapped line) passes
-    # on its own introduction. A list with no line close above it (the first list in a
-    # table cell) is measured against its own first marker: its items must line up.
+    # on its own introduction. A list with no line close above it (beside a picture, right
+    # after a heading with a picture or gap between, the first thing in a table cell) is
+    # measured against the page's own content margin instead: a self-reference would always
+    # read as "0", silently hiding the whole list sliding right or left as one block.
     by_page: dict[int, list[int]] = defaultdict(list)
     for li in owner:
         by_page[doc.lines[li].page].append(li)
@@ -309,7 +311,10 @@ def _list_items(doc: Doc, rng: tuple[int, int], is_marker, tol_em: float, max_ga
         elif li is not None and top - doc.lines[li].bbox[3] <= max_gap_em * mw.style.size:
             it["ref"], it["ref_kind"] = doc.lines[li].bbox[0], "intro"
         else:
-            it["ref"], it["ref_kind"] = x0, "first item"
+            # 0.0 means the page's own margin was never measured (defensive only - a real page always
+            # has one): self-reference rather than compare against a meaningless "0"
+            margin = doc.left(mw.page)
+            it["ref"], it["ref_kind"] = (margin, "margin") if margin > 0 else (x0, "first item")
         # which list the item belongs to: the item above at the same marker position
         # (walking out of any sub-list in between); an item further right starts a sub-list
         o = owner[li] if li is not None else None
