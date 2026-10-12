@@ -7,6 +7,10 @@ table_reading_order = true    # read tables row by row, cell by cell (a wrapped 
 column_reading_order = true   # a page set in two columns is read one column at a time (not row by row across both)
 strip_repeating = true        # drop running headers/footers/page numbers
 repeat_threshold = 0.3        # ...when the same line sits at the same y on >=30% of pages
+edge_repeat_pages = 3         # ...or, in the narrow header/footer band alone, on this many pages whatever
+                              # the document's length: a running footer that names the current section
+                              # repeats on that section's pages only, too few for repeat_threshold, and
+                              # left in it pairs with the other side's heading. 0 = off
 ignore_patterns = [           # regexes; matching lines are ignored entirely
   '\.indb\b',
   '^\d{4}/\d{1,2}/\d{1,2}\s',

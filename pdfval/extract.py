@@ -444,6 +444,21 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
             counts[k].add(pno)
         limit = max(3, ecfg.get("repeat_threshold", 0.3) * len(pages))
         hot = {k for k, v in counts.items() if len(v) >= limit}
+        chapter_lines = {re.sub(r"\d+", "#", normalize.clean(t).lower()) for _, t, _ in pdf.get_toc(simple=True)}
+        # A running footer / header that names the CURRENT section repeats on that section's pages only
+        # ("Calibrating two monitors in a row" at the foot of its three pages) - far too few to be "hot"
+        # in a 22-page manual, and the PDF may carry no bookmarks to recognise it by either. Left in, it
+        # is the section heading's own words over again in several more places, so the heading of the
+        # other side gets paired with one of them and the finding lands on a page of running furniture
+        # instead of on the heading. In the narrow edge band the same text at the same height on
+        # `edge_repeat_pages` pages is furniture whatever the document's length; the heading itself sits
+        # at its own height on one page only, so it is never touched. (Table rows at a page edge are
+        # excluded below, as they are for the document-wide rule.)
+        edge_pages = int(ecfg.get("edge_repeat_pages", 3))
+        edge_band = ecfg.get("header_footer_band", 0.12)
+        at_edge = lambda k: k[1] >= (1 - edge_band) * 100 or k[1] <= edge_band * 100
+        if edge_pages:
+            hot |= {k for k, v in counts.items() if len(v) >= edge_pages and at_edge(k)}
         # only in the page's top / bottom band: a running header / footer sits there. In the body of the page
         # the same text at the same height on many pages is content - the cells of a timing table
         # ("640x480 | 60 | V | V" on every page), a form repeated per model - and stripping it loses rows
@@ -492,8 +507,7 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
                 seen_on[key].add(pno)
         # only text that runs beside the page number on several pages, or names a chapter of the PDF's
         # bookmarks (the footer of a one-page chapter): a one-off line there may be content
-        chapters = {re.sub(r"\d+", "#", normalize.clean(t).lower()) for _, t, _ in pdf.get_toc(simple=True)}
-        removed.update(i for i, key in beside if len(seen_on[key]) >= 2 or key.strip("# ") in chapters)
+        removed.update(i for i, key in beside if len(seen_on[key]) >= 2 or key.strip("# ") in chapter_lines)
     # the stripped header / footer lines, kept for the header / footer comparison (checks/footer.py);
     # a bare page number in the band counts even when it did not repeat enough to be stripped
     band_f = ecfg.get("header_footer_band", 0.12)

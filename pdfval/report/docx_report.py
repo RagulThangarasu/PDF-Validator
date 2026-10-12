@@ -652,6 +652,39 @@ def _diff_words(expected: str, actual: str) -> tuple[list[tuple[str, bool]], lis
     return pieces(expected, actual)
 
 
+_MSG_LABELS = {"Figma": "7C3AED", "Prod": "2563EB", "Stage": "0F766E"}
+
+
+def _message_lines(f: dict) -> list[tuple[str, str, str]]:
+    """(label, text, label colour) for an issue that cannot be put as prod text vs stage text: its
+    description, then the "Figma: … / Prod: … / Stage: …" lines its message carries. Several differences
+    at one spot ("  ·  " or a blank line apart) are listed one per line, as the PDF report lists them -
+    the two reports state the same issue the same way (pdf_report._issue)."""
+    from ..genuine import one_line
+    text = (f.get("description") if f.get("genuine") else None) or concise_message(f)
+    parts = [p.strip() for block in (text or "").split("\n\n") for p in block.split("  ·  ") if p.strip()]
+    out: list[tuple[str, str, str]] = []
+    for k, part in enumerate(parts, 1):
+        head, *rest = part.split("\n")
+        out.append(("Issue", one_line(head), INK) if len(parts) == 1 else (f"Difference {k}", one_line(head), "B42318"))
+        out += [(ln.split(": ", 1)[0], one_line(ln.split(": ", 1)[1]), _MSG_LABELS[ln.split(": ", 1)[0]])
+                for ln in rest if ln.split(": ", 1)[0] in _MSG_LABELS and ": " in ln]
+    return out
+
+
+def concise_message(f: dict) -> str:
+    from ..genuine import concise
+    return concise(f.get("message") or "")
+
+
+def _quoted_runs(par, text: str, colour: str = INK) -> None:
+    """A difference line with what it names in red: the text in “…” is the words that differ (“13.” → “3.”),
+    so every difference the line lists is marked, the way the side-by-side viewer marks them."""
+    for k, piece in enumerate(re.split(r"(“[^”]*”)", text)):
+        if piece:
+            _run(par, piece, bold=k % 2 == 1, colour="B42318" if k % 2 == 1 else colour)
+
+
 def _open_tag(par) -> None:
     """The OPEN status, at the end of the issue line: red and larger."""
     _run(par, "  -  ", colour=MUTED, size=9)
@@ -692,6 +725,29 @@ def _issue(doc, out: Path, f: dict, img_w, seq: int):
                 _run(p, text, bold=changed, colour="B42318" if changed else INK)
             if not quoted:
                 _run(p, "”", colour=INK)
+        # A merged finding holds SEVERAL differences at one spot (a renumbered list: "13." -> "3.",
+        # "14." -> "4.", then the numbers prod has and stage does not). prod_stage describes only the
+        # first of them, so everything after it used to be dropped from the .docx while the PDF report
+        # and the side-by-side viewer listed all of them. The rest are listed here, numbered as that
+        # report numbers them.
+        rest = _message_lines(f)[1:]
+        if rest:
+            q = _par(doc, after=0)
+            _run(q, "Also at this spot: ", bold=True, colour=MUTED, size=8)
+            for label, text_, colour in rest:
+                q = _par(doc, after=0)
+                _run(q, f"{label}: ", bold=True, colour=colour)
+                _quoted_runs(q, text_)
+    else:
+        # An issue that cannot be put as prod text vs stage text - a font weight off the design spec, a
+        # table column whose rows start at different edges - still has to SAY what differs, or the .docx
+        # shows nothing but the issue's name and its two screenshots. The PDF report prints its
+        # description and the "Figma: / Prod: / Stage:" lines of its message (pdf_report._issue): the same
+        # lines go here, so the two reports state the issue the same way.
+        for label, text, colour in _message_lines(f):
+            p = _par(doc, after=0)
+            _run(p, f"{label}: ", bold=True, colour=colour)
+            _quoted_runs(p, text)
     a = f.get("aem")
     if a:
         p = _par(doc, after=0)
