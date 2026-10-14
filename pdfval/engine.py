@@ -117,18 +117,22 @@ def beside_or_below(w, hw) -> bool:
 
 def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str | None = None,
             progress: Callable[[float, str], None] | None = None, candidate_doc: Doc | None = None,
-            candidate_meta: dict | None = None) -> dict:
+            candidate_meta: dict | None = None, baseline_doc: Doc | None = None) -> dict:
     """progress(fraction 0..1, message) is called as the run advances.
     candidate_doc: an already built candidate (e.g. a web page from html_source.capture);
-    `candidate` is then the path of its image PDF (screenshots, viewer)."""
+    `candidate` is then the path of its image PDF (screenshots, viewer).
+    baseline_doc: the same for the baseline side - what lets two web pages be compared with each other
+    (sitediff.py) instead of a PDF against a page. `baseline` is then its own image PDF's path."""
     report = progress or (lambda f, m: None)
     cfg = copy.deepcopy(cfg or load_config())
     _reset_caches()
     report(0.0, "Extracting baseline (prod)")
     # each side is the other's reference for glyphs drawn without a Unicode map (glyphs.py)
-    A = extract.load(baseline, "baseline", cfg, reference=None if candidate_doc else candidate)
+    A = baseline_doc or extract.load(baseline, "baseline", cfg,
+                                     reference=None if candidate_doc else candidate)
     report(0.2, "Extracting candidate")
-    B = candidate_doc or extract.load(candidate, "candidate", cfg, reference=baseline)
+    B = candidate_doc or extract.load(candidate, "candidate", cfg,
+                                      reference=None if baseline_doc else baseline)
     if cfg["content"].get("skip_picture_text", True):  # the words of a picture are its artwork, not content
         from . import genuine as _g
         _g.skip_picture_text(A, cfg)
@@ -554,6 +558,11 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             # to this list: it never reaches the other reports)
             fs[:] = [f for f in fs if f.check != "assets" or set(f.types or []) & keep_pics
                      or f.detail.get("image_report_only")]
+    only_types = cfg.get("report", {}).get("only_types")
+    if only_types:  # [report] only_types: a scoped run (e.g. "formatting only") - everything else is dropped
+        only_types = set(only_types)
+        for _, fs, _ in ran:
+            fs[:] = [f for f in fs if set(f.types or []) & only_types or f.detail.get("image_report_only")]
     # bold / italic on the same words is a content difference (reported with the text, not as CSS)
     for _, fs, _ in ran:
         for f in fs:
@@ -1239,6 +1248,12 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
         try:
             result["site"] = site_nav.evaluate(site, baseline, cfg.get("site", {}), cfg.get("typography", {}))
             result["summary"]["site"] = {k: result["site"]["summary"][k] for k in ("status", "fail", "warn", "pass")}
+            # the body hyperlinks on their own (broken / GUID addresses), so the UI can show their
+            # verdict and offer the body-link report next to the other reports
+            from .report import body_link_report
+            bl = body_link_report.summary(result)
+            if bl:
+                result["summary"]["body_links"] = bl
         except Exception as e:  # the content result stands on its own
             result["site"] = {"error": f"{type(e).__name__}: {e}"}
     return result

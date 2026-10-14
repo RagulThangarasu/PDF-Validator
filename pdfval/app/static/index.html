@@ -169,6 +169,7 @@
   details.more .menu a:hover { background: var(--soft); text-decoration: none; }
   .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0 4px; }
   .kpis.five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .kpis.six { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .sitegroups { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin-bottom: 12px; }
   .sitegroups button { text-align: left; display: grid; gap: 4px; border: 1px solid var(--line); border-left: 4px solid var(--pass); border-radius: 8px; background: var(--panel); padding: 10px 12px; cursor: pointer; color: inherit; font: inherit; }
   .sitegroups button.s-warn { border-left-color: var(--warn); } .sitegroups button.s-fail { border-left-color: var(--fail); }
@@ -289,7 +290,7 @@
 <body>
 <header class="top">
   <a class="brand" href="#/new" title="Home – new comparison" style="color:inherit;text-decoration:none"><span class="logo">⇆</span>PDF Parity</a>
-  <nav><a href="#/new" data-nav="new">New comparison</a><a href="#/runs" data-nav="runs">Runs</a><a href="#/pairs" data-nav="pairs">Prod ⇄ Stage pairs</a><a href="#/metadata" data-nav="metadata">Metadata</a></nav>
+  <nav><a href="#/new" data-nav="new">New comparison</a><a href="#/runs" data-nav="runs">Runs</a><a href="#/pairs" data-nav="pairs">Prod ⇄ Stage pairs</a><a href="#/metadata" data-nav="metadata">Metadata</a><a href="/links" title="Crawl guides through their left navigation and check the links in every topic - no PDF comparison">Link check</a></nav>
   <div class="theme" role="group" aria-label="Theme">
     <button data-theme-set="light">Light</button><button data-theme-set="dark">Dark</button><button data-theme-set="system" title="Follow the operating system">System</button>
   </div>
@@ -663,7 +664,9 @@ async function viewNew(qs) {
                <label><input type="checkbox" id="o-check_spacing" checked> Check spacing</label><br>
                <label><input type="checkbox" id="o-ignore_quote_style" checked> Ignore quote / apostrophe style (haven’t vs haven't)</label><br>
                <label><input type="checkbox" id="o-normalize_typography"> Also ignore dash style (– vs -)</label><br>
-               <label title="Off: typography, CSS and layout are checked on stage only, against the design spec (config/typography.toml). On: also report where stage's fonts, colours, indents, alignment and graphic placement differ from prod's. PDF ⇄ PDF runs only."><input type="checkbox" id="o-css_vs_prod"> Also compare CSS / layout with prod</label></div>
+               <label title="The hyperlinks inside the text of the page (not the left navigation, breadcrumb or pager): each one opens, its #anchor exists, and it does not redirect to a raw GUID address. Produces the body hyperlink report. PDF ⇄ Web runs."><input type="checkbox" id="o-check_body_links" checked> Check body hyperlinks (broken links / GUID addresses)</label><br>
+               <label title="Off: typography, CSS and layout are checked on stage only, against the design spec (config/typography.toml). On: also report where stage's fonts, colours, indents, alignment and graphic placement differ from prod's. PDF ⇄ PDF runs only."><input type="checkbox" id="o-css_vs_prod"> Also compare CSS / layout with prod</label><br>
+               <label title="Report nothing except: numbered-list differences (1. vs A. vs i.), a picture's alignment in its text column, and an inline icon pushed onto the next line in stage. Everything else is left out of every report."><input type="checkbox" id="o-only_formatting_issues"> Only report formatting issues (numbering, image alignment, icon wrap)</label></div>
         </div>
         <div class="grid2" style="margin-top:14px">
           <div><label class="f">Skip sections (regex per line, on title)</label><textarea id="o-skip" rows="3" placeholder="^table of contents?$"></textarea></div>
@@ -1098,10 +1101,14 @@ async function viewRun(id, qs) {
            title="Page by page: each prod page beside the matching stage page, the issues boxed and numbered on both, with their full description">⬇ Side-by-side report</a>
         ${s.site ? `<a class="btn ${s.site.fail ? 'danger' : ''}" href="${base}site.pdf?download=${encodeURIComponent('site-report-' + id + '.pdf')}"
            title="Left navigation, links, pager, page layout / pictures and CSS vs the design spec - every row, one expectation per line">⬇ Site report${s.site.fail ? ` — FAIL (${s.site.fail})` : ''}</a>` : ''}
+        ${s.body_links ? `<a class="btn ${s.body_links.fail ? 'danger' : ''}" href="${base}body-link-issues.pdf?download=${encodeURIComponent('body-link-report-' + id + '.pdf')}"
+           title="The hyperlinks in the page body only: broken links, dead anchors, and links that redirect to a raw GUID address — the navigation, breadcrumb and pager are not in it">⬇ Body link report${s.body_links.fail ? ` — FAIL (${s.body_links.fail})` : ''}</a>
+        <a class="btn" href="${base}body-link-issues.csv?download=${encodeURIComponent('body-link-report-' + id + '.csv')}"
+           title="The same body hyperlinks as a table (opens in Excel)">⬇ Body link report (CSV / Excel)</a>` : ''}
       </div></div>
     ${job.warning ? `<div class="warnbox" role="alert"><b>⚠ Same file compared twice.</b> ${esc(job.warning)}
        <a class="btn sm" href="#/new?from=${id}">Pick another candidate</a></div>` : ''}
-    <div class="kpis ${s.site ? 'five' : ''}">
+    <div class="kpis ${s.body_links ? 'six' : s.site ? 'five' : ''}">
       <div class="kpi"><span class="k">Result</span><span class="badge b-${s.result}">${s.result}</span>
         <span class="sub"><span style="color:var(--fail)">${s.fail} fail</span> · <span style="color:var(--warn)">${s.warn} warn</span> · <span style="color:var(--pass)">${s.pass} pass</span></span></div>
       <button class="kpi" data-kpi="content" title="Show content issues"><span class="k">Content match</span><span class="pct ${cst}">${c.match_pct.toFixed(2)}%</span>
@@ -1114,12 +1121,16 @@ async function viewRun(id, qs) {
       ${s.site ? `<button class="kpi" data-tab="site" title="Left navigation, links, Download PDF, next / previous, On this page, product subtitle"><span class="k">Site navigation</span>
         <span class="badge b-${s.site.status}">${s.site.status}</span>
         <span class="sub"><span style="color:var(--fail)">${s.site.fail} fail</span> · <span style="color:var(--warn)">${s.site.warn} warn</span> · <span style="color:var(--pass)">${s.site.pass} pass</span></span></button>` : ''}
+      ${s.body_links ? `<button class="kpi" data-tab="bodylinks" title="The hyperlinks inside the text of the page: broken links, dead anchors and links that redirect to a raw GUID address"><span class="k">Body hyperlinks</span>
+        <span class="badge b-${s.body_links.status}">${s.body_links.status}</span>
+        <span class="sub">${s.body_links.links} link(s) · <span style="color:var(--fail)">${s.body_links.broken} broken</span> · <span style="color:var(--fail)">${s.body_links.guid} GUID</span></span></button>` : ''}
     </div>
     <div class="tabs" role="tablist">
       <button data-tab="issues">Issues</button>${d.toc ? `<button data-tab="toc">TOC (${d.toc.summary.baseline_entries} ⇆ ${d.toc.summary.candidate_entries})</button>` : ''}
       <button data-tab="sections">Sections (${s.sections})</button>${d.aem ? `<button data-tab="topics" title="The AEM Guides topics (GUIDs) the stage issues come from">AEM topics (${d.aem.topics.length})</button>` : ''}
       <button data-tab="stylemap">Style map (${d.style_map.length})</button>
       ${d.site ? `<button data-tab="site" title="The web guide's navigation around the content">Site navigation${d.site.summary ? ` (${d.site.summary.fail} fail)` : ''}</button>` : ''}
+      ${s.body_links ? `<button data-tab="bodylinks" title="Only the hyperlinks in the page body: broken links and GUID addresses">Body hyperlinks (${s.body_links.fail} fail)</button>` : ''}
     </div>
     <div id="tab"></div>`;
   app.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { R.tab = b.dataset.tab; writeState(); renderTab(); });
@@ -1186,6 +1197,7 @@ function renderTab() {
   if (R.tab === 'toc') { renderToc(el); return; }
   if (R.tab === 'topics') { renderTopics(el); return; }
   if (R.tab === 'site') { renderSite(el); return; }
+  if (R.tab === 'bodylinks') { renderBodyLinks(el); return; }
   if (R.tab === 'stylemap') {
     el.innerHTML = `<p class="muted">Every font / size / colour mismatch across the document, grouped by role. Each row is one CSS rule to fix in the stage stylesheet.</p>
       <div class="card" style="padding:0;overflow-x:auto"><table class="t"><thead><tr><th>Role</th><th>Prod</th><th>Stage</th><th class="n">Words</th><th class="n">Sections</th></tr></thead><tbody>
@@ -1430,6 +1442,57 @@ function renderSite(el) {
     if (b) { R.siteGroup = R.siteGroup === b.dataset.sg ? '' : b.dataset.sg; return renderSite(el); }
     const v = e.target.closest('[data-sf]');
     if (v) { R.siteFilter = v.dataset.sf; return renderSite(el); }
+  };
+}
+
+// ---------------- Body hyperlinks: only the links inside the text of the page (not the left
+// navigation, breadcrumb, pager or "On this page"), as its own report - broken links, dead anchors,
+// and links whose address, label or redirect target still carries a DITA GUID. The rows are the site
+// run's own, tagged `body` by pdfval/site_nav.py; the PDF / CSV of the same list is body-link-issues.*
+const BODY_LINK_KINDS = [
+  ['link-broken', 'Broken link', 'does not open (HTTP error) or its #anchor does not exist'],
+  ['link-guid-redirect', 'Redirects to a GUID address', 'the link opens but lands on the raw GUID page'],
+  ['link-guid', 'GUID in the link', 'the address or the label still carries a DITA GUID'],
+  ['link-not-http', 'Not an http(s) link', 'nothing the crawl can open'],
+  ['link-unchecked', 'Not verified', 'the crawl did not open this link'],
+  ['link-ok', 'Opens', 'the link opens and its anchor exists'],
+];
+
+function renderBodyLinks(el) {
+  const st = R.data.site || {}, base = `/runs/${R.job.id}/`;
+  const all = (st.rows || []).filter(r => r.body);
+  if (!all.length) { el.innerHTML = `<div class="card">No hyperlink was found in the body of the checked pages${st.error ? `: ${esc(st.error)}` : '.'}</div>`; return; }
+  const k = R.blKind || '', f = R.blFilter || 'issues';
+  const label = Object.fromEntries(BODY_LINK_KINDS.map(x => [x[0], x[1]]));
+  const rows = all.filter(r => (!k || r.kind === k) && (f === 'all' || r.status === 'fail' || r.status === 'warn'));
+  const n = kind => all.filter(r => r.kind === kind).length;
+  const bad = all.filter(r => r.status === 'fail').length, warn = all.filter(r => r.status === 'warn').length;
+  const short = u => { try { const x = new URL(u); return x.pathname.split('/').pop() || x.pathname; } catch (e) { return u; } };
+  el.innerHTML = `
+    <div class="card" style="margin-bottom:12px"><div class="row">
+      <div><b>${all.length} hyperlink(s)</b> in the body of ${(st.summary || {}).pages || 0} page(s) ·
+        <span style="color:var(--fail)">${bad} fail</span> · <span style="color:var(--warn)">${warn} warn</span>
+        <div class="small muted">Only the links inside the text. The left navigation, breadcrumb, next / previous and “On this page” are in the Site navigation tab.</div></div>
+      <span class="spacer"></span>
+      <a class="btn sm" href="${base}body-link-issues.pdf?download=${encodeURIComponent('body-link-report-' + R.job.id + '.pdf')}">⬇ PDF</a>
+      <a class="btn sm" href="${base}body-link-issues.csv?download=${encodeURIComponent('body-link-report-' + R.job.id + '.csv')}">⬇ CSV</a>
+      <div class="seg" role="group" aria-label="Rows"><button data-blf="issues" aria-pressed="${f === 'issues'}">Problems only</button><button data-blf="all" aria-pressed="${f === 'all'}">All links</button></div>
+    </div></div>
+    <div class="types">${BODY_LINK_KINDS.filter(x => n(x[0])).map(([kind, name, why]) =>
+      `<button class="chip opt" data-blk="${kind}" aria-pressed="${k === kind}" title="${esc(why)}">${esc(name)} <b>${n(kind)}</b></button>`).join('')}</div>
+    <div class="card" style="padding:0;overflow-x:auto"><table class="t site"><thead><tr><th>Status</th><th>Bug</th><th>Issue</th><th>Link text</th><th>Expected</th><th>Actual</th><th>Page</th><th>Note</th></tr></thead><tbody>
+      ${rows.map(r => `<tr><td class="st"><span class="badge b-${r.status}">${r.status}</span></td><td class="small">${esc(r.bug || '')}</td>
+        <td>${esc(label[r.kind] || r.kind || '')}</td>
+        <td><b>${esc(r.item)}</b>${r.where ? `<div><code title="Element the link is read from">${esc(r.where)}</code></div>` : ''}</td>
+        <td>${esc(r.expected)}</td><td>${esc(r.actual)}</td>
+        <td>${r.page ? `<a href="${esc(r.page)}" target="_blank" rel="noopener" title="${esc(r.page)}">${esc(short(r.page))} ↗</a>` : ''}</td>
+        <td class="small">${esc(r.note)}</td></tr>`).join('') || `<tr><td colspan="8" class="muted">${f === 'issues' ? 'No body hyperlink problem found.' : 'No links.'}</td></tr>`}
+    </tbody></table></div>`;
+  el.onclick = e => {
+    const b = e.target.closest('[data-blk]');
+    if (b) { R.blKind = R.blKind === b.dataset.blk ? '' : b.dataset.blk; return renderBodyLinks(el); }
+    const v = e.target.closest('[data-blf]');
+    if (v) { R.blFilter = v.dataset.blf; return renderBodyLinks(el); }
   };
 }
 

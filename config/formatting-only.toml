@@ -1,0 +1,7 @@
+# Formatting-only run: python -m pdfval compare ... --config config/formatting-only.toml
+# Reports nothing except: numbered-list differences ("1." vs "A."/"i." etc.), a picture's alignment
+# in its text column (prod centred, stage left-aligned, or any other move), and an inline icon that
+# sits beside its word in prod but is pushed onto the next line in stage.
+
+[report]
+only_types = ["numbering style", "numbering format", "numbering sequence", "image alignment", "icon wraps to next line"]

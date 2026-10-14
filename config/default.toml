@@ -115,7 +115,11 @@ overflow_severity = "error"
 check_cells = false           # report cells merged (fewer cells in stage) or split (more cells in stage) in mapped rows
 validate_reordered_cells = true  # "Text in another order" inside a table: compare the data cell by cell - every
                               # cell the same (whatever its alignment / position) = not reported; else the
-                              # cells that differ are reported as "Table cell differs"
+                              # cells that differ are reported (see report_cell_differs)
+report_cell_differs = false   # "Table cell differs in stage (N cell(s)): row X, column Y: "A" -> "B"" - the
+                              # cell-by-cell breakdown. Off: a table's text difference is reported by the
+                              # text diff alone, never cell by cell. Nothing is lost either way - with this
+                              # off the text diff's own finding is kept where the cells really do differ
 cell_match_ratio = 0.6        # a prod table is the stage table of the same grid with >= this share of cells equal
 cell_differs_severity = "error"
 cells_severity = "warning"
@@ -126,6 +130,12 @@ border_severity = "error"     # a prod table border missing in stage
 border_color_tolerance = 150  # euclidean RGB distance: border colour differs (black -> light grey), not anti-aliasing
 border_color_severity = "warning"   # text in a stage table that runs across its cell border (not in prod)
 check_header_align = true     # table header cells (dark header bar): text must be left-aligned in its column
+check_header_padding = true   # table header cells ON THE BACKGROUND BAR: the text must not sit against the
+                              # cell border - the spec pads every cell, and a header glued to its border
+                              # is reported. Stage only, against the spec; a table with no header bar is
+                              # not judged
+header_min_padding = 4.0      # pt of space a header cell must leave between its border and its text
+header_padding_severity = "error"
                               # (design spec) - flags centred / right-aligned / indented headers
 header_align_tolerance = 4.0  # pt the text may sit off the column centre
 header_align_severity = "error"
@@ -208,6 +218,9 @@ ignore_center_placement = true  # a centred graphic only moving between inline a
                               # different/missing text is still reported
 check_wrap = false            # true = report the same text wrapping to the next line at a different word (line-wrap)
 check_bullets = true          # bullet / numbered list markers (missing, different, numbering) - see list_marker
+check_bullets_in_tables = false  # lists INSIDE a table cell: not checked at all (the cell is laid out by the
+                              # table, and its markers are the table's own styling). true brings the marker
+                              # checks back for them; where they sit is never compared either way
 check_bullet_position = true  # bullet / numbered list ALIGNMENT (marker position, gap to the text, hanging
                               # indent): on - a mis-nested / wrongly indented item (e.g. "2." sitting under "1."'s
                               # text column instead of level with it) is a real layout defect, not just reflow
@@ -286,13 +299,17 @@ report_types = ["missing image", "broken image", "image changed", "image blacked
                 "image vertical alignment",   # an icon centred on its paragraph in prod, at its first line in stage
                 "extra image", "image order", "placement", "image outside box", "image blurred",   # a picture stage adds, pictures
                 # in another order, a picture inline vs on its own line, out of its note / box, softer than prod's
-                "icon missing inline", "icon differs", "icon pixelated",   # icons inside a sentence
+                "icon missing inline", "icon differs", "icon pixelated", "icon wraps to next line",   # icons inside a sentence
                 "callout numbers missing", "image label missing", "leader lines missing"]   # picture text: image report only
 picture_text = false          # what is inside a picture is not compared: no text, table rows, callout numbers,
                               # labels or leader lines read from a picture (an embedded image, an illustration or a
                               # screenshot drawn as vectors) - only its red overlay (highlight marks) is checked.
                               # true = the picture's numbers / labels / leader lines go to the image report again
-alignment_sides_only = true   # image alignment: only a complete move left <-> right (not centred / full width / indented)
+# A picture prod centres and stage pushes to the left edge of the text column is the move a reader sees
+# first, so it is reported: "alignment centred -> left". Both switches used to suppress exactly that and
+# only left <-> right was left, which is why a template change that left-aligns every figure raised
+# nothing at all. align_min_shift still applies: the picture's centre has to move by 15% of the text width.
+alignment_sides_only = false  # false = every move across the column (centred / indented / full width), not only left <-> right
 pixelated_vs_vector = false   # "image pixelated" where prod draws the artwork as vectors and stage embeds a bitmap
                               # under pixelated_ppi: not reported (nothing of prod's to compare the resolution with).
                               # Pixelated = both are bitmaps, stage under pixelated_ppi and prod >= pixelated_ratio x
@@ -317,7 +334,7 @@ blackout_fraction = 0.15      # share of a picture that is black in stage but no
 raster_vs_vector_severity = "info"  # same artwork, bitmap on one side and vector paths on the other
 artwork_match_score = 0.6      # min cross-correlation when searching the other page for the same artwork
 check_alignment = true        # report image alignment differences (left/right/center/full width)
-ignore_center_alignment = true # suppress center alignment changes (only report left/right differences)
+ignore_center_alignment = false # false = a centred picture that moves (or one that becomes centred) is reported
 check_vector_only_missing = true  # a prod picture drawn only as vectors (no embedded raster of its own)
                                # with no stage picture anywhere near it at all: reported as missing, same
                                # as any other dropped picture - the normal pairing only finds such a vector
@@ -327,9 +344,19 @@ check_vector_only_missing = true  # a prod picture drawn only as vectors (no emb
 
 [report]
 full_page_shots = true        # PDF report screenshots: the whole prod page and the whole stage page (not a crop)
+shot_width = 1500             # px every screenshot is rendered to, whatever the page size of the document -
+                              # so the pictures are the same size in every publication's report (a 668pt
+                              # InDesign page and an A4 page would otherwise come out 1670px and 1488px
+                              # wide at a fixed zoom). 0 = the old fixed zoom (2.5x the page)
 max_locs = 40                 # highlight boxes per finding
 max_findings_per_check = 0    # per check and section; 0 = no cap, every finding is reported (a cap only ever
                               # thins CSS / layout findings: critical and genuine issues are always kept)
+# Restrict every report (PDF, CSV, viewer, section score) to just these finding types - nothing else is kept
+# once the checks have run. [] (default) = everything a normal run reports, unchanged.
+# e.g. a "formatting only" run: numbering / list number differences, image alignment, an inline icon that
+# wraps onto the next line in stage -
+# only_types = ["numbering style", "numbering format", "numbering sequence", "image alignment", "icon wraps to next line"]
+only_types = []
 # Issue groups left out of the PDF reports' grouped issue listing (report.pdf, the genuine-issues and
 # CSS reports): "content", "links", "formatting" (sections and headings, tables, images, TOC, layout,
 # bullets and lists) or "css". The remaining groups are renumbered, so dropping "formatting" leaves
@@ -403,8 +430,11 @@ check_typography = true       # the page's CSS vs [typography.formats.html_web] 
                               # line height, colour; exact match, no tolerance
 check_table_style = true      # the table component vs [typography.formats.html_web.table] - header bar
                               # colour, border width/colour, cell padding, corner radius
-check_content_links = true    # links in the content itself (cross-references), not only the chrome:
-                              # each one opens, its anchor exists
+check_body_links = true       # the hyperlinks in the page body (cross-references), not the chrome: each
+                              # one opens, its anchor exists, and it does not redirect to a raw DITA GUID
+                              # address. These are the rows of the body hyperlink report
+                              # (body-link-issues.pdf / .csv, report/body_link_report.py)
+check_content_links = true    # the former name of check_body_links; still read when that key is absent
 check_guid_links = true       # a link whose address or label still carries a DITA GUID
                               # (GUID-17f6ffdc-…): an AEM reference the publish did not resolve
 check_list_margin = true      # a list whose markers (1. 2. 3. / bullets) do not start at the left edge
@@ -494,6 +524,7 @@ types = [
   "table to text", "text to table",               # a table published as plain text (or the reverse)
   "row order",       # the rows of a prod table in another order in stage: the sequence the reader reads
   "icon missing inline", "icon differs", "icon pixelated",   # icons inside a sentence: missing, another icon, low resolution
+  "icon wraps to next line",                # the icon sits beside its word in prod, pushed onto the next line in stage
   "caption row",                            # captions of one row of pictures: level in prod, not in stage
   "missing image label",                    # a picture's caption / label missing in stage: live text that
                                              # belongs beside the picture, not drawn into it (not "label in

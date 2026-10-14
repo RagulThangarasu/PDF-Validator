@@ -675,8 +675,13 @@ def _apply_options(cfg: dict, o: dict) -> None:
             cfg["content"][k] = bool(o[k])
     if "css_vs_prod" in o:  # off (default): typography / CSS / layout on stage only, against the design spec
         cfg["style"]["compare_with_prod"] = cfg["layout"]["compare_with_prod"] = bool(o["css_vs_prod"])
+    if o.get("only_formatting_issues"):  # numbering, image alignment, icon wraps to next line - nothing else
+        cfg["report"]["only_types"] = ["numbering style", "numbering format", "numbering sequence",
+                                        "image alignment", "icon wraps to next line"]
     if "case_sensitive" in o:
         cfg["content"]["case_sensitive"] = bool(o["case_sensitive"])
+    if "check_body_links" in o:  # the body hyperlink check, and with it the body-link report
+        cfg.setdefault("site", {})["check_body_links"] = bool(o["check_body_links"])
     # the cover (front matter) is never validated from the UI: [sections] front_matter in the config
     if o.get("skip"):
         cfg["sections"]["skip"] = [s.strip() for s in o["skip"].splitlines() if s.strip()]
@@ -689,6 +694,8 @@ def _apply_options(cfg: dict, o: dict) -> None:
 
 def make_handler(jobs: Jobs, root: Path):
     meta = MetadataCheck(jobs)
+    links = LinkChecker(jobs)
+    sitediff_job = SiteDiffer(jobs)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -743,6 +750,42 @@ def make_handler(jobs: Jobs, root: Path):
             try:
                 if p in ("/", "/index.html"):
                     return self._file(STATIC / "index.html")
+                if p in ("/links", "/links.html"):   # the link check: its own page, no PDF comparison
+                    return self._file(STATIC / "links.html")
+                if p == "/api/linkcheck":
+                    return self._json(links.status())
+                if p == "/api/sitediff":
+                    return self._json(sitediff_job.status())
+                if m := re.fullmatch(r"/api/sitediff/(pdf|csv|json)", p):
+                    f = (sitediff_job.state.get("files") or {}).get(m[1])
+                    if not f:
+                        return self._json({"error": "no report yet"}, 404)
+                    return self._file(Path(f), download=Path(f).name)
+                if p == "/api/aem/publications":
+                    # every publication under a folder of AEM Sites (…/sites.html/content/guide/<x>/en):
+                    # its map-level parent page, and the page a crawl of it should start at
+                    root = parse_qs(u.query).get("root", [""])[0]
+                    if not root:
+                        return self._json({"error": "Give the Sites folder as ?root=…"}, 400)
+                    try:
+                        return self._json(aem.publications(root, jobs.aem_config(),
+                                                           lang=parse_qs(u.query).get("lang", [""])[0]))
+                    except Exception as e:
+                        return self._json({"error": f"{type(e).__name__}: {e}"}, 400)
+                if m := re.fullmatch(r"/api/linkcheck/saved/([a-z]+)/(.+)", p):
+                    # a report kept in runs/_linkcheck/<label>/ - "before" is the baseline
+                    try:
+                        f = (links.dir_of(m[1]) / Path(m[2]).name)
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, 404)
+                    if not f.is_file():
+                        return self._json({"error": "no such saved report"}, 404)
+                    return self._file(f, download=f"{m[1]}-{f.name}")
+                if m := re.fullmatch(r"/api/linkcheck/(pdf|failures_pdf|csv|json)", p):
+                    f = (links.state.get("files") or {}).get(m[1])
+                    if not f:
+                        return self._json({"error": "no report yet"}, 404)
+                    return self._file(Path(f), download=Path(f).name)
                 if p == "/api/runs":
                     return self._json(jobs.list())
                 if m := re.fullmatch(r"/api/runs/([\w-]+)", p):
@@ -826,6 +869,11 @@ def make_handler(jobs: Jobs, root: Path):
                         # the side-by-side page report: built on first download
                         from ..report import page_report as _sp
                         _sp.build(json.loads((base / "results.json").read_text(encoding="utf-8")), base)
+                    if target.name.startswith("body-link-issues.") and not target.exists() and (base / "results.json").exists():
+                        # the body hyperlink report: rebuilt on first download when the file is gone
+                        # (a run with no body hyperlink at all builds nothing - the file stays missing -> 404)
+                        from ..report import body_link_report as _bl
+                        _bl.build(json.loads((base / "results.json").read_text(encoding="utf-8")), base)
                     if target.name == "image-issues.pdf" and not target.exists() and (base / "results.json").exists():
                         # a run finished before the image report existed: build it on first download
                         # (nothing is built when its images PASS: the file stays missing -> 404)
@@ -870,6 +918,22 @@ def make_handler(jobs: Jobs, root: Path):
                                         batch=bid)
                             for x in req.get("pairs", []) if x.get("baseline") and x.get("candidate")]
                     return self._json({"batch": bid, "runs": [j["id"] for j in made]}, 201)
+                if p.path == "/api/linkcheck":
+                    try:
+                        return self._json(links.start(json.loads(self._body() or b"{}")))
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, 400)
+                if p.path == "/api/sitediff":
+                    try:
+                        return self._json(sitediff_job.start(json.loads(self._body() or b"{}")))
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, 400)
+                if p.path == "/api/linkcheck/save":  # keep this run as the "before" (or "after") report
+                    req = json.loads(self._body() or b"{}")
+                    try:
+                        return self._json(links.save(str(req.get("label") or "before"), str(req.get("run") or "")))
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, 400)
                 if p.path == "/api/library/extract":
                     return self._json(LIBRARY.start())
                 if p.path == "/api/aem":
@@ -1173,6 +1237,204 @@ class Pairs:
 
 
 PAIRS = Pairs(PROJECT / "aem-map-pdfs", PROJECT / "stage-pdf")
+
+
+class SiteDiffer:
+    """A ⇄ B: two AEM Sites trees compared publication by publication, for the Link check page.
+
+    The pairs come from the page already matched by product, each carrying the topic to start from on
+    each side, so nothing is guessed here. One run at a time; reports go to runs/_sitediff/<timestamp>.
+    """
+
+    def __init__(self, jobs: "Jobs"):
+        self.jobs = jobs
+        self.lock = threading.Lock()
+        self.state = self._idle()
+
+    @staticmethod
+    def _idle() -> dict:
+        return {"running": False, "message": "", "error": "", "pairs": 0, "result": None,
+                "files": {}, "started": "", "finished": ""}
+
+    def status(self) -> dict:
+        st = dict(self.state)
+        st["files"] = {k: Path(v).name for k, v in (st.get("files") or {}).items()}
+        res = st.pop("result", None)
+        if res:   # the page draws its own table: counts only, not every finding
+            st["summary"] = [{"product": p["product"], "topics": len(p["topics"]),
+                              "differences": sum(len(t["findings"]) for t in p["topics"]),
+                              "only_a": len(p.get("only_a") or []), "only_b": len(p.get("only_b") or []),
+                              "error": p["error"]} for p in res["publications"]]
+        return st
+
+    def start(self, req: dict) -> dict:
+        pairs = [p for p in (req.get("pairs") or []) if p.get("product") and p.get("a") and p.get("b")]
+        if not pairs:
+            raise ValueError("No matched product to compare - list both trees first")
+        with self.lock:
+            if self.state["running"]:
+                raise ValueError("A comparison is already running")
+            self.state = {**self._idle(), "running": True, "pairs": len(pairs),
+                          "message": f"Starting - {len(pairs)} product(s)",
+                          "started": datetime.now().isoformat(timespec="seconds")}
+        threading.Thread(target=self._run, args=(pairs, dict(req)), daemon=True).start()
+        return self.status()
+
+    def _run(self, pairs: list[dict], req: dict) -> None:
+        from .. import sitediff
+        from ..report import sitediff_report
+        try:
+            acfg = self.jobs.aem_config()
+            out = self.jobs.dir / "_sitediff" / datetime.now().strftime("%Y%m%d-%H%M%S")
+            res = sitediff.run_pairs(pairs, engine.load_config(),
+                                     user=req.get("user") or acfg.get("user", ""),
+                                     password=req.get("password") or acfg.get("password", ""),
+                                     max_topics=int(req.get("max_topics") or 0),
+                                     concurrency=max(1, min(int(req.get("concurrency") or 6), 12)),
+                                     out_dir=out,
+                                     progress=lambda m: self.state.update(message=m))
+            self.state["message"] = "Writing the report"
+            self.state.update(result=res, files=sitediff_report.build(res, out), message="Done")
+        except Exception as e:
+            traceback.print_exc()
+            self.state["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            self.state["running"] = False
+            self.state["finished"] = datetime.now().isoformat(timespec="seconds")
+
+
+class LinkChecker:
+    """The link check (pdfval/linkcheck.py), run in the background for the Links page: a list of guide
+    URLs is crawled through each guide's left navigation and every link in the topic bodies is opened.
+    One run at a time; its reports are written under runs/_linkcheck/<timestamp>/."""
+
+    def __init__(self, jobs: "Jobs"):
+        self.jobs = jobs
+        self.lock = threading.Lock()
+        self.state = self._idle()
+
+    @staticmethod
+    def _idle() -> dict:
+        return {"running": False, "message": "", "error": "", "urls": [], "totals": None,
+                "guides": [], "files": {}, "dir": "", "started": "", "finished": ""}
+
+    # a snapshot is kept under runs/_linkcheck/<label>/ - "before" is the baseline a later run is read
+    # against, so the reports of the state the guides were in before the fixes are not lost to the next run
+    SNAPSHOTS = ("before", "after")
+
+    def dir_of(self, label: str) -> Path:
+        if label not in self.SNAPSHOTS:
+            raise ValueError(f"Unknown report folder \u201c{label}\u201d - it is one of: {', '.join(self.SNAPSHOTS)}")
+        return self.jobs.dir / "_linkcheck" / label
+
+    def status(self) -> dict:
+        st = dict(self.state)
+        st["files"] = {k: Path(v).name for k, v in (st.get("files") or {}).items()}
+        st["saved"] = {label: self.snapshot(label) for label in self.SNAPSHOTS
+                       if (self.dir_of(label) / "meta.json").exists()}
+        return st
+
+    def snapshot(self, label: str) -> dict:
+        """What is in a saved folder: when it was saved, from which run, and its totals."""
+        try:
+            meta = json.loads((self.dir_of(label) / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return {**meta, "files": sorted(f.name for f in self.dir_of(label).glob("link-check*"))}
+
+    def save(self, label: str, source: str = "") -> dict:
+        """Copy a finished link check into runs/_linkcheck/<label>/ - its PDF, failures PDF, CSV and
+        JSON, with a meta.json saying where it came from. `source` is a run folder's name; the last
+        run of this server, or the newest folder on disk, when it is left out."""
+        dest = self.dir_of(label)
+        base = self.jobs.dir / "_linkcheck"
+        if source:
+            src = (base / source).resolve()
+            if not src.is_relative_to(base.resolve()) or not src.is_dir():
+                raise ValueError(f"No link check called \u201c{source}\u201d")
+        else:
+            last = self.state.get("dir") or ""   # Path("") is the working directory, not "no run"
+            src = Path(last) if last else None
+            if src is None or not src.is_dir():
+                runs = sorted((d for d in base.glob("2*") if d.is_dir() and any(d.glob("link-check*"))),
+                              key=lambda d: d.stat().st_mtime)
+                if not runs:
+                    raise ValueError("There is no link check to save yet - run one first")
+                src = runs[-1]
+        files = sorted(src.glob("link-check*"))
+        if not files:
+            raise ValueError(f"The link check in {src.name} wrote no report")
+        if dest.exists():  # a label holds one report: the previous one is replaced, not mixed into
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            shutil.copy2(f, dest / f.name)
+        totals = {}
+        data = dest / "link-check.json"
+        if data.exists():
+            try:
+                totals = json.loads(data.read_text(encoding="utf-8")).get("totals") or {}
+            except ValueError:
+                totals = {}
+        meta = {"label": label, "saved": datetime.now().isoformat(timespec="seconds"), "run": src.name,
+                "urls": self.state.get("urls") or [], "totals": totals}
+        (dest / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
+        return self.snapshot(label)
+
+    def start(self, req: dict) -> dict:
+        urls = [u.strip() for u in re.split(r"[\r\n,;\s]+", req.get("urls") or "") if u.strip()]
+        urls = [u for u in urls if u.lower().startswith(("http://", "https://"))]
+        if not urls:
+            raise ValueError("No http(s) URL in the list")
+        with self.lock:
+            if self.state["running"]:
+                raise ValueError("A link check is already running")
+            self.state = {**self._idle(), "running": True, "urls": urls,
+                          "message": f"Starting - {len(urls)} guide(s)",
+                          "started": datetime.now().isoformat(timespec="seconds")}
+        threading.Thread(target=self._run, args=(urls, dict(req)), daemon=True).start()
+        return self.status()
+
+    def _run(self, urls: list[str], req: dict) -> None:
+        from .. import linkcheck
+        from ..report import link_report
+        try:
+            acfg = self.jobs.aem_config()
+            user = req.get("user") or acfg.get("user", "")
+            password = req.get("password") or acfg.get("password", "")
+            if req.get("password"):  # keep it for the next check, as the AEM card does (memory only)
+                self.jobs.aem_password = str(req["password"])
+            # AEM answers a request it has no session for with its own sign-in page, so a wrong login
+            # would otherwise be found only after crawling every guide - as a run full of "AEM Sign In"
+            # pages. Ask AEM about the login first, while the crawl has not started
+            hosts = {urlparse(u).netloc for u in urls}
+            author = (acfg.get("author") or "").rstrip("/")
+            if author and urlparse(author).netloc in hosts:
+                ok, why = aem.check_login({**acfg, "user": user, "password": password})
+                if not ok:
+                    raise ValueError(f"{why}. The guides are on the AEM author server ({author}), so the "
+                                     f"link check needs an AEM login that may open them.")
+            self.state["message"] = f"Signing in as {user}" if user else "Starting"
+            out = self.jobs.dir / "_linkcheck" / datetime.now().strftime("%Y%m%d-%H%M%S")
+            out.mkdir(parents=True, exist_ok=True)
+            result = linkcheck.run(urls, engine.load_config(), user=user, password=password,
+                                   max_pages=int(req.get("max_pages") or 0),
+                                   concurrency=max(1, min(int(req.get("concurrency") or 4), 12)),
+                                   progress=lambda m: self.state.update(message=m))
+            self.state["message"] = "Writing the report"
+            files = link_report.build(result, out)
+            self.state.update(totals=result["totals"], guides=result["guides"], files=files,
+                              dir=str(out), message="Done")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.state["error"] = f"{type(e).__name__}: {e}"
+            hint = getattr(e, "launch_hint", "")
+            if hint:
+                self.state["error"] = hint
+        finally:
+            self.state["running"] = False
+            self.state["finished"] = datetime.now().isoformat(timespec="seconds")
 
 
 class MetadataCheck:

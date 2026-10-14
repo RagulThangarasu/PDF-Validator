@@ -155,6 +155,25 @@ def check(u: Unit) -> list[Finding]:
                 if hit:
                     break
             if hit is None:
+                # nothing beside its word on that same line: the icon may simply have been pushed down onto
+                # the next line by reflow (the sentence still carries it, just no longer before the line wraps) -
+                # one line directly below the same word, before calling it missing
+                wrapped = None
+                for j in (jb, ja):
+                    if j is None:
+                        continue
+                    w = B.words[j]
+                    line_h = max(w.bbox[3] - w.bbox[1], 1)
+                    for sbox, sdpi in _icons(B, w.page, lo * 0.25, hi):
+                        cy = (sbox[1] + sbox[3]) / 2
+                        if w.bbox[3] + 1 <= cy <= w.bbox[3] + 2.5 * line_h:
+                            wrapped = (w.page, sbox, sdpi)
+                            break
+                    if wrapped:
+                        break
+                if wrapped:
+                    found["wrapped"].append((box, page, Loc(wrapped[0], wrapped[1]), where))
+                    continue
                 # nothing at that place: only when the two words around the icon follow each other in stage too
                 # (no stage text between them that could be the icon set as a symbol of a font)
                 if not tabled and jb is not None and ja is not None and ja == jb + 1 and B.words[jb].page == B.words[ja].page:
@@ -194,7 +213,9 @@ def check(u: Unit) -> list[Finding]:
             "smaller": ("icon smaller", "Icon smaller in stage", "the icon in the sentence is smaller in stage than in prod"),
             "bigger": ("icon bigger", "Icon bigger in stage", "the icon in the sentence is bigger in stage than in prod"),
             "pixelated": ("icon pixelated", "Icon pixelated in stage",
-                          "stage's icon is a low-resolution bitmap (blurs when zoomed or printed) where prod's is sharp")}
+                          "stage's icon is a low-resolution bitmap (blurs when zoomed or printed) where prod's is sharp"),
+            "wrapped": ("icon wraps to next line", "Icon wraps onto the next line in stage",
+                       "the icon sits beside its word on one line in prod, pushed onto the next line in stage")}
     for kind, items in found.items():
         typ, head, why = text[kind]
         if kind == "highlight":

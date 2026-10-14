@@ -65,6 +65,17 @@ def test_style_changes_detected(tmp_path, cfg):
     assert {"font-size", "color"} <= props
 
 
+def test_only_types_scopes_every_report_to_the_listed_kinds(tmp_path, cfg):
+    """[report] only_types: a "formatting only" run keeps the listed finding types and drops every other
+    kind (here: a content change) from the section's own findings - not just from the PDF report."""
+    a = make_pdf(tmp_path / "a.pdf")
+    b = make_pdf(tmp_path / "b.pdf", body_text=BODY.replace("lazy", "sleepy"), heading_size=14)
+    cfg["report"]["only_types"] = ["changed text"]
+    r = compare(a, b, cfg)
+    assert checks(r, "content")
+    assert not checks(r, "style")
+
+
 def test_indent_detected(tmp_path, cfg):
     cfg["layout"]["compare_with_prod"] = True  # the optional prod -> stage layout comparison
     a = make_pdf(tmp_path / "a.pdf")
