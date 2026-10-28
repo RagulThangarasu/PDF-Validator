@@ -2,7 +2,8 @@
 
 A column's own cell padding is read from the table (whatever it is); a row that does not sit at it -
 a header row set against the cell border while the data rows are indented, or a centred column whose
-rows sit at as many edges as they have widths - is reported, once per table.
+rows sit at as many edges as they have widths - is reported, once per table, BY POSITION: which
+column, which rows, how far in. The data printed inside the cells is never quoted.
 
 See pdfval/checks/tables.py::_cell_align and [tables] check_cell_align.
 """
@@ -61,7 +62,8 @@ def test_a_header_row_at_another_edge_than_the_data_rows_is_reported(tmp_path, c
     got = _found(r)
     assert len(got) == 1, [f["message"] for f in got]
     m = got[0]["message"]
-    assert "“Item” at 1pt" in m and "row(s) at 6pt" in m
+    assert "row 1 at 1pt" in m and "row(s) at 6pt" in m
+    assert "Item" not in m and "Cable length" not in m  # the cells' own data is never printed
     assert "must start at the same left edge" in m
     assert got[0]["detail"]["columns"] == 2 and got[0]["detail"]["rows_off"] == 2
     assert got[0]["genuine"]  # a design-spec deviation the reader sees: in the genuine report
@@ -71,7 +73,9 @@ def test_a_centred_column_is_reported(tmp_path, cfg):
     """Prod centres the value column too: the rule is read from stage alone, so it is still reported."""
     r = engine.compare(_doc(tmp_path / "prod.pdf", "center"), _doc(tmp_path / "stage.pdf", "center"), cfg)
     got = _found(r)
-    assert got and "column 2" in got[0]["message"] and "at 6pt" in got[0]["message"]
+    m = got[0]["message"]
+    assert "column 2" in m and "at 6pt" in m
+    assert "200" not in m and "Value" not in m  # by position only
 
 
 def test_a_right_aligned_column_is_reported(tmp_path, cfg):

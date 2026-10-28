@@ -130,6 +130,21 @@ The content checks read only the page's main content. A web run also checks the 
 
 In the UI: the **Site navigation** card and tab (*Problems only* / *All checks*, filter by check). Each row shows the element the value was read from. Downloads: `site-navigation.csv`, the `summary.md` section, and `site-download.pdf` (the file the site's button delivers). The elements are found by their labels ("Table of contents", "On this page", "Next topic", "Download PDF"). If a site labels them differently, set CSS selectors under `[site]` in the config.
 
+## Body hyperlinks: their own report (PDF ⇄ Web runs)
+
+The hyperlinks **inside the text of the page** are validated and reported on their own, apart from the navigation chrome (left navigation, breadcrumb, next / previous, "On this page" — those stay in the site report). Checked per body link ([pdfval/site_nav.py](pdfval/site_nav.py), `_link_row`):
+
+| Issue | What is wrong | Example row |
+|---|---|---|
+| **Broken link** | the link does not open (HTTP error or network error), or its `#anchor` does not exist on the target page | `dead one: expected HTTP 200, found HTTP 404` · `bad anchor: expected #sec on c.html, found anchor not found` |
+| **Redirects to a GUID address** | the address is readable but it lands on the raw DITA GUID page — the publish never resolved the reference to the topic's page, so the reader ends on an unshareable URL | `redirects: expected a readable page address, found GUID-17f6ffdc-… — /b.html → /GUID-17f6ffdc-…-en.html` |
+| **GUID in the link** | the link's own address or the label the reader sees still carries a DITA GUID | `GUID in the link: the link's label still carries the DITA topic's GUID` |
+| **Not verified** | a body link the crawl could not open (not an `http(s)` address, e.g. `mailto:`) | `mailto: expected a page link, found mailto:a@b.c` |
+
+The links that open cleanly are listed too, so the report also states how many body links were checked.
+
+**In the UI:** the **Body hyperlinks** KPI card and tab on a run (*Problems only* / *All links*, filter by issue kind, each row linking to the page it is on), and the **⬇ Body link report** / **⬇ Body link report (CSV / Excel)** buttons beside the other reports. **Options → Check body hyperlinks** turns the check off. Files in the run folder: `body-link-issues.pdf` and `body-link-issues.csv` ([pdfval/report/body_link_report.py](pdfval/report/body_link_report.py)) — both removed when a run has no body hyperlink at all, so the folder never carries an empty report. Config: `[site] check_body_links` in [config/default.toml](config/default.toml).
+
 ## Source download: what prod and stage really contain
 
 Stage PDFs come from AEM Guides DITA that was converted from the prod PDF, and content and structure can get lost on the way. **⬇ Source (prod + stage)** on a run, the ⋯ menu for one side only, or `pdfval source <pdf> --out file.zip`, gives each PDF as:

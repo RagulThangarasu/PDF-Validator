@@ -11,6 +11,9 @@ edge_repeat_pages = 3         # ...or, in the narrow header/footer band alone, o
                               # the document's length: a running footer that names the current section
                               # repeats on that section's pages only, too few for repeat_threshold, and
                               # left in it pairs with the other side's heading. 0 = off
+edge_repeat_max_words = 8     # ... and only a line this short: a running header or footer names a
+                              # section in a few words, while a manual's body text repeats near the
+                              # top of a page by design (the same sentence under every menu heading)
 ignore_patterns = [           # regexes; matching lines are ignored entirely
   '\.indb\b',
   '^\d{4}/\d{1,2}/\d{1,2}\s',
@@ -52,7 +55,16 @@ critical_missing_words = 8    # a missing block of >= N prod words is flagged CR
 case_sensitive = true
 ignore_quote_style = true     # true = ’ ‘ “ ” are the same as ' " (haven’t = haven't): not reported
 normalize_typography = true   # true = also treat – — as - ("steps 2-4" = "steps 2–4": dash style is not reported)
+shrunk_is_missing = true      # a replacement that only takes words away ("start the calibration
+                              # sequence." -> "start.") is reported as data missing, not as a
+                              # wording change. false = the old behaviour, where only a big
+                              # enough cut (critical_missing_words) counted as missing
 check_spacing = false         # double / missing spaces between words on the same line
+check_wide_gap = false        # a HOLE between two words: several spaces in stage where prod has one.
+                              # Unlike check_spacing this ignores a single space either way and reports
+                              # only a gap the reader sees (see pdfval/checks/word_gap.py)
+gap_min_chars = 3             # character widths the gap must differ by before it is reported
+gap_severity = "warning"
 ignore_superscript_spacing = true  # the space before / after a superscript (® ™ ¹, a raised footnote mark) is not reported
 ignore_footnote_marks = true  # "button" vs "button¹": a raised footnote number on one side only is not a changed word
 ignore_relocated = true       # a missing/extra block whose words all exist unmatched on the other side
@@ -73,10 +85,33 @@ ignore_tokens = ["•", "●", "■", "▪", "◦"]   # bullet glyphs are list s
 # Callout labels: "Tips" / "TIPS:", "Note" / "NOTE:", "Warning" / "WARNING:" are the same label (case,
 # colon and plural are house style). Every occurrence of these words is compared this way.
 # Empty list = compare labels strictly.
-label_words = ["note", "tip", "hint", "warning", "important", "caution", "danger", "notice", "attention"]
+# ... in every language the manuals are published in: AEM prints the label as a word ("NOTE:", "注記:")
+# where InDesign draws the icon alone, so a label only one side has must be recognised whatever the
+# language, or it reads as content stage added.
+label_words = [
+  "note", "tip", "hint", "warning", "important", "caution", "danger", "notice", "attention",
+  "\u6ce8\u8a18", "\u30e1\u30e2", "\u5099\u8a3b", "\u5907\u6ce8", "\u8aac\u660e",          # ja/zh note
+  "\u6ce8\u610f", "\u5c0f\u5fc3", "\u8b66\u544a", "\u91cd\u8981", "\u63d0\u793a",          # ja/zh caution, warning, important, tip
+  "\ucc38\uace0", "\uc8fc\uc758", "\uacbd\uace0", "\uc911\uc694", "\ud301",                  # ko
+  "\u043f\u0440\u0438\u043c\u0435\u0447\u0430\u043d\u0438\u0435", "\u0432\u043d\u0438\u043c\u0430\u043d\u0438\u0435",
+  "\u043f\u0440\u0435\u0434\u0443\u043f\u0440\u0435\u0436\u0434\u0435\u043d\u0438\u0435", "\u0432\u0430\u0436\u043d\u043e", "\u0441\u043e\u0432\u0435\u0442",   # ru
+  "\u0645\u0644\u0627\u062d\u0638\u0629", "\u062a\u0646\u0628\u064a\u0647", "\u062a\u062d\u0630\u064a\u0631", "\u0647\u0627\u0645", "\u0645\u0647\u0645",          # ar
+  "hinweis", "achtung", "warnung", "wichtig", "tipp", "vorsicht",                                    # de
+  "remarque", "attention", "avertissement", "conseil", "astuce",                                      # fr
+  "nota", "aviso", "advertencia", "importante", "consejo", "precaución", "precaucion",                # es / pt / it
+  "opmerking", "waarschuwing", "belangrijk",                                                          # nl
+  "uwaga", "ostrzeżenie", "ostrzezenie", "ważne", "wazne",                                            # pl
+  "not", "dikkat", "uyarı", "uyari", "önemli", "onemli",                                              # tr
+  "หมายเหตุ", "ข้อควรระวัง", "คำเตือน",                                                                        # th
+  "lưu ý", "chú ý", "cảnh báo",                                                                       # vi
+  "catatan", "perhatian", "peringatan",                                                               # id
+]
 # A note with only its icon (no label) means the label its icon stands for: a stage label that matches prod's
 # icon is not "a label on one side only"; one that does not is "callout type differs" (icon kinds: callout_icons.py)
-callout_icons = { pencil = ["note"], lightbulb = ["tip"], exclamation = ["important"], triangle = ["warning"] }
+# Each icon lists every label it may stand for, in every language. A word that means different things
+# in different languages (ja 注意 is a Caution, zh 注意 is a Note) is listed under both icons: the point
+# of the mapping is to recognise a label the icon already carries, not to police the wording.
+callout_icons = { pencil = ["note", "注記", "メモ", "備註", "备注", "注意", "说明", "参考", "參考", "참고", "주의", "примечание", "внимание", "ملاحظة", "hinweis", "remarque", "nota", "opmerking", "uwaga", "not", "หมายเหตุ", "lưu ý", "catatan"], lightbulb = ["tip", "hint", "提示", "팁", "совет", "تلميح", "tipp", "conseil", "astuce", "consejo"], exclamation = ["important", "重要", "중요", "важно", "هام", "مهم", "wichtig", "importante", "belangrijk", "ważne", "wazne", "önemli", "onemli"], triangle = ["warning", "caution", "警告", "小心", "注意", "경고", "주의", "предупреждение", "внимание", "تحذير", "تنبيه", "warnung", "achtung", "vorsicht", "avertissement", "attention", "advertencia", "aviso", "precaución", "precaucion", "waarschuwing", "ostrzeżenie", "ostrzezenie", "dikkat", "uyarı", "uyari", "ข้อควรระวัง", "คำเตือน", "chú ý", "cảnh báo", "perhatian", "peringatan"] }
 check_callout_icon_label = true   # a note set with only its icon means the label that icon stands for:
                                    # a pencil is a NOTE, a lightbulb a TIP, an exclamation mark IMPORTANT,
                                    # a triangle a WARNING. The stage label is then compared with prod's
@@ -112,7 +147,15 @@ row_match_ratio = 0.5         # a prod table row is MISSING (critical) when < 50
 missing_row_severity = "error"
 extra_row_severity = "warning"
 overflow_severity = "error"
-check_cells = false           # report cells merged (fewer cells in stage) or split (more cells in stage) in mapped rows
+check_table_margin = true     # a stage table wider than the body text column - it runs past the page's
+                              # right (or left) text margin and breaks the layout, measured against
+                              # the page's own margins (see table_margin_vs_prod below)
+table_margin_tolerance = 3.0  # pt a table may hang over the margin before it is reported
+table_margin_vs_prod = true   # report it only where PROD keeps the margin: a table prod already draws
+                              # over the edge is how the publication is set, and the same copy on both
+                              # sides must raise nothing. false = absolute, every stage table past it
+table_margin_severity = "error"
+check_cells = false         # report cells merged (fewer cells in stage) or split (more cells in stage) in mapped rows
 validate_reordered_cells = true  # "Text in another order" inside a table: compare the data cell by cell - every
                               # cell the same (whatever its alignment / position) = not reported; else the
                               # cells that differ are reported (see report_cell_differs)
@@ -189,7 +232,11 @@ compare_sequence_always = false  # the order of the entries is compared only whe
 # stage's fonts differ from prod's (the prod -> stage style map).
 compare_with_prod = false
 check_emphasis = true         # report font-weight and italic differences of the running text (prod vs stage)
-emphasis_any_weight = true    # every weight step (Regular -> Medium, Light -> Regular); false = bold vs plain only
+emphasis_any_weight = false   # true = report every weight step on its own (Regular -> Medium, and
+                              # Light -> Regular with it). false = plain vs bold only: a word is
+                              # reported when it crosses the line below, which is what a reader sees
+emphasis_bold_over = 400      # heavier than this is bold. 400 = anything above normal counts as bold
+                              # (Medium 500 and Semibold 600 included); 600 = only Bold and heavier
 properties = ["family", "weight", "italic", "size", "color"]
 size_tolerance = 0.5          # pt
 color_tolerance = 24          # euclidean RGB distance (0-441)
@@ -300,8 +347,12 @@ report_types = ["missing image", "broken image", "image changed", "image blacked
                 "extra image", "image order", "placement", "image outside box", "image blurred",   # a picture stage adds, pictures
                 # in another order, a picture inline vs on its own line, out of its note / box, softer than prod's
                 "icon missing inline", "icon differs", "icon pixelated", "icon wraps to next line",   # icons inside a sentence
+                "icon alignment",             # ... and one sitting higher / lower on its line than in prod
                 "callout numbers missing", "image label missing", "leader lines missing"]   # picture text: image report only
-picture_text = false          # what is inside a picture is not compared: no text, table rows, callout numbers,
+picture_text = true           # what is inside a picture IS compared: its callout numbers, labels and leader
+                              # lines. Prod sets "1 2 3" under each drawing; stage drops them and lists the
+                              # words line by line instead - that difference is only found with this on.
+                              # false = not compared: no text, table rows, callout numbers,
                               # labels or leader lines read from a picture (an embedded image, an illustration or a
                               # screenshot drawn as vectors) - only its red overlay (highlight marks) is checked.
                               # true = the picture's numbers / labels / leader lines go to the image report again
@@ -341,9 +392,31 @@ check_vector_only_missing = true  # a prod picture drawn only as vectors (no emb
                                # drawing by searching backward from an existing stage picture, so a prod
                                # illustration stage drops completely (nothing left to search backward from)
                                # was never checked at all until this
+smaller_report_under = 0.0    # report a SHRUNK picture only below this share of the original (0.6 = only
+                              # a picture drawn at under 60 % of prod's; anything larger is left alone).
+                              # 0 = report every size difference. Never affects a picture that grew
+
+[inline_icons]                # icons set inside a line of text (see pdfval/checks/inline_icons.py)
+enabled = true
+severity = "warning"
+min_pt = 6                    # an inline icon is this small ...
+max_pt = 30                   # ... to this big
+reach_pt = 14                 # pt between the icon and the word it belongs to
+differs_over = 0.30           # picture distance above which stage shows another icon
+min_dpi = 200                 # below this a stage bitmap icon counts as pixelated
+smaller_than = 0.75           # stage icon this share of prod's size (or less) = smaller
+bigger_than = 1.34            # ... and this much or more = bigger
+check_highlight = true        # the same button with another part lit (the 5-way controller's arrows)
+check_alignment = true        # the icon sits higher or lower on its line than it does in prod
+align_differs_over = 0.35     # how far it must move, as a share of the height of the word beside it
 
 [report]
-full_page_shots = true        # PDF report screenshots: the whole prod page and the whole stage page (not a crop)
+new_report = true             # write "<publication> new.pdf" beside the other reports: lists and bold,
+                              # picture size (40 % either way) and position, an icon wrapped onto the
+                              # next line, a table past the margin, and level 1 TOC entries - nothing
+                              # else (see pdfval/report/new_report.py)
+new_report_size_change = 0.40 # how much a picture must have grown or shrunk to be listed there
+full_page_shots = true      # PDF report screenshots: the whole prod page and the whole stage page (not a crop)
 shot_width = 1500             # px every screenshot is rendered to, whatever the page size of the document -
                               # so the pictures are the same size in every publication's report (a 668pt
                               # InDesign page and an A4 page would otherwise come out 1670px and 1488px
@@ -503,6 +576,11 @@ types = [
   "extra image", "image order", "image outside box",   # a picture only stage has, pictures in another order, out of its box
   # content order, hyperlink title quotes
   "reordered", "order differs", "link quotes",
+  # a table whose text no longer fits its cells - a column crossing its border, a header cut mid-word,
+  # a column pushed off the page: the table break a reader sees, and the A-vs-B report's own screenshots
+  # are only drawn for findings listed here
+  "text outside table border", "text off page",
+  "table border",   # the table's own border not drawn in stage: its layout breaking at the margin
   # table of contents: entries missing / added, title or level differs, wrong page number, the TOC's own heading
   "missing entry", "extra entry", "title differs", "level differs", "wrong page", "heading differs",
   "toc deeper levels",   # stage's TOC lists levels prod's does not: one entry, after each was checked against prod's headings
@@ -518,6 +596,8 @@ types = [
   # tables: header (missing / not left-aligned), rows and cells merged or split
   "missing header", "single column alignment", "rows merged", "row split", "cells merged", "cells split",
   "table cell alignment",   # the rows of one table column at different left edges (header rows vs data rows)
+  # (not "table past margin" - a wide table running past the text column: see [ignore] types)
+  "icon alignment",         # an inline icon sitting higher / lower on its line than in prod
   # (not "table header alignment" - how a header's text sits in its column: see [ignore] types)
   "missing row", "missing table", "tables merged", "cell differs",
   "extra row", "extra table", "table split",      # a row / a table only stage has, one prod table broken in two
@@ -526,18 +606,28 @@ types = [
   "icon missing inline", "icon differs", "icon pixelated",   # icons inside a sentence: missing, another icon, low resolution
   "icon wraps to next line",                # the icon sits beside its word in prod, pushed onto the next line in stage
   "caption row",                            # captions of one row of pictures: level in prod, not in stage
+  "image alignment",                        # a picture set left / centred / right differently from prod
+  "image vertical alignment",               # ... or sitting higher / lower against the text beside it
+  "picture row", "picture text row",        # a row of pictures (2 x 2 grid), or a picture and its step
+                                             # text, laid out differently: side by side in prod, stacked in stage
   "missing image label",                    # a picture's caption / label missing in stage: live text that
                                              # belongs beside the picture, not drawn into it (not "label in
                                              # picture" / "text in image" - text drawn inside the picture itself,
                                              # still not reported: [genuine] report_image_labels / report_visually_present)
   "cell border",                            # a line between two cells of the prod table that stage does not draw
+  "table header padding",   # a table header cell's text touching its own border (no gap from the background bar)
+  "spec image alignment",   # a picture (icon included) not centred in its content box against the design spec
 ]
 data_missing_words = 1        # "missing text" is genuine when >= N of its words are absent from stage (1 = any)
 moved_min_words = 5           # content in the wrong section: blocks of >= N words ...
 moved_overlap = 0.8           # ... whose words are >= 80 % the same as extra text in another section
 everything = false            # true: every finding in the genuine report; false: only the types listed above
                               # (no CSS / design-spec typography, no heading structure, no info notes)
-exclude_checks = []           # checks whose findings never go into the genuine report (still in the full
+exclude_checks = ["toc"]      # the printed table of contents is not validated: its entries and page
+                              # numbers follow the layout, and the run is asked for the content itself.
+                              # The cover is out too ([sections] front_matter = false), and the running
+                              # header / footer and their page numbers are in [ignore] types.
+                              # checks whose findings never go into the genuine report (still in the full
                               # report), e.g. ["toc"]. Empty: TOC issues are in the genuine report too
 
 [ignore]
@@ -556,7 +646,11 @@ types = [
   "table header alignment",
   "repeated header", "continued header",    # table headers repeated across page breaks: expected
   "table width", "column width",            # table widths follow the DITA rendering rules
-  "table border", "table border added",     # table layout: borders drawn by the template
+  # A table wider than the text column (timing tables and the like): expected, not a defect.
+  "table past margin",
+  "table border added",                     # a border stage ADDS is not a break
+  # ("table border" stays out of this list on purpose: a table whose right-hand border is not drawn in
+  #  stage is the table's layout breaking at the margin, which the A-vs-B report is asked to catch)
   "spec table header", "spec table border", # table header bar / border colours
   "footer", "header", "spec page number",   # running footers / headers and their page numbers: not validated
   # CSS / layout: only spacing and indentation are validated (indent, bullet alignment, list level, spacing);

@@ -80,13 +80,97 @@ def _is_typescale_continuation(page, names: set[str], cells: set[str]) -> bool:
     return True
 
 
+_TOC_HEADING = "TOC comparison"
+_NAV_HEADING = "Left navigation"
+
+
+def strip_nav(doc) -> list[int]:
+    """Take the Left navigation listing out of the consolidated copy.
+
+    It is the whole TOC set against the left navigation entry by entry - measured by the site
+    report that owns it, and pages of listing in the one file a reviewer is handed. Same
+    treatment as the TOC comparison: a page that opens with the heading goes whole, otherwise
+    the block is redacted where it starts.
+    """
+    import pymupdf
+
+    drop, n = [], 0
+    while n < doc.page_count:
+        page = doc[n]
+        hits = page.search_for(_NAV_HEADING)
+        # the words also appear as a COLUMN heading inside the table; only the section
+        # heading sits near the top of the page with nothing above it but the margin
+        hits = [r for r in hits if r.y0 <= page.rect.y0 + 140]
+        if not hits:
+            n += 1
+            continue
+        top = min(r.y0 for r in hits) - 2
+        if top <= page.rect.y0 + 90:
+            drop.append(n)
+        else:
+            feet = [b[1] for b in page.get_text("blocks")
+                    if "page " in b[4] and " of " in b[4] and b[1] > top]
+            page.add_redact_annot(pymupdf.Rect(page.rect.x0, top, page.rect.x1,
+                                               min(feet or [page.rect.y1]) - 2))
+            page.apply_redactions()
+        n += 1
+    if drop:
+        doc.delete_pages(drop)
+    return drop
+
+
+def strip_toc_compare(doc) -> list[int]:
+    """Take the TOC comparison out of the consolidated copy.
+
+    It belongs to the report that measures it; in the one file a reviewer is handed it is pages
+    of entry-by-entry listing that the issues and metrics already account for. Returns the
+    0-based pages dropped, so bookmarks can move with them.
+    """
+    import pymupdf
+
+    drop, n = [], 0
+    while n < doc.page_count:
+        page = doc[n]
+        hits = page.search_for(_TOC_HEADING)
+        if not hits:
+            n += 1
+            continue
+        top = min(r.y0 for r in hits) - 2
+        head = page.get_text("blocks")
+        # a page that OPENS with the heading is nothing but the comparison: drop it whole
+        if top <= page.rect.y0 + 90:
+            drop.append(n)
+        else:
+            feet = [b[1] for b in head if "page " in b[4] and " of " in b[4] and b[1] > top]
+            page.add_redact_annot(pymupdf.Rect(page.rect.x0, top, page.rect.x1,
+                                               min(feet or [page.rect.y1]) - 2))
+            page.apply_redactions()
+        n += 1
+        # the listing runs on: every following page that still opens with a TOC row
+        while n < doc.page_count and _is_toc_continuation(doc[n]):
+            drop.append(n)
+            n += 1
+    if drop:
+        doc.delete_pages(drop)
+    return drop
+
+
+def _is_toc_continuation(page) -> bool:
+    """A page that is only more of the TOC comparison: its rows carry the status words that
+    table uses and nothing else of substance."""
+    text = page.get_text()
+    if _TOC_HEADING in text:
+        return False
+    rows = sum(text.count(w) for w in ("Pass", "Fail", "Extra on stage"))
+    return rows >= 6 and len(text.strip()) < 4000
+
+
 def strip_typescale(doc, result: dict) -> list[int]:
-    """Leave the Figma design-spec table in the consolidated copy ONCE and take out the repeats.
+    """Take the Figma design-spec table out of the consolidated copy entirely.
     Returns the 0-based pages that were dropped, so bookmarks can be moved with them.
 
-    Each merged part carries its own copy, so the table used to be taken out altogether - which also
-    took the design spec (the font, weight, size, line height and colour each style must have) out of
-    the one file the reviewer is handed. The first copy is kept and the rest dropped instead.
+    Every copy is taken out: the design spec is measured by the report that owns it, and the
+    consolidated file is for the issues and the metrics.
 
     The table is not on a page of its own: it sits at the foot of a report's summary page and runs over
     onto the next. So the block is redacted where it starts, and a page that is only its continuation is
@@ -97,19 +181,15 @@ def strip_typescale(doc, result: dict) -> list[int]:
     names, cells = _typescale_vocabulary(result)
     if not names:
         return []
-    drop, n, kept = [], 0, False
+    drop, n = [], 0
     while n < doc.page_count:
         page = doc[n]
         hits = page.search_for(_TYPESCALE_HEADING)
         if not hits:
             n += 1
             continue
-        if not kept:  # the first copy stays, with the pages it continues onto
-            kept = True
-            n += 1
-            while n < doc.page_count and _is_typescale_continuation(doc[n], names, cells):
-                n += 1
-            continue
+        # EVERY copy goes, not just the repeats: the design-spec table is measured by the
+        # report that owns it and is not wanted in the consolidated file at all
         top = min(r.y0 for r in hits) - 2
         # down to the footer line, so the page number at the bottom survives
         feet = [b[1] for b in page.get_text("blocks") if "page " in b[4] and " of " in b[4] and b[1] > top]
@@ -130,7 +210,30 @@ def write_consolidated(result: dict, out_dir: str | Path) -> Path | None:
     import pymupdf
 
     out = Path(out_dir)
-    parts = [(out / f, title) for f, title in _CONSOLIDATED if (out / f).exists()]
+    # the issues part is built for this file rather than taken from genuine-issues.pdf: the same
+    # issues and the same metrics, without the Figma type scale and the TOC comparison, which belong
+    # to the report that measures them. Falls back to genuine-issues.pdf if that build fails.
+    body = out / "_consolidated-body.pdf"
+    body.unlink(missing_ok=True)
+    if (out / "genuine-issues.pdf").exists():
+        try:
+            # [report] exclude_groups drops whole groups from the PDF reports ("formatting" by
+            # default, which is where every picture and layout finding sits). This file lists a
+            # NAMED set of types, so a chosen issue must not fall out of it because of the group
+            # it belongs to - the run is handed over with that list empty, original untouched.
+            meta = {**(result.get("meta") or {})}
+            meta["report"] = {**(meta.get("report") or {}), "exclude_groups": []}
+            pdf_report.build({**result, "meta": meta}, out,
+                             options=pdf_report.CONSOLIDATED_BODY, filename=body.name)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+    if body.exists():
+        # the body already holds the picture issues this report lists (drawn smaller, moved, not
+        # loading); merging image-issues.pdf as well would put every other picture issue back in
+        parts = [(body, _CONSOLIDATED[0][1])]
+    else:
+        parts = [(out / f, title) for f, title in _CONSOLIDATED if (out / f).exists()]
     if not parts:
         return None
     path = out / f"{report_name(result)}-validation-report.pdf"
@@ -147,14 +250,19 @@ def write_consolidated(result: dict, out_dir: str | Path) -> Path | None:
             return None
         # the Figma type scale is reference material for the typography findings: useful in the report that
         # raises them, repeated once per merged part here - so it is left out of the consolidated file only
-        dropped = strip_typescale(merged, result)
-        # a bookmark points at a page number: move it up by however many pages went before it
-        for entry in toc:
-            entry[2] -= sum(1 for d in dropped if d < entry[2] - 1)
+        # Applied one after the other, and the bookmarks moved after EACH: the second strip
+        # numbers its pages in the document the first one already shortened, so the two lists
+        # cannot be added together.
+        for dropped in (strip_typescale(merged, result), strip_toc_compare(merged),
+                        strip_nav(merged)):
+            # a bookmark points at a page number: move it up by however many pages went before it
+            for entry in toc:
+                entry[2] -= sum(1 for d in dropped if d < entry[2] - 1)
         merged.set_toc([t for t in toc if 1 <= t[2] <= merged.page_count])
         merged.save(str(path), garbage=3, deflate=True)
     finally:
         merged.close()
+        body.unlink(missing_ok=True)   # a working file: the merged report is the deliverable
     # the viewer offers it for download by name: recorded here so the page never has to guess how the
     # prod PDF's name was turned into a file name
     result.setdefault("meta", {})["consolidated"] = path.name
@@ -248,7 +356,27 @@ def write_pdf_report(result: dict, out_dir: str | Path) -> Path | None:
     path = pdf_report.build(result, out, options=pdf_report.GENUINE, filename="genuine-issues.pdf")
     write_docx_report(result, out)
     write_content_report(result, out)   # content.docx: the content review on its own
+    write_new_report(result, out)       # "<publication> new.pdf": its own fixed set of checks
     return path
+
+
+def write_new_report(result: dict, out_dir: str | Path) -> Path | None:
+    """“<publication> new.pdf” - lists, picture size and position, icon wrapping, the table margin and
+    the level 1 TOC entries, and nothing else (pdfval/report/new_report.py)."""
+    rcfg = ((result.get("meta") or {}).get("report") or {})
+    if not rcfg.get("new_report", True):
+        return None
+    try:
+        from . import new_report
+        n = len(new_report.issue_ids(result, float(rcfg.get("new_report_size_change", 0.40))))
+        # the run says whether it has one and how many issues are in it, so the page can offer the
+        # download only where there is something to download instead of linking at a 404
+        result.setdefault("summary", {})["new_report"] = {"issues": n}
+        return new_report.build(result, out_dir, size_change=float(rcfg.get("new_report_size_change", 0.40)))
+    except Exception:   # a second report must never cost the run its main ones
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def write_docx_report(result: dict, out_dir: str | Path) -> Path | None:
@@ -323,6 +451,10 @@ def write_all(result: dict, out_dir: str, shots: str = "all",
         # text margin (removed when the run has none of them)
         from . import aem_site_report
         aem_site_report.build(result, out)
+        # the body hyperlinks on their own: broken links and addresses that still land on a DITA GUID,
+        # for the links inside the text of the page (not the navigation / breadcrumb / pager chrome)
+        from . import body_link_report
+        body_link_report.build(result, out)
     report(0.997, "Building consolidated report")
     write_consolidated(result, out)  # one file per run, named after the prod PDF
     (out / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")

@@ -103,3 +103,69 @@ def test_the_page_list_is_published_in_the_run_metadata():
     import inspect
     src = inspect.getsource(engine._doc_meta)
     assert '"non_latin_pages": _non_latin_pages(d)' in src
+
+
+# --- how a non-Latin line is marked ----------------------------------------------------------------
+
+ZH_PAGE = "安全警告與注意事項本產品必須接地為確保操作安全您必須僅將針腳插頭插入至標準針腳電源插座"
+EN_PAGE = "Safety warnings and precautions. This product must be earthed to ensure safe operation."
+
+
+def _page_pdf(path, text, font):
+    import pymupdf
+    doc = pymupdf.open()
+    pg = doc.new_page(width=595, height=842)
+    for k in range(6):
+        pg.insert_text((60, 100 + 28 * k), text, fontsize=11, fontname=font)
+    doc.save(str(path))
+    doc.close()
+    return str(path)
+
+
+def _marked(tmp_path, text, font):
+    """(the rendered crop, the colour used) with the first three lines marked."""
+    import pymupdf
+    from pdfval.report import shots
+    src = _page_pdf(tmp_path / "p.pdf", text, font)
+    pc = shots._PageCache(src, 2.0)
+    with pymupdf.open(src) as d:
+        boxes = [tuple(b[:4]) for b in d[0].get_text("blocks")[:3] if len(b[4].strip()) > 5]
+    return shots._crop(pc, 0, boxes, (217, 45, 32), None, (80, 260)).convert("RGB"), shots._english(pc, 0)
+
+
+def _red_rows(img):
+    """How many pixel rows carry red, and how red the reddest row is - a box or a wash paints the
+    whole line height, an underline only a few rows."""
+    import collections
+    rows = collections.Counter()
+    px = img.load()
+    for y in range(img.height):
+        for x in range(0, img.width, 3):
+            r, g, b = px[x, y]
+            if r > 150 and g < 110 and b < 110:
+                rows[y] += 1
+    return rows
+
+
+def test_a_cjk_line_is_underlined_not_washed(tmp_path):
+    img, english = _marked(tmp_path, ZH_PAGE, "china-ts")
+    assert english is False
+    rows = _red_rows(img)
+    assert rows, "nothing was marked"
+    # three marked lines, a few pixel rows each - not the ~40 rows a line box would paint
+    assert len(rows) <= 3 * 12, len(rows)
+
+
+def test_an_english_line_keeps_its_box(tmp_path):
+    img, english = _marked(tmp_path, EN_PAGE, "helv")
+    assert english is True
+    rows = _red_rows(img)
+    assert len(rows) > 3 * 12, len(rows)      # the outline spans each line's full height
+
+
+def test_a_page_whose_script_does_not_tokenise_is_not_english(tmp_path):
+    """Thai and CJK are written without spaces and Arabic arrives as presentation forms: counting
+    .isalpha() words left such a page looking English, and it got boxes drawn through it."""
+    from pdfval.report import shots
+    src = _page_pdf(tmp_path / "th.pdf", ZH_PAGE, "china-ts")
+    assert shots._english(shots._PageCache(src, 2.0), 0) is False

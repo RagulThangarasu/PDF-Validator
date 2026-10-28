@@ -456,9 +456,16 @@ def load(path: str, label: str, cfg: dict, reference: str | None = None) -> Doc:
         # excluded below, as they are for the document-wide rule.)
         edge_pages = int(ecfg.get("edge_repeat_pages", 3))
         edge_band = ecfg.get("header_footer_band", 0.12)
+        edge_words = int(ecfg.get("edge_repeat_max_words", 8))
         at_edge = lambda k: k[1] >= (1 - edge_band) * 100 or k[1] <= edge_band * 100
+        # ... and it is a line of furniture length. A manual's body text repeats near the top of a page
+        # by design - the same sentence introduces every menu section ("Available menu options may vary
+        # depending on the input sources, functions and settings."), sitting just under each heading
+        # and so inside the band. Dropping that left prod short of copies stage had, and the run then
+        # reported the publication's own boilerplate as content stage had duplicated.
+        short = lambda k: len(k[0].split()) <= edge_words
         if edge_pages:
-            hot |= {k for k, v in counts.items() if len(v) >= edge_pages and at_edge(k)}
+            hot |= {k for k, v in counts.items() if len(v) >= edge_pages and at_edge(k) and short(k)}
         # only in the page's top / bottom band: a running header / footer sits there. In the body of the page
         # the same text at the same height on many pages is content - the cells of a timing table
         # ("640x480 | 60 | V | V" on every page), a form repeated per model - and stripping it loses rows

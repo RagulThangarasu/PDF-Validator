@@ -112,6 +112,13 @@ def test_an_icon_stands_for_the_callout_label():
     "NOTE" against a warning triangle is "callout type differs"."""
     cfg = engine.load_config()["content"]
     assert cfg["check_callout_icon_label"] is True
-    assert cfg["callout_icons"] == {"pencil": ["note"], "lightbulb": ["tip"],
-                                    "exclamation": ["important"], "triangle": ["warning"]}
+    icons = {k: {l.lower() for l in v} for k, v in cfg["callout_icons"].items()}
+    assert set(icons) == {"pencil", "lightbulb", "exclamation", "triangle"}
+    # each icon's English label, and its label in the languages the manuals are published in
+    # (see tests/test_callout_label_languages.py)
+    assert {"note", "注記", "참고"} <= icons["pencil"]
+    assert {"tip", "提示"} <= icons["lightbulb"]
+    assert {"important", "重要"} <= icons["exclamation"]
+    assert {"warning", "警告"} <= icons["triangle"]
+    assert "note" not in icons["triangle"] and "warning" not in icons["pencil"]
     assert "callout type differs" in set(engine.load_config()["genuine"]["types"])

@@ -290,7 +290,7 @@
 <body>
 <header class="top">
   <a class="brand" href="#/new" title="Home – new comparison" style="color:inherit;text-decoration:none"><span class="logo">⇆</span>PDF Parity</a>
-  <nav><a href="#/new" data-nav="new">New comparison</a><a href="#/runs" data-nav="runs">Runs</a><a href="#/pairs" data-nav="pairs">Prod ⇄ Stage pairs</a><a href="#/metadata" data-nav="metadata">Metadata</a><a href="/links" title="Crawl guides through their left navigation and check the links in every topic - no PDF comparison">Link check</a></nav>
+  <nav><a href="#/new" data-nav="new">New comparison</a><a href="#/runs" data-nav="runs">Runs</a><a href="#/pairs" data-nav="pairs">Prod ⇄ Stage pairs</a><a href="#/metadata" data-nav="metadata">Metadata</a><a href="/links" title="Crawl guides through their left navigation and check the links in every topic - no PDF comparison - or validate every topic of two guide trees (A vs B) against each other, including visual differences">Link check &amp; Guide A ⇄ B</a><a href="/pdfdiff" title="Upload two PDFs (A and B) and find every difference between them visually - no AEM / prod-library options">PDF A ⇄ B</a></nav>
   <div class="theme" role="group" aria-label="Theme">
     <button data-theme-set="light">Light</button><button data-theme-set="dark">Dark</button><button data-theme-set="system" title="Follow the operating system">System</button>
   </div>
@@ -932,6 +932,7 @@ async function viewRuns() {
       <span class="badge b-pass">${b.done} done</span>${b.running ? `<span class="badge b-running">${b.running} running</span>` : ''}
       ${b.queued ? `<span class="badge">${b.queued} queued</span>` : ''}${b.error ? `<span class="badge b-fail">${b.error} failed</span>` : ''}
       <div class="bar" style="width:160px"><i style="width:${100 * (b.done + b.error) / b.runs}%"></i></div>
+      <span class="small muted">${Math.round(100 * (b.done + b.error) / b.runs)}%</span>
       <span class="spacer"></span>
       ${b.done ? `<a class="btn ${left ? '' : 'primary'} sm" href="/api/batches/${b.id}/reports.zip"
           title="The consolidated report over all publications, plus the PDF report and the image report of every finished product">⬇ Download reports (zip)${left ? ` — ${b.done} of ${b.runs} ready` : ''}</a>`
@@ -940,6 +941,10 @@ async function viewRuns() {
           title="${b.complete ? 'Every product of the batch, with its content match %, section results and issue counts'
                               : `Only the ${b.done} of ${b.runs} products that have finished so far - the full report is written when the last one ends`}">📊 Consolidated report${b.complete ? '' : ` — ${b.done} of ${b.runs}`}</a>
         <a class="btn sm" href="/api/batches/${b.id}/consolidated.csv" title="The same as a spreadsheet">CSV</a>
+        ${b.pdfdiff ? `<a class="btn ${b.complete ? 'primary' : ''} sm" href="/api/batches/${b.id}/pdf-a-vs-b.pdf" target="_blank" rel="noopener"
+          title="${b.complete ? 'The PDF A ⇄ B report over every pair of this batch: formatting-only differences, each with its own screenshot'
+                              : `Only the ${b.done} of ${b.runs} pairs that have finished so far`}">📑 PDF A ⇄ B report${b.complete ? '' : ` — ${b.done} of ${b.runs}`}</a>
+        <a class="btn sm" href="/api/batches/${b.id}/pdf-a-vs-b.csv" title="The same as a spreadsheet">CSV</a>` : ''}
         <a class="btn sm" href="/api/batches/${b.id}/image-consolidated.pdf" target="_blank" rel="noopener"
           title="Every publication with its image result: PASS (no image issue, no image report) or FAIL (image issues, see its image report)">🖼 Image consolidated report</a>
         <a class="btn sm" href="/api/batches/${b.id}/image-consolidated.csv" title="The same as a spreadsheet">CSV</a>` : ''}</div></div>`;
@@ -963,7 +968,7 @@ async function viewRuns() {
           <td><b>${esc(r.name)}</b> ${r.warning ? '<span class="badge b-warn" title="' + esc(r.warning) + '">same file</span> ' : ''}<span class="badge mode">${(r.mode || r.options?.mode) === 'html' ? 'PDF ⇄ Web' : 'PDF ⇄ PDF'}</span>
             <div class="small muted">${esc(r.baseline.split('/').pop())} ⇆ ${esc((r.mode || r.options?.mode) === 'html' ? r.candidate : r.candidate.split('/').pop())}</div></td>
           <td class="small">${fmtDate(r.created)}</td>
-          <td>${r.status === 'running' ? `<div class="bar" style="width:120px"><i style="width:${r.progress * 100}%"></i></div>` : `<span class="badge b-${r.status}">${r.status}</span>`}</td>
+          <td>${r.status === 'running' ? `<div class="row" style="gap:6px"><div class="bar" style="width:120px"><i style="width:${r.progress * 100}%"></i></div><span class="small muted">${Math.round(r.progress * 100)}%</span></div>` : `<span class="badge b-${r.status}">${r.status}</span>`}</td>
           <td>${s ? `<span class="badge b-${s.result}">${s.result}</span>` : ''}</td>
           <td class="n">${s?.content ? `<span class="pct ${pctStatus(s)}">${s.content.match_pct.toFixed(2)}%</span>` : ''}</td>
           <td class="n">${s?.critical ? (s.critical.total ? `<span class="badge crit">${s.critical.total}</span>` : '0') : ''}</td>
@@ -971,6 +976,9 @@ async function viewRuns() {
           <td style="white-space:nowrap">${r.status === 'running' || r.status === 'queued' ? `<button class="btn sm" data-stop="${r.id}" title="Stop this run">■ Stop</button>` : ''}
             ${r.status === 'done' ? (() => { const nm = encodeURIComponent((r.name || r.id).replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, ''));
               return `<a class="btn sm" data-dl href="/runs/${r.id}/genuine-issues.pdf?download=pdf-report-${nm}.pdf" title="Download this run's PDF report">⬇ PDF</a>
+            ${s && s.new_report && !s.new_report.issues ? '' :
+              `<a class="btn sm" data-dl href="/runs/${r.id}/new.pdf?download=${encodeURIComponent((r.name || r.id) + ' new.pdf')}"
+               title="Lists and bold, picture size and position, a wrapped icon, a table past the margin, level 1 TOC entries">⬇ new.pdf${s && s.new_report ? ` (${s.new_report.issues})` : ''}</a>`}
             ${s && s.images && s.images.result === 'pass'
                 ? `<span class="small" style="color:#16a34a" title="No image issue: no image report for this publication">Images ✓ PASS</span>`
                 : `<a class="btn sm" data-dl href="/runs/${r.id}/image-issues.pdf?download=image-report-${nm}.pdf" title="Download this run's image report (picture issues only)">⬇ Images${s && s.images ? ` — FAIL (${s.images.issues})` : ''}</a>`}`; })() : ''}
@@ -1086,6 +1094,9 @@ async function viewRun(id, qs) {
             title="One file: every issue report of this run merged, named after the prod PDF">⬇ Consolidated report</a>` : ''}
         ${s.genuine ? `<a class="btn ${s.genuine.total ? 'danger' : ''}" href="${base}genuine-issues.pdf?download=${encodeURIComponent('pdf-report-' + id + '.pdf')}"
             title="Every issue, each with a description and prod/stage screenshots">⬇ PDF report (${s.genuine.total})</a>
+        ${s.new_report && !s.new_report.issues ? '' :
+          `<a class="btn" href="${base}new.pdf?download=${encodeURIComponent(id + ' new.pdf')}"
+            title="Lists and bold, a picture 40% smaller or bigger, picture position, an icon wrapped onto the next line, a table past the margin, and level 1 TOC entries">⬇ new.pdf${s.new_report ? ` (${s.new_report.issues})` : ''}</a>`}
         <a class="btn" href="${base}genuine-issues.docx?download=${encodeURIComponent('pdf-report-' + id + '.docx')}"
             title="The same issues as a Word document: issues only, with prod/stage screenshots">⬇ PDF report (Word / Docs)</a>
         <a class="btn" href="${base}genuine-issues.csv?download=${encodeURIComponent('pdf-report-' + id + '.csv')}"

@@ -34,6 +34,11 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+def bundle_out_name() -> str:
+    from .report.bundle import OUT_NAME
+    return OUT_NAME
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="pdfval", description="Section-by-section PDF parity validation")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -93,7 +98,72 @@ def main(argv: list[str] | None = None) -> int:
     cb.add_argument("--runs", default="runs", help="the runs folder to read (default: runs)")
     cb.add_argument("--out", default="", help="where to write it (default: <runs>/_combined)")
 
+    bd = sub.add_parser("bundle", help="one PDF with every publication's validation report of a folder, "
+                                       "behind a contents page (a batch in a single file)")
+    bd.add_argument("folder", help="the folder holding the <name>-validation-report.pdf files")
+    bd.add_argument("--out", default="", help=f"where to write it (default: <folder>/{bundle_out_name()})")
+    bd.add_argument("--title", default="", help="the title on the contents page (default: the folder's name)")
+    bd.add_argument("--batch", default="", help="bundle only the runs of this batch (folder = runs/)")
+
+    fo = sub.add_parser("focus", help="one consolidated report over all publications for three families of "
+                                      "issue only: list numbering, a broken side-by-side layout, and an icon / "
+                                      "picture that no longer sits in the line of its text")
+    fo.add_argument("folder", help="the runs folder (each run's results.json is read), or one run's folder")
+    fo.add_argument("--batch", default="", help="only the runs of this batch")
+    fo.add_argument("--out", default="", help="where to write it (default: <folder>/_focus)")
+    fo.add_argument("--no-per-publication", action="store_true",
+                    help="only the combined report; skip the one-file-per-publication folder")
+
+    sd = sub.add_parser("sitediff", help="validate one AEM guide tree against another, page by page "
+                                        "(two live site roots, not a PDF)")
+    sd.add_argument("a", help="the A root, e.g. http://host:4502/content/guide/rs-joshi/en")
+    sd.add_argument("b", help="the B root, e.g. http://host:4502/content/guide/rs-joshi/post-script/en")
+    sd.add_argument("--user", default="", help="AEM user (password: --password or PDFVAL_AEM_PASSWORD)")
+    sd.add_argument("--password", default="", help="AEM password")
+    sd.add_argument("--products", default="", help="only these publications, comma separated (default: all both roots hold)")
+    sd.add_argument("--max-topics", type=int, default=0, help="stop after N topics per publication (0 = all)")
+    sd.add_argument("--out", default="runs/_sitediff", help="where the captures and the report go")
+    sd.add_argument("--concurrency", type=int, default=6, help="publications compared at a time (default 6)")
+    sd.add_argument("--config", help="TOML overrides merged over config/default.toml")
+    sd.add_argument("--content-only", action="store_true",
+                    help="report only whether the words match (no formatting, CSS, layout, tables or pictures)")
+
     args = ap.parse_args(argv)
+    if args.cmd == "sitediff":
+        import os
+        from .report import sitediff_report
+        from . import sitediff
+        from .engine import load_config
+        got = sitediff.run(args.a, args.b, load_config(args.config), user=args.user,
+                           password=args.password or os.environ.get("PDFVAL_AEM_PASSWORD", ""),
+                           products=[p.strip() for p in args.products.split(",") if p.strip()] or None,
+                           max_topics=args.max_topics, out_dir=args.out, concurrency=args.concurrency,
+                           progress=lambda m: print(m, flush=True))
+        files = sitediff_report.build(got, args.out, content_only=bool(args.content_only))
+        pubs = got["publications"]
+        print(f"{len(pubs)} publication(s), "
+              f"{sum(len(p['topics']) for p in pubs)} topic pair(s), "
+              f"{sum(len(t['findings']) for p in pubs for t in p['topics'])} difference(s)")
+        print(f"report: {files['pdf']}\n   csv: {files['csv']}")
+        return 0
+    if args.cmd == "focus":
+        from .report import focus_report
+        got = focus_report.build(args.folder, args.out or (Path(args.folder) / "_focus"), batch=args.batch,
+                                 per_publication=not args.no_per_publication)
+        print(f"{got['publications']} publication(s), {got['issues']} issue(s)")
+        print(f"report: {got['pdf']}\n   csv: {got['csv']}")
+        if got["per_publication"]:
+            print(f"   per publication: {len(got['per_publication'])} file(s) in "
+                  f"{Path(got['per_publication'][0]).parent}")
+        return 0
+    if args.cmd == "bundle":
+        from .report import bundle
+        out = bundle.build(args.folder, args.out or None, args.title or None, batch=args.batch)
+        import pymupdf
+        with pymupdf.open(out) as d:
+            print(f"{len(bundle.reports(args.folder, batch=args.batch))} publication(s), "
+                  f"{d.page_count} pages -> {out}")
+        return 0
     if args.cmd == "combined":
         from .report import combined_report
         pdf, csv_ = combined_report.build(args.runs, args.out or (Path(args.runs) / "_combined"))

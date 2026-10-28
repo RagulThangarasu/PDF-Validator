@@ -44,6 +44,27 @@ def _images(job: dict, run_dir: Path) -> dict | None:
         return None
 
 
+def _formatting_genuine(job: dict, run_dir: Path) -> tuple[int, dict] | None:
+    """For a /pdfdiff run (options.report_style == "sitediff"): the same genuine, formatting-only
+    difference count the PDF A <-> B report itself lists - not the full, every-category genuine total,
+    which would otherwise make "major issues" in this table look far noisier than what that report
+    actually shows for the same run. None for any other kind of run (full genuine total stands)."""
+    if (job.get("options") or {}).get("report_style") != "sitediff":
+        return None
+    try:
+        result = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    from .sitediff_report import _kept
+    findings = [f for s in result.get("sections", []) for f in s.get("findings", [])]
+    kept = _kept(findings)
+    cats: dict[str, dict] = {}
+    for f in kept:
+        for t in (f.get("types") or ["formatting"]):
+            cats.setdefault(t, {"total": 0})["total"] += 1
+    return len(kept), cats
+
+
 def rows(jobs: list[dict], runs_dir: Path) -> list[dict]:
     """One row per run of the batch, worst content match first; runs that did not finish last."""
     out = []
@@ -56,19 +77,21 @@ def rows(jobs: list[dict], runs_dir: Path) -> list[dict]:
         img = _images(j, runs_dir / j["id"]) if j["status"] == "done" else None
         end = _finished(j, runs_dir / j["id"]) if j["status"] == "done" else None
         secs = (end - datetime.fromisoformat(j["created"])).total_seconds() if end else None
+        fg = _formatting_genuine(j, runs_dir / j["id"]) if j["status"] == "done" else None
+        genuine, by_category = (fg[0], fg[1]) if fg else ((sm.get("genuine") or {}).get("total"), sm.get("by_category") or {})
         out.append({
             "product": j["name"], "status": j["status"], "run": j["id"], "match_pct": pct, "band": band,
             # the publication's own verdict (engine: content score >= [content] pass_pct), the one the
             # report at the top of the run shows; falls back to the band for a run made before it was kept
             "result": sm.get("result") or ("pass" if band == "pass" else "fail" if band else ""),
             "sections": sm.get("sections"), "sec_fail": sm.get("fail"), "sec_warn": sm.get("warn"), "sec_pass": sm.get("pass"),
-            "critical": (sm.get("critical") or {}).get("total"), "genuine": (sm.get("genuine") or {}).get("total"),
+            "critical": (sm.get("critical") or {}).get("total"), "genuine": genuine,
             "css": (sm.get("css") or {}).get("issues"), "missing_words": c.get("missing_words"),
             "extra_words": c.get("extra_words"), "words": c.get("baseline_words"),
             "seconds": round(secs) if secs is not None else None,
             "image_issues": img["issues"] if img else None, "image_result": img["result"] if img else "",
             "message": "" if j["status"] == "done" else j.get("message", ""),
-            "by_category": sm.get("by_category") or {},
+            "by_category": by_category,
         })
     out.sort(key=lambda r: (r["match_pct"] is None, r["match_pct"] if r["match_pct"] is not None else 0, r["product"].lower()))
     return out

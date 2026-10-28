@@ -121,3 +121,96 @@ def test_a_run_with_no_design_spec_changes_nothing(tmp_path):
     result["meta"]["typography"] = {}
     doc = pymupdf.open(writer.write_consolidated(result, tmp_path))
     assert doc.page_count == 3     # nothing to recognise the table by: left exactly as merged
+
+
+# --- what the consolidated report is now: the metrics and the issues ---------------------------------
+
+def test_the_consolidated_body_leaves_out_the_spec_table_and_the_toc():
+    """The one file per publication answers "what is wrong with this manual". How it was measured -
+    the Figma type scale and the entry-by-entry TOC comparison - stays in genuine-issues.pdf."""
+    from pdfval.report import pdf_report
+    inc = pdf_report.CONSOLIDATED_BODY["include"]
+    assert inc["typescale"] is False and inc["toc"] is False and inc["toc_compare"] is False
+    assert inc["summary"] is True and inc["issues"] is True      # the metrics and the issues stay
+    assert pdf_report.CONSOLIDATED_BODY["filter"]["genuine_only"] is True
+
+
+def test_a_real_run_s_consolidated_file_holds_the_metrics_and_the_issues(tmp_path):
+    """End to end: the spec table and the TOC comparison are not in the consolidated file, the run's
+    metrics are, and genuine-issues.pdf still carries both for whoever wants them."""
+    from pdfval import engine
+    from pdfval.report import writer as w
+
+    def pdf(path, *, heading):
+        doc = pymupdf.open()
+        pg = doc.new_page(width=595, height=842)
+        pg.insert_text((72, 70), heading, fontsize=16, fontname="hebo")
+        for k, t in enumerate(("Connect the receiver to the display before you start.",
+                               "Power on the computer and the monitor.",
+                               "Keep the ventilation openings free so warm air can leave.")):
+            pg.insert_text((72, 120 + 18 * k), f"{k + 1}. {t}", fontsize=10, fontname="helv")
+        doc.set_toc([[1, heading, 1]])
+        doc.save(str(path))
+        doc.close()
+        return str(path)
+
+    cfg = engine.load_config()
+    r = engine.compare(pdf(tmp_path / "SW272_EN.pdf", heading="Getting started"),
+                       pdf(tmp_path / "stage.pdf", heading="Getting started now"), cfg)
+    out = tmp_path / "run"
+    out.mkdir()
+    w.write_all(r, str(out), "none")
+    merged = out / r["meta"]["consolidated"]
+    text = "\n".join(pg.get_text() for pg in pymupdf.open(merged))
+    assert "Design spec (Figma)" not in text
+    assert "TOC comparison" not in text and "Table of contents: prod vs stage" not in text
+    assert "Score" in text                                   # the metrics stay
+    assert not (out / "_consolidated-body.pdf").exists()     # the working file is cleaned up
+
+
+def test_the_merge_time_strip_still_guards_the_fallback():
+    """write_consolidated falls back to genuine-issues.pdf when the body cannot be built; the pages
+    merged from it are still de-duplicated, which is what the tests above this one cover."""
+    assert hasattr(writer, "strip_typescale")
+
+
+# --- what the consolidated report lists -------------------------------------------------------------
+
+def test_only_content_differences_are_listed():
+    """The consolidated file answers one question - does stage say what prod says. Pictures, icons,
+    tables, links, bullets, the TOC and the design spec are still found and still written in full to
+    genuine-issues.pdf and the image report; they are not in this one."""
+    from pdfval.report import pdf_report
+    t = set(pdf_report.CONSOLIDATED_TYPES)
+    assert pdf_report.CONSOLIDATED_BODY["filter"]["types"] == sorted(t)
+    for wanted in ("missing text", "extra text", "changed text", "spacing", "wide gap",
+                   "punctuation character", "duplicate content", "content in wrong section",
+                   "emphasis", "heading text", "missing section", "extra section"):
+        assert wanted in t, wanted
+
+
+def test_nothing_but_content_is_listed():
+    from pdfval.report import pdf_report
+    t = set(pdf_report.CONSOLIDATED_TYPES)
+    for unwanted in (
+            # pictures and icons
+            "image smaller", "image bigger", "image alignment", "placement", "broken image",
+            "missing image", "image changed", "icon missing", "icon differs", "icon alignment",
+            "icon wraps to next line", "callout type differs",
+            # tables, links, lists and layout
+            "table past margin", "table cell alignment", "missing row", "cell differs",
+            "broken link", "missing link", "link lands elsewhere", "page zero",
+            "bullet", "bullet marker", "indent", "numbering style", "list alignment",
+            # the table of contents and the design spec
+            "missing entry", "extra entry", "wrong page", "title differs",
+            "spec text-align", "spec font-weight", "spec image alignment"):
+        assert unwanted not in t, unwanted
+    assert not [x for x in t if x.startswith("spec ")]
+
+
+def test_the_design_spec_is_out_of_the_file_entirely():
+    """Both halves of it: the Figma type scale on the front page, and every "spec ..." finding."""
+    from pdfval.report import pdf_report
+    inc = pdf_report.CONSOLIDATED_BODY["include"]
+    assert inc["typescale"] is False and inc["stylemap"] is False
+    assert not [x for x in pdf_report.CONSOLIDATED_TYPES if x.startswith("spec ")]

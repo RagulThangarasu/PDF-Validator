@@ -124,8 +124,14 @@ def _overlaps(box, cell) -> bool:
 
 def validate_reordered(ran, A: Doc, B: Doc, cfg: dict) -> None:
     """Reordered text inside a table: dropped when every cell of the rows it touches holds the same
-    data in the stage table, else turned into a “Table cell differs” finding on the cells that differ."""
+    data in the stage table, else turned into a “Table cell differs” finding on the cells that differ.
+
+    [tables] report_cell_differs = false: the cell-by-cell finding is not raised. The check still runs,
+    because dropping the “Text in another order” noise needs it, but where the cells really do differ
+    the text diff's own finding is left standing instead - the difference is still reported, just not
+    broken down cell by cell."""
     tcfg = cfg.get("tables", {})
+    per_cell = tcfg.get("report_cell_differs", True)
     if not tcfg.get("validate_reordered_cells", True):
         return
     todo = [(u, f) for u, fs, _ in ran for f in fs if "reordered" in (f.types or []) and f.baseline]
@@ -171,9 +177,12 @@ def validate_reordered(ran, A: Doc, B: Doc, cfg: dict) -> None:
                 if a is not None and _key(a) != (_key(b) or ""):
                     head = _column(ta, ri, ci)
                     diffs.append((a, b, ta["page"], tb["page"], label, head))
-        drop.add(id(f))
         if not diffs:
+            drop.add(id(f))
             continue  # all the data is in the stage cells: only the reading order differed
+        if not per_cell:
+            continue  # the cells differ: the text diff's own finding stands, no cell-by-cell finding
+        drop.add(id(f))
         show = lambda c: f"“{c['text']}”" if c and c["text"] else "(empty)"
         ex = "; ".join(f"row “{lab}”{f', column “{h}”' if h else ''}: {show(a)} → {show(b)}"
                        for a, b, _, _, lab, h in diffs[:4])

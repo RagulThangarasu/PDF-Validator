@@ -31,7 +31,9 @@ from ..model import Finding, Loc
 from . import Unit, insertion_loc, insertion_loc_by, locs, paired_locs, snippet
 
 _KIND = {"replace": "Changed text", "delete": "Missing text", "insert": "Extra text"}
-_TYPE_LABEL = {"case": "Uppercase/lowercase differs", "punctuation": "Punctuation differs",
+_TYPE_LABEL = {"missing text": "Missing text", "extra text": "Extra text",   # the type, not the opcode:
+               # a replacement that only takes words away is missing text, and says so (shrunk_is_missing)
+               "case": "Uppercase/lowercase differs", "punctuation": "Punctuation differs",
                "case + punctuation": "Uppercase/lowercase and punctuation differ", "spacing": "Word gap differs",
                "punctuation character": "Punctuation character differs", "diacritic": "Mark on a character differs"}
 
@@ -828,6 +830,13 @@ def check(u: Unit) -> list[Finding]:
         critical = tag in ("delete", "replace") and absent >= crit_words and absent >= 0.5 * len(a_idx) \
             and kind not in ("spacing", "hyphenation")
         ctype = ("missing text" if tag == "delete" or critical else "extra text" if tag == "insert" else kind)
+        # a replacement that only takes words away - stage keeps part of the run and adds nothing of
+        # its own ("start the calibration sequence." -> "start.") - is data missing, whatever its
+        # size. It used to read as "changed text" unless it was big enough to count as critical, so a
+        # sentence quietly losing its last three words was filed as a wording change instead.
+        if ctype == "changed text" and ccfg.get("shrunk_is_missing", True) and absent \
+                and not (_loose_bag(bt[j1:j2]) - _loose_bag(at[i1:i2])):
+            ctype = "missing text"
         sup_gap = ctype == "spacing" and u.cfg["content"].get("ignore_superscript_spacing", True) and \
             any(_superscript(u.a.words[k]) for k in a_idx) or ctype == "spacing" and \
             u.cfg["content"].get("ignore_superscript_spacing", True) and any(_superscript(u.b.words[k]) for k in b_idx)
@@ -989,6 +998,13 @@ def check(u: Unit) -> list[Finding]:
                 critical = tag in ("delete", "replace") and absent >= crit_words and absent >= 0.5 * len(a_idx) \
                     and kind not in ("spacing", "hyphenation")
                 ctype = ("missing text" if tag == "delete" or critical else "extra text" if tag == "insert" else kind)
+                # a replacement that only takes words away - stage keeps part of the run and adds nothing of
+                # its own ("start the calibration sequence." -> "start.") - is data missing, whatever its
+                # size. It used to read as "changed text" unless it was big enough to count as critical, so a
+                # sentence quietly losing its last three words was filed as a wording change instead.
+                if ctype == "changed text" and ccfg.get("shrunk_is_missing", True) and absent \
+                        and not (_loose_bag(tb) - _loose_bag(ta)):
+                    ctype = "missing text"
             # before giving up on a block missing on stage: the exact same words, in the exact same order,
             # may still sit somewhere else in this unit's own stage range (a table cell that goes on, on a
             # later stage page the opcode diff did not pair up with this spot) - crawl the whole range once

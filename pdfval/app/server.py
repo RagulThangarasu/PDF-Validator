@@ -452,6 +452,14 @@ class Jobs:
             traceback.print_exc()
             with self.lock:
                 self.built_batches.discard(bid)
+            return
+        if any((j.get("options") or {}).get("report_style") == "sitediff" for j in runs):
+            # the /pdfdiff page's own batch report, over every pair - built once beside the generic one
+            try:
+                from ..report import pdfdiff_report
+                pdfdiff_report.build_batch(runs, self.dir, self.dir / "_batches", stem=f"{bid}-pdf-a-vs-b")
+            except Exception:
+                traceback.print_exc()  # the generic consolidated report above still stands
 
     def execute(self, jid: str) -> None:
         """The comparison itself (in the worker process)."""
@@ -497,6 +505,15 @@ class Jobs:
                 writer.write_all(result, str(self.path(jid)), "reports" if batch else job["options"].get("screenshots", "all"),
                                  progress=lambda f, m: self.update(jid, progress=round(0.45 + 0.55 * f, 3), message=m),
                                  full=not batch)
+                if o.get("report_style") == "sitediff":
+                    # the /pdfdiff page's own request: the same report as the Site A ⇄ Site B comparison
+                    # (formatting-only types, one screenshot per real difference) in place of the full,
+                    # every-category report - overwrites the run's "PDF report" / "CSV / Excel" downloads
+                    from ..report import pdfdiff_report
+                    run_dir = self.path(jid)
+                    built = pdfdiff_report.build(result, run_dir)
+                    shutil.copy(built["pdf"], run_dir / "genuine-issues.pdf")
+                    shutil.copy(built["csv"], run_dir / "genuine-issues.csv")
                 self._learn_product(result)
                 tm = result["meta"].get("timing") or {}
                 took = (f" - web capture {tm.get('total_s', 0):.0f} s for {tm.get('web_pages', 0)} page(s) (open "
@@ -522,10 +539,12 @@ def _batches(jobs: Jobs) -> list[dict]:
         if not j.get("batch"):
             continue
         b = out.setdefault(j["batch"], {"id": j["batch"], "created": j["created"], "runs": 0, "done": 0, "error": 0,
-                                         "running": 0, "queued": 0})
+                                         "running": 0, "queued": 0, "pdfdiff": False})
         b["runs"] += 1
         b[j["status"] if j["status"] in ("done", "error", "running", "queued") else "error"] += 1
         b["created"] = min(b["created"], j["created"])
+        if (j.get("options") or {}).get("report_style") == "sitediff":
+            b["pdfdiff"] = True  # the /pdfdiff page's own batch: its report is the PDF A ⇄ B one, not the generic table
     for b in out.values():  # every product executed: the consolidated report on disk covers the whole batch
         b["complete"] = b["runs"] > 0 and b["queued"] == 0 and b["running"] == 0
     return sorted(out.values(), key=lambda b: b["created"], reverse=True)
@@ -570,8 +589,20 @@ def _batch_zip(jobs: Jobs, bid: str) -> Path:
                     writer.write_image_report(json.loads((run_dir / "results.json").read_text(encoding="utf-8")), run_dir)
                 except Exception:
                     traceback.print_exc()
-            if not src.exists() and not img.exists():
-                continue  # nothing to report for this product: a clean pass on both content and images
+            # "<publication> new.pdf" - its own fixed set of checks (report/new_report.py); built here
+            # for a run finished before it existed, so an old batch's zip carries it too
+            new_pdf = run_dir / "new.pdf"
+            if not new_pdf.exists():   # a run from before the fixed name: its publication-named copy
+                new_pdf = next(iter(sorted(run_dir.glob("* new.pdf"))), None)
+            if new_pdf is None and (run_dir / "results.json").exists():
+                try:
+                    res = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
+                    writer.assign_bug_ids(res)
+                    new_pdf = writer.write_new_report(res, run_dir)
+                except Exception:
+                    traceback.print_exc()
+            if not src.exists() and not img.exists() and new_pdf is None:
+                continue  # nothing to report for this product: a clean pass on content, images and the new report
             name = re.sub(r"[^\w .()&+-]+", "_", j["name"]).strip() or j["id"]
             while name in used:
                 name += "_"
@@ -598,6 +629,8 @@ def _batch_zip(jobs: Jobs, bid: str) -> Path:
                     z.write(content, f"{name} - Content report.docx")
             if img.exists():
                 z.write(img, f"{name} - Image report.pdf")
+            if new_pdf is not None and Path(new_pdf).exists():
+                z.write(new_pdf, f"{name} new.pdf")
     return Path(tmp)
 
 
@@ -609,6 +642,19 @@ def _batch_consolidated(jobs: Jobs, bid: str) -> tuple[Path, Path]:
     if not runs:
         raise KeyError(bid)
     return batch_report.build(bid, runs, jobs.dir, jobs.dir / "_batches")
+
+
+def _batch_pdfdiff(jobs: Jobs, bid: str) -> tuple[Path, Path]:
+    """The /pdfdiff page's own batch report (formatting-only types, one screenshot per finding, same
+    look as a single PDF A ⇄ B run) - only for a batch made of such runs; rebuilt on each request."""
+    from ..report import pdfdiff_report
+    runs = [j for j in jobs.list() if j.get("batch") == bid]
+    if not runs:
+        raise KeyError(bid)
+    if not any((j.get("options") or {}).get("report_style") == "sitediff" for j in runs):
+        raise ValueError("not a PDF A ⇄ B batch")
+    built = pdfdiff_report.build_batch(runs, jobs.dir, jobs.dir / "_batches", stem=f"{bid}-pdf-a-vs-b")
+    return Path(built["pdf"]), Path(built["csv"])
 
 
 def _write_atomic(path: Path, text: str) -> None:
@@ -710,7 +756,7 @@ def make_handler(jobs: Jobs, root: Path):
             self.end_headers()
             self.wfile.write(body)
 
-        def _file(self, path: Path, download: str | None = None):
+        def _file(self, path: Path, download: str | None = None, no_cache: bool = False):
             if not path.is_file():
                 return self._json({"error": "not found"}, 404)
             ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -729,6 +775,11 @@ def make_handler(jobs: Jobs, root: Path):
             self.send_header("Content-Length", str(end - start + 1))
             if download:
                 self.send_header("Content-Disposition", f'attachment; filename="{download}"')
+            if no_cache:  # the app's own HTML/JS pages: a browser must not keep serving a stale copy
+                # (no explicit cache headers before this meant some browsers' heuristic caching could
+                # serve a page edited/fixed on disk minutes ago - e.g. the old webkitdirectory folder
+                # picker long after it was replaced)
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             with open(path, "rb") as f:
                 f.seek(start)
@@ -749,9 +800,11 @@ def make_handler(jobs: Jobs, root: Path):
             p = unquote(u.path)
             try:
                 if p in ("/", "/index.html"):
-                    return self._file(STATIC / "index.html")
+                    return self._file(STATIC / "index.html", no_cache=True)
                 if p in ("/links", "/links.html"):   # the link check: its own page, no PDF comparison
-                    return self._file(STATIC / "links.html")
+                    return self._file(STATIC / "links.html", no_cache=True)
+                if p in ("/pdfdiff", "/pdfdiff.html"):   # upload two PDFs, find every difference visually - no AEM options
+                    return self._file(STATIC / "pdfdiff.html", no_cache=True)
                 if p == "/api/linkcheck":
                     return self._json(links.status())
                 if p == "/api/sitediff":
@@ -764,14 +817,27 @@ def make_handler(jobs: Jobs, root: Path):
                 if p == "/api/aem/publications":
                     # every publication under a folder of AEM Sites (…/sites.html/content/guide/<x>/en):
                     # its map-level parent page, and the page a crawl of it should start at
-                    root = parse_qs(u.query).get("root", [""])[0]
-                    if not root:
+                    sites_root = parse_qs(u.query).get("root", [""])[0]
+                    if not sites_root:
                         return self._json({"error": "Give the Sites folder as ?root=…"}, 400)
                     try:
-                        return self._json(aem.publications(root, jobs.aem_config(),
+                        return self._json(aem.publications(sites_root, jobs.aem_config(),
                                                            lang=parse_qs(u.query).get("lang", [""])[0]))
                     except Exception as e:
                         return self._json({"error": f"{type(e).__name__}: {e}"}, 400)
+                if p == "/api/pdfdiff/match":
+                    # PDF A ⇄ B page: every PDF under folder A paired by file name with the one under
+                    # folder B - both folders are read straight off disk (this server runs locally)
+                    qs = parse_qs(u.query)
+                    a_root, b_root = qs.get("a", [""])[0], qs.get("b", [""])[0]
+                    if not a_root or not b_root:
+                        return self._json({"error": "Give both folders as ?a=…&b=…"}, 400)
+                    ap, bp = Path(a_root).expanduser(), Path(b_root).expanduser()
+                    if not ap.is_dir():
+                        return self._json({"error": f"{a_root} is not a folder"}, 400)
+                    if not bp.is_dir():
+                        return self._json({"error": f"{b_root} is not a folder"}, 400)
+                    return self._json(_match_folders(ap, bp))
                 if m := re.fullmatch(r"/api/linkcheck/saved/([a-z]+)/(.+)", p):
                     # a report kept in runs/_linkcheck/<label>/ - "before" is the baseline
                     try:
@@ -819,6 +885,14 @@ def make_handler(jobs: Jobs, root: Path):
                     except KeyError:
                         return self._json({"error": "unknown batch"}, 404)
                     return self._file(pdf if m[2] == "pdf" else csv_, download=f"{m[1]}-consolidated.{m[2]}")
+                if m := re.fullmatch(r"/api/batches/(batch-[\w-]+)/pdf-a-vs-b\.(pdf|csv)", p):
+                    try:
+                        pdf, csv_ = _batch_pdfdiff(jobs, m[1])
+                    except KeyError:
+                        return self._json({"error": "unknown batch"}, 404)
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, 400)
+                    return self._file(pdf if m[2] == "pdf" else csv_, download=f"{m[1]}-pdf-a-vs-b.{m[2]}")
                 if m := re.fullmatch(r"/api/batches/(batch-[\w-]+)/image-consolidated\.(pdf|csv)", p):
                     # publication | image issues PASS / FAIL (a PASS has no image report)
                     from ..report import batch_report
@@ -863,6 +937,16 @@ def make_handler(jobs: Jobs, root: Path):
                     if not target.is_relative_to(base):
                         return self._json({"error": "forbidden"}, 403)
                     dl = parse_qs(u.query).get("download", [None])[0]
+                    if target.name == "new.pdf" and not target.exists():
+                        # the report is written as new.pdf; a run made before that carries it under the
+                        # publication's name, and one made before the report existed gets it built here
+                        found = next(iter(sorted(base.glob("* new.pdf"))), None)
+                        if found is None and (base / "results.json").exists():
+                            res = json.loads((base / "results.json").read_text(encoding="utf-8"))
+                            writer.assign_bug_ids(res)
+                            found = writer.write_new_report(res, base)
+                        if found is not None:
+                            target = found
                     if target.name in writer.DEFERRED and not target.exists() and (base / "results.json").exists():
                         writer.build_deferred(base, target.name)  # a batch run: built on first open
                     if target.name == "side-by-side.pdf" and not target.exists() and (base / "results.json").exists():
@@ -1024,6 +1108,45 @@ def _list_pdfs(root: Path, runs_dir: Path, limit: int = 200) -> list[dict]:
         if len(out) >= limit:
             break
     return out
+
+
+_TIMING = re.compile(r"tim+ing", re.I)   # "timing", and the "timming" that turns up in file names
+
+
+def _is_timing(name: str) -> bool:
+    """A timing-table publication: "RD270Q_Timing_Table_V1.00", "pd30-timing", "MA timing user manual".
+    It is a separate deliverable from the product's manual and is only ever paired with another one."""
+    return bool(_TIMING.search(name or ""))
+
+
+def _norm_stem(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
+def _match_folders(a_root: Path, b_root: Path, limit: int = 500) -> dict:
+    """Every PDF under each folder (recursively), paired by its normalised file name (case/punctuation/
+    spacing-insensitive) with the PDF of the same name under the other folder - the same simple "by
+    name" matching the Prod/Stage pairs page falls back to when there is no migration sheet to go by."""
+    def scan(root: Path) -> dict[str, Path]:
+        out = {}
+        for p in sorted(root.rglob("*.pdf")):
+            if any(part.startswith(".") for part in p.parts):
+                continue
+            out.setdefault(_norm_stem(p.stem), p)
+            if len(out) >= limit:
+                break
+        return out
+    a_files, b_files = scan(a_root), scan(b_root)
+    # a timing table pairs only with a timing table: two files whose names normalise alike but where
+    # one is the product's manual and the other its timing deliverable are not the same publication
+    both = sorted((k for k in set(a_files) & set(b_files)
+                   if _is_timing(a_files[k].name) == _is_timing(b_files[k].name)),
+                  key=lambda k: a_files[k].name.lower())
+    crossed = {k for k in set(a_files) & set(b_files) if k not in set(both)}
+    matched = [{"name": a_files[k].name, "a": str(a_files[k].resolve()), "b": str(b_files[k].resolve())} for k in both]
+    only_a = sorted(p.name for k, p in a_files.items() if k not in b_files or k in crossed)
+    only_b = sorted(p.name for k, p in b_files.items() if k not in a_files or k in crossed)
+    return {"matched": matched, "only_a": only_a, "only_b": only_b}
 
 
 class Library:
@@ -1196,10 +1319,20 @@ class Pairs:
         for name in names:
             row = metadata.match(name, name, rows) if rows else None
             keys = [x for x in ((row or {}).get("file"), (row or {}).get("model"), name) if x]
+            # A timing table is its own publication, not a near-miss of the manual it belongs to:
+            # "pd30-timing" and "pd30" normalise to names that start the same, so without this the
+            # manual can pair with PD30-timing (when the library has no plain PD30 of its own) and a
+            # timing guide whose library name happens to carry the language token can outrank the
+            # exact match. A timing guide is matched only against timing files, and a manual only
+            # against the rest; neither falls back to the other, so a missing counterpart is reported
+            # as "no prod PDF" instead of quietly validating against the wrong publication.
+            want_timing = _is_timing(name)
+            pool = {p: n for p, n in norm.items() if _is_timing(p) or _is_timing(n)} if want_timing \
+                else {p: n for p, n in norm.items() if not (_is_timing(p) or _is_timing(n))}
             for n_k, key in enumerate(keys):
                 nk = metadata._norm(key)
-                exact = [p for p, n in norm.items() if n and n == nk]
-                loose = [p for p, n in norm.items() if p not in exact and nk and len(nk) >= 3
+                exact = [p for p, n in pool.items() if n and n == nk]
+                loose = [p for p, n in pool.items() if p not in exact and nk and len(nk) >= 3
                          and (n.startswith(nk) or nk.startswith(n) and len(n) >= 4)]
                 hits = exact + loose
                 if hits:
@@ -1250,13 +1383,27 @@ class SiteDiffer:
         self.jobs = jobs
         self.lock = threading.Lock()
         self.state = self._idle()
+        self.worker: threading.Thread | None = None
 
     @staticmethod
     def _idle() -> dict:
         return {"running": False, "message": "", "error": "", "pairs": 0, "result": None,
                 "files": {}, "started": "", "finished": ""}
 
+    def _unstick(self) -> None:
+        """A run is over when its worker is gone, whatever the flag says. Without this a thread that
+        never reached its `finally` - killed, or never started - leaves `running` true for the life of
+        the server, and every later run is refused with "a comparison is already running" while
+        nothing is. Called under the lock."""
+        if self.state["running"] and not (self.worker and self.worker.is_alive()):
+            self.state["running"] = False
+            self.state["finished"] = self.state["finished"] or datetime.now().isoformat(timespec="seconds")
+            if not self.state["error"]:
+                self.state["error"] = "The comparison stopped before it finished (the server was interrupted). Start it again."
+
     def status(self) -> dict:
+        with self.lock:
+            self._unstick()
         st = dict(self.state)
         st["files"] = {k: Path(v).name for k, v in (st.get("files") or {}).items()}
         res = st.pop("result", None)
@@ -1272,12 +1419,18 @@ class SiteDiffer:
         if not pairs:
             raise ValueError("No matched product to compare - list both trees first")
         with self.lock:
+            self._unstick()
             if self.state["running"]:
                 raise ValueError("A comparison is already running")
             self.state = {**self._idle(), "running": True, "pairs": len(pairs),
                           "message": f"Starting - {len(pairs)} product(s)",
                           "started": datetime.now().isoformat(timespec="seconds")}
-        threading.Thread(target=self._run, args=(pairs, dict(req)), daemon=True).start()
+            self.worker = threading.Thread(target=self._run, args=(pairs, dict(req)), daemon=True)
+            try:
+                self.worker.start()
+            except RuntimeError as e:   # no thread to be had: do not leave the flag set
+                self.state.update(running=False, error=f"Could not start the comparison: {e}")
+                raise ValueError(self.state["error"]) from e
         return self.status()
 
     def _run(self, pairs: list[dict], req: dict) -> None:
@@ -1286,7 +1439,11 @@ class SiteDiffer:
         try:
             acfg = self.jobs.aem_config()
             out = self.jobs.dir / "_sitediff" / datetime.now().strftime("%Y%m%d-%H%M%S")
-            res = sitediff.run_pairs(pairs, engine.load_config(),
+            # "content only": the words alone decide, so the scoped overrides are merged in
+            ccfg = engine.load_config(
+                str(Path(engine.DEFAULT_CONFIG).with_name("site-content-only.toml"))
+                if req.get("content_only") else None)
+            res = sitediff.run_pairs(pairs, ccfg,
                                      user=req.get("user") or acfg.get("user", ""),
                                      password=req.get("password") or acfg.get("password", ""),
                                      max_topics=int(req.get("max_topics") or 0),
@@ -1294,7 +1451,10 @@ class SiteDiffer:
                                      out_dir=out,
                                      progress=lambda m: self.state.update(message=m))
             self.state["message"] = "Writing the report"
-            self.state.update(result=res, files=sitediff_report.build(res, out), message="Done")
+            self.state.update(result=res,
+                              files=sitediff_report.build(res, out,
+                                                          content_only=bool(req.get("content_only"))),
+                              message="Done")
         except Exception as e:
             traceback.print_exc()
             self.state["error"] = f"{type(e).__name__}: {e}"
@@ -1312,11 +1472,21 @@ class LinkChecker:
         self.jobs = jobs
         self.lock = threading.Lock()
         self.state = self._idle()
+        self.worker: threading.Thread | None = None
 
     @staticmethod
     def _idle() -> dict:
         return {"running": False, "message": "", "error": "", "urls": [], "totals": None,
                 "guides": [], "files": {}, "dir": "", "started": "", "finished": ""}
+
+    def _unstick(self) -> None:
+        """As SiteDiffer._unstick: a worker that is gone ends the run, so a flag left set cannot
+        refuse every later check with "a link check is already running". Called under the lock."""
+        if self.state["running"] and not (self.worker and self.worker.is_alive()):
+            self.state["running"] = False
+            self.state["finished"] = self.state["finished"] or datetime.now().isoformat(timespec="seconds")
+            if not self.state["error"]:
+                self.state["error"] = "The link check stopped before it finished (the server was interrupted). Start it again."
 
     # a snapshot is kept under runs/_linkcheck/<label>/ - "before" is the baseline a later run is read
     # against, so the reports of the state the guides were in before the fixes are not lost to the next run
@@ -1328,6 +1498,8 @@ class LinkChecker:
         return self.jobs.dir / "_linkcheck" / label
 
     def status(self) -> dict:
+        with self.lock:
+            self._unstick()
         st = dict(self.state)
         st["files"] = {k: Path(v).name for k, v in (st.get("files") or {}).items()}
         st["saved"] = {label: self.snapshot(label) for label in self.SNAPSHOTS
@@ -1387,12 +1559,18 @@ class LinkChecker:
         if not urls:
             raise ValueError("No http(s) URL in the list")
         with self.lock:
+            self._unstick()
             if self.state["running"]:
                 raise ValueError("A link check is already running")
             self.state = {**self._idle(), "running": True, "urls": urls,
                           "message": f"Starting - {len(urls)} guide(s)",
                           "started": datetime.now().isoformat(timespec="seconds")}
-        threading.Thread(target=self._run, args=(urls, dict(req)), daemon=True).start()
+            self.worker = threading.Thread(target=self._run, args=(urls, dict(req)), daemon=True)
+            try:
+                self.worker.start()
+            except RuntimeError as e:
+                self.state.update(running=False, error=f"Could not start the link check: {e}")
+                raise ValueError(self.state["error"]) from e
         return self.status()
 
     def _run(self, urls: list[str], req: dict) -> None:
@@ -1445,6 +1623,15 @@ class MetadataCheck:
         self.jobs = jobs
         self.dir = jobs.dir / "_metadata"
         self.state = {"running": False, "progress": 0.0, "message": "", "error": ""}
+        self.worker: threading.Thread | None = None
+
+    def _unstick(self) -> None:
+        """`running` left set by a worker that is gone (see SiteDiffer._unstick): the check would
+        otherwise answer every later start with the old status and never run again."""
+        if self.state["running"] and not (self.worker and self.worker.is_alive()):
+            self.state.update(running=False,
+                              error=self.state.get("error")
+                              or "The check stopped before it finished (the server was interrupted). Start it again.")
 
     def sheets(self) -> list[dict]:
         folder = PROJECT / "metadata"
@@ -1452,6 +1639,7 @@ class MetadataCheck:
                 sorted(folder.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True) if not p.name.startswith("~$")]
 
     def status(self) -> dict:
+        self._unstick()
         try:
             last = json.loads((self.dir / "metadata.json").read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError):
@@ -1460,6 +1648,7 @@ class MetadataCheck:
 
     def start(self, req: dict) -> dict:
         from .. import metadata
+        self._unstick()
         if self.state["running"]:
             return self.status()
         name = Path(str(req.get("sheet") or "")).name
@@ -1479,7 +1668,8 @@ class MetadataCheck:
             except Exception as e:
                 traceback.print_exc()
                 self.state.update(running=False, error=f"{type(e).__name__}: {e}")
-        threading.Thread(target=work, daemon=True).start()
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
         return self.status()
 
 

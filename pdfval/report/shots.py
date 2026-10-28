@@ -31,8 +31,15 @@ SEVERITIES = {"errors": {"error"}, "warnings": {"error", "warning"}, "all": {"er
 
 
 class _PageCache:
-    def __init__(self, path: str, zoom: float, size: int = 8):
-        self.doc, self.zoom, self.size = pymupdf.open(path), zoom, size
+    def __init__(self, path: str, zoom: float, size: int = 8, width_px: int = 0):
+        """width_px: render every page of this document to that pixel width, whatever its page size
+        (`zoom` is then worked out from the first page). This is what makes a screenshot the same size
+        in every publication's report - a 668pt InDesign page and an A4 page at a fixed zoom come out
+        1670px and 1488px wide, and the reports do not line up. 0 = the fixed zoom, as before."""
+        self.path = str(path)
+        self.doc, self.size = pymupdf.open(path), size
+        page_w = self.doc[0].rect.width if self.doc.page_count else 0
+        self.zoom = (width_px / page_w) if width_px and page_w else zoom
         self.cache: OrderedDict[int, Image.Image] = OrderedDict()
         self.pics: dict[int, list] = {}  # page -> picture boxes (see _pictures)
         self.words: dict[int, list] = {}  # page -> words (see _words)
@@ -99,12 +106,22 @@ def _english(pc: "_PageCache", page: int) -> bool:
     """Is the page's text English? By its own words, page by page - a manual can hold a section per language.
     English: Latin letters, and the everyday English words (the, and, of, to ...) make up a fair share of them.
     A page with hardly any text counts as English unless it is in another script."""
-    key = (id(pc), page)
+    # keyed on the document, not on id(pc): a freed _PageCache's id is handed to the next one, and a
+    # page then took its verdict from an unrelated document - whichever run happened to come before it
+    key = (getattr(pc, "path", "") or id(pc), page)
     if key not in _ENGLISH:
         try:
+            text = pc.doc[page].get_text()
             words = [w[4].lower().strip(".,;:!?()\"'“”") for w in pc.doc[page].get_text("words")]
         except Exception:
-            words = []
+            text, words = "", []
+        # by character first: a dense script does not always survive word tokenisation (Thai and CJK
+        # are written without spaces; Arabic arrives as presentation forms that are not .isalpha()),
+        # and a page whose words all fall away then read as English and got boxes drawn through it
+        letters = [ch for ch in text if ch.isalpha()]
+        if letters and sum(1 for ch in letters if ord(ch) < 0x250) < 0.7 * len(letters):
+            _ENGLISH[key] = False
+            return _ENGLISH[key]
         words = [w for w in words if w.isalpha()]
         latin = sum(1 for w in words if all(ord(ch) < 0x250 for ch in w))
         if words and latin < 0.7 * len(words):
@@ -142,7 +159,8 @@ def _crop(pc: _PageCache, page: int, boxes: list, color, note: str | None, windo
     # highlighter pen. A few places (a word, a line or two) keep their box: easier to spot on a full page.
     # ... and always on a page that is not English: accents and non-Latin letters fill the line's height, so a box
     # drawn round them cuts through the text
-    dense = sum(1 for b, _ in marks if b[3] - b[1] <= 30) > _WASH_OVER or not _english(pc, page)
+    latin = _english(pc, page)
+    dense = sum(1 for b, _ in marks if b[3] - b[1] <= 30) > _WASH_OVER or not latin
     for b, top in marks:
         r = [(b[0] - 2) * z, top, (b[2] + 2) * z, top + (b[3] - b[1] + 4) * z]
         if r[3] < 0 or r[1] > img.height or (cont is not None and b in boxes and r[1] >= cont - 26):
@@ -150,7 +168,17 @@ def _crop(pc: _PageCache, page: int, boxes: list, color, note: str | None, windo
             continue
         # a text line is tinted; a picture or block (taller than a few lines) is only outlined, so its
         # colours and detail are shown exactly as in the PDF
-        if dense and b[3] - b[1] <= 30:
+        if b[3] - b[1] <= 30 and not latin:
+            # A script whose glyphs fill the line - CJK, Arabic, Thai, Devanagari - is underlined, not
+            # washed. Such a glyph box is about two and a half times the type it holds, so a tint over
+            # it covers far more than the words and reads as a solid red block with the text lost
+            # inside it. A bar under the line marks the same words and leaves every one of them legible.
+            h = r[3] - r[1]
+            bar = max(2.0, min(5.0, h * 0.13))
+            base = r[3] - max(1.0, h * 0.08)
+            d.rectangle([r[0], base - bar, r[2], base], fill=color + (235,))
+            continue
+        if dense:
             d.rectangle(r, fill=color + (56,))   # the wash alone: a little stronger, nothing to outline it
             continue
         tint = color + (38,) if b[3] - b[1] <= 30 else None
@@ -337,9 +365,17 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 2
     # genuine issues always get screenshots (unless none at all): they go into the genuine-issues report
     from .pdf_report import PDF_IMAGE_TYPES, is_image_issue
     # ... and so do the picture issues that report shows whether genuine or not (size, pixelated)
+    # new.pdf lists a fixed set of types whatever their severity and whether or not they are
+    # genuine (text alignment and spacing among them). Without this they reached that report with
+    # no screenshot to show, because nothing else had asked for one to be rendered.
+    from .new_report import (LISTS_AND_EMPHASIS, PICTURE_POSITION, ICON_WRAP, TABLE_MARGIN,
+                             TEXT_ALIGNMENT, TEXT_SPACING, SIZE_TYPES)
+    new_report_types = set(LISTS_AND_EMPHASIS + PICTURE_POSITION + ICON_WRAP + TABLE_MARGIN
+                           + TEXT_ALIGNMENT + TEXT_SPACING + SIZE_TYPES)
     todo = [(s, f) for s in result["sections"] for f in s["findings"]
             if f["severity"] in want or (mode != "none" and f.get("genuine"))
             or (mode != "none" and PDF_IMAGE_TYPES & set(f.get("types") or []))
+            or (mode != "none" and new_report_types & set(f.get("types") or []))
             or (mode == "reports" and is_image_issue(f))]
     # the image report's own issues (a picture's label missing): always pictured, unless no screenshots at all
     todo += [(s, f) for s in result["sections"] for f in s.get("image_findings", []) if mode != "none"]
@@ -349,8 +385,18 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 2
         return 0
     out = Path(out_dir)
     (out / "shots").mkdir(parents=True, exist_ok=True)
-    caches = {"baseline": _PageCache(result["meta"]["baseline"]["path"], zoom),
-              "candidate": _PageCache(result["meta"]["candidate"]["path"], zoom)}
+    # one pixel width for every document, so a screenshot is the same size across all publications
+    # ([report] shot_width; 0 = the fixed zoom)
+    try:
+        from .. import engine as _eng
+        shot_width = int(_eng.load_config().get("report", {}).get("shot_width", 0) or 0)
+    except Exception:
+        shot_width = 0
+    global _CARD_W
+    if shot_width:
+        _CARD_W = shot_width
+    caches = {"baseline": _PageCache(result["meta"]["baseline"]["path"], zoom, width_px=shot_width),
+              "candidate": _PageCache(result["meta"]["candidate"]["path"], zoom, width_px=shot_width)}
     # a text line in each document (pt): its body size x 1.4
     line = {side: 1.4 * float(result["meta"][side].get("body_size") or 10) for side in ("baseline", "candidate")}
     content_x = {side: _content_bounds(result["meta"][side]) for side in ("baseline", "candidate")}
@@ -592,9 +638,14 @@ def _crop_marker(pc: _PageCache, page: int, y: float, color, note: str, window: 
     return img
 
 
+# the width every stand-in card is drawn at: set from [report] shot_width when a run starts (render()),
+# so a card and a page capture are the same width in the report
+_CARD_W = 1280
+
+
 def _spec_card(text: str, color) -> Image.Image:
     """Stand-in for the prod side of a design-spec finding: the style the spec asks for."""
-    img = Image.new("RGB", (1280, 220), (248, 250, 252))
+    img = Image.new("RGB", (_CARD_W, 220), (248, 250, 252))
     d = ImageDraw.Draw(img)
     d.rectangle([0, 0, img.width, 30], fill=(30, 35, 48))
     d.text((10, 6), "Design spec (Figma: Online User Manual) - checked against stage, not prod", fill=(255, 255, 255), font=_FONT)
@@ -606,7 +657,7 @@ def _spec_card(text: str, color) -> Image.Image:
 
 def _error_card(url: str, reason: str, color) -> Image.Image:
     """Stand-in for a stage page that failed to load: what was opened and what came back."""
-    img = Image.new("RGB", (1280, 220), (248, 250, 252))
+    img = Image.new("RGB", (_CARD_W, 220), (248, 250, 252))
     d = ImageDraw.Draw(img)
     d.rectangle([0, 0, img.width, 30], fill=(30, 35, 48))
     d.text((10, 6), "Not in stage - the stage page for this section was not captured", fill=(255, 255, 255), font=_FONT)

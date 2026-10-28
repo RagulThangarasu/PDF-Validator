@@ -1,0 +1,31 @@
+# Site validation, content only:
+#   python -m pdfval sitediff <A-root> <B-root> --config config/site-content-only.toml
+#
+# Reports whether the WORDS match between the two site trees and nothing else. Formatting,
+# CSS, layout, links, tables, images and typography are all suppressed - a difference is
+# only raised when the text itself differs, is missing, or has been added.
+
+[report]
+# the PDF reports list the Content group alone
+exclude_groups = ["links", "formatting", "css"]
+
+[style]
+enabled = false               # no CSS / typography findings
+
+[layout]
+enabled = false               # no indent, alignment, line-height or position findings
+
+[assets]
+report_types = []             # no picture findings at all
+
+[highlights]
+enabled = false
+
+[inline_icons]
+enabled = false
+
+[toc]
+enabled = false
+
+[tables]
+cells = false                 # table CELL TEXT is content and stays; table structure does not

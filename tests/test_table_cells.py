@@ -61,6 +61,8 @@ def test_same_data_in_every_cell_is_not_reported(tmp_path, cfg):
 
 
 def test_a_cell_that_differs_is_highlighted(tmp_path, cfg):
+    """The cell-by-cell breakdown is opt-in ([tables] report_cell_differs): this is what it reports."""
+    cfg["tables"]["report_cell_differs"] = True
     stage = FULL[:2] + [("HDMI", "v", "v", "", "v"), FULL[3]]
     fs = _run(tmp_path, cfg, stage)
     assert len(fs) == 1 and fs[0].types == ["cell differs"]
@@ -68,3 +70,23 @@ def test_a_cell_that_differs_is_highlighted(tmp_path, cfg):
     assert "row “HDMI”" in fs[0].message and "“v” → (empty)" in fs[0].message
     (loc,) = fs[0].baseline
     assert 359 <= loc.bbox[0] < loc.bbox[2] <= 461  # the third value column (x 360-460), not the whole row
+
+
+# ---- report_cell_differs = false (the default): no cell-by-cell finding, and nothing lost with it
+
+def test_by_default_a_cell_difference_is_not_broken_down_cell_by_cell(tmp_path, cfg):
+    stage = FULL[:2] + [("HDMI", "v", "v", "", "v"), FULL[3]]
+    fs = _run(tmp_path, cfg, stage)
+    assert not any(f.types == ["cell differs"] for f in fs)
+
+
+def test_the_text_diff_still_reports_that_difference(tmp_path, cfg):
+    """Nothing is swallowed: where the cells really differ, the text diff's own finding stands."""
+    stage = FULL[:2] + [("HDMI", "v", "v", "", "v"), FULL[3]]
+    fs = _run(tmp_path, cfg, stage)
+    assert [f.types for f in fs] == [["reordered"]]
+
+
+def test_pure_reordering_is_still_dropped(tmp_path, cfg):
+    """The other half of the check keeps working: same data in every cell, no finding at all."""
+    assert _run(tmp_path, cfg, FULL) == []

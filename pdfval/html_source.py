@@ -706,6 +706,46 @@ def _visit_in_tab(page, u: str, root: str, exclude: str, wait_ms: int, slice_h: 
     return out
 
 
+def capture_in_tab(page, url: str, out_dir, *, root: str = "", exclude: str = DEFAULT_EXCLUDE,
+                   wait_ms: int = 500, slice_h: int = 1800, timeout: int = 60_000,
+                   site: dict | None = None):
+    """One page, read in an ALREADY-OPEN tab, as a (Doc, pdf path) pair - what `capture` returns for a
+    single page, without starting a browser for it.
+
+    `capture` opens its own Playwright and Chromium every call. That is right for a run that captures a
+    guide once, and ruinous for a comparison that captures two pages per topic: a thousand topic pairs
+    means two thousand browser launches, seconds each, dwarfing the page loads themselves. The reading,
+    stacking and document building below are the same steps `capture` performs - only the browser is
+    the caller's, opened once and used for every page.
+
+    Returns (None, "") when the page could not be read (a login wall, an HTTP error, no text), so the
+    caller can report that topic and go on instead of failing the publication.
+    """
+    from pathlib import Path as _P
+
+    out_dir = _P(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    got = _visit_in_tab(page, url, root, exclude, wait_ms, slice_h, timeout, site, out_dir=out_dir)
+    if got.get("skipped") or not got.get("data"):
+        return None, ""
+    data, cuts, slices = _stack([(got["url"], got["data"], got["slices"])], titled=False)
+    W = int(data["width"])
+    pdf = pymupdf.open()
+    for (y0, y1), png in zip(zip(cuts, cuts[1:]), slices):
+        pg = pdf.new_page(width=W, height=y1 - y0)
+        pg.insert_image(pg.rect, stream=png)
+    for href, x0, y0, x1, y1 in data["links"]:
+        k = _slice_of(cuts, y0)
+        if k is not None:
+            pdf[k].insert_link({"kind": pymupdf.LINK_URI, "uri": href,
+                                "from": pymupdf.Rect(x0, y0 - cuts[k], x1, y1 - cuts[k])})
+    path = out_dir / "candidate_source.pdf"
+    pdf.save(path, garbage=3, deflate=True)
+    doc = _to_doc(data, cuts, str(path))
+    _measure(doc)
+    return doc, str(path)
+
+
 def _visit_many(urls: list[tuple[str, str]], *, width: int, creds, session_state: dict, own: str, root: str,
                 exclude: str, wait_ms: int, slice_h: int, timeout: int, site: dict | None,
                 on_page=lambda u, t, r: None, out_dir: Path | None = None) -> list[tuple[str, str, dict]]:

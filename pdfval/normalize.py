@@ -133,6 +133,30 @@ def fold_labels(doc, labels: list[str]) -> int:
         if base in known:
             w.norm = f"<label:{base}>"
             n += 1
+    # CJK and Thai are written without spaces, so the extractor hands such a label over one character
+    # at a time - "注", "記", ":" - and a label of more than one character never matched above. The
+    # characters are joined back together here: without it AEM's "注記:" read as content stage had
+    # added, next to a prod note that carries the same label as its icon.
+    ws = doc.words
+    multi = sorted((l for l in known if len(l) > 1 and not l.isascii()), key=len, reverse=True)
+    for i in range(len(ws)):
+        if not ws[i].norm or ws[i].norm.startswith("<label:") or len(clean(ws[i].text)) != 1:
+            continue
+        for lab in multi:
+            run = ws[i:i + len(lab)]
+            if len(run) < len(lab) or any(not w.norm or w.line != run[0].line for w in run):
+                continue
+            if "".join(clean(w.text) for w in run).lower() != lab:
+                continue
+            ws[i].norm = f"<label:{lab}>"
+            for w in run[1:]:
+                w.norm = ""
+            j = i + len(lab)   # the colon the label is followed by is its own word in these scripts
+            if j < len(ws) and ws[j].norm and ws[j].line == run[0].line \
+                    and not re.sub(r"[^\w]+", "", clean(ws[j].text)):
+                ws[j].norm = ""
+            n += 1
+            break
     return n
 
 
@@ -216,18 +240,34 @@ def fold_xref_pages(doc) -> int:
         on.norm = page.norm = ""
         num.norm = m.group(3) or ""   # the glued word stays in the comparison ("for")
         n += 1
-    # "(See page 12)" / "see page 12 - 14": the same reference written without a title - the page number is
-    # the template's as well; "see" stays
+    # "(See page 12)", "see page 24-25", "see pages 24 to 26": the same reference written without a
+    # title - the page number is the template's as well; "see" stays. A RANGE goes whole, in whichever
+    # shape the extractor hands it over: one token ("24-25."), two around a dash, or two around "to".
+    # Folding only the first number left the tail in the word stream as content of its own, and the
+    # comparison then reported that scrap against whatever the other template writes in its place.
+    _DASH = "-\u2010\u2011\u2012\u2013\u2014\u00b7\u2022"
+    one = re.compile(rf"(\d{{1,4}})(?:\s*[{_DASH}]\s*\d{{1,4}})?([.,;:)]*)")
     for k in range(1, len(ws) - 1):
         see, page, num = ws[k - 1], ws[k], ws[k + 1]
-        if not (page.norm and num.norm) or page.norm.lower() != "page" or see.norm.lower().lstrip("(") not in ("see", "to"):
+        if not (page.norm and num.norm) or page.norm.lower().rstrip("s") != "page" \
+                or see.norm.lower().lstrip("(") not in ("see", "to"):
             continue
-        m = re.fullmatch(r"(\d{1,4})([.,;:)]*)", num.norm)
+        m = one.fullmatch(num.norm)
         if not m:
             continue
         see.norm += m.group(2)
         page.norm = num.norm = ""
         n += 1
+        j = k + 2            # the rest of a range the extractor split into its own words
+        while j < len(ws) and ws[j].norm:
+            tail = re.fullmatch(rf"(?:[{_DASH}]|to)?\s*(\d{{1,4}})?([.,;:)]*)", ws[j].norm.lower())
+            if not tail or (tail.group(1) is None and not re.fullmatch(rf"(?:[{_DASH}]|to)[.,;:)]*", ws[j].norm.lower())):
+                break
+            see.norm += tail.group(2) or ""
+            ws[j].norm = ""
+            j += 1
+            if tail.group(1) is not None:
+                break        # the range's second number: nothing more belongs to it
     return n
 
 

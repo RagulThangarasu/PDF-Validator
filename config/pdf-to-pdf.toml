@@ -1,0 +1,152 @@
+# PDF to PDF: the genuine validation only.
+#
+#   python -m pdfval compare --baseline A.pdf --candidate B.pdf --out runs/ab --config config/pdf-to-pdf.toml
+#
+# Upload A (the original) and B (the one to check). Seven things are validated and reported; every
+# other check the tool has is switched off, so the report holds these and nothing else:
+#
+#   1. Content missing          text of A that is not in B
+#   2. Bold differs             a word plain in A and bold in B, or the other way round
+#   3. Alignment differs        a paragraph or heading centred / right-aligned where it was left-aligned
+#   4. Table past the margin    a table wider than the text column, breaking the right margin
+#   5. Image position           the same picture moved left / centre / right
+#   6. Image under 50 %         the same picture drawn at half the size it has in A, or smaller
+#   7. Icon alignment           an inline icon sitting higher or lower on its line than in A
+#   8. Word gap                 a hole of 3+ character widths where A has a single space
+#   9. Callout type             B's label contradicts A's icon (a lightbulb labelled IMPORTANT). A
+#                               warning triangle labelled WARNING, or a lightbulb labelled TIP, is
+#                               the same callout written two ways and is not reported
+#
+# Everything is judged A -> B. Nothing here changes config/default.toml; it is a per-run override.
+
+[report]
+# Every report of this run, not only the genuine list: a finding of any other kind is dropped before
+# it is written, so the interactive report, the PDF, the DOCX and the CSV all hold these seven and
+# nothing else. Without this the genuine list would be right while the full report still carried
+# bullet indents, TOC entries and heading levels.
+only_types = [
+  "missing text", "emphasis", "text-align",
+  "image alignment", "image smaller", "icon alignment",
+  "wide gap", "callout type differs",
+]
+only_types_strict = true      # not even a picture's own label notes, which are otherwise exempt
+
+[genuine]
+# the report's whole contents, in the order above
+types = [
+  "missing text",
+  "emphasis",
+  "text-align",
+  "image alignment",
+  "image smaller",
+  "icon alignment",
+  "wide gap",
+  "callout type differs",
+]
+everything = false
+data_missing_words = 1        # one missing word is content missing
+exclude_checks = ["toc"]      # the table of contents is not part of this run
+
+[ignore]
+# "text-align" is in the default ignore list (prod and stage set text differently all over a manual);
+# this run is about alignment, so the list is replaced rather than added to.
+types = [
+  "case", "punctuation", "case + punctuation",   # wording is not this run's job beyond missing content
+  "font-size", "font-family", "font-weight", "font-style", "color", "line-height", "space-above",
+  "line-wrap", "size / aspect", "superscript", "callout style", "order differs",
+  "spec font-size", "spec font-family", "spec color", "spec line-height", "spec text-decoration",
+  "spec bullet", "spec list numbering", "spec callout title", "spec callout background",
+  "spec callout content", "spec callout icon", "spec cover", "spec page margin", "spec page size",
+  "spec pagination", "spec page structure", "spec table header", "spec table border",
+  "footer", "header", "spec page number", "repeated header", "continued header",
+  "row background", "cell background", "column width", "table width", "table border",
+  "table border added", "table header alignment",
+  "link page number", "link to wrong section", "text as graphic",
+]
+in_table_cells = []
+in_callouts = []
+cover_pages = true
+
+# --- what still runs -------------------------------------------------------------------------------
+[content]
+check_spacing = false         # a single space more or less is not an issue ...
+check_wide_gap = true         # 8. ... but a hole of three or more character widths is
+gap_min_chars = 3
+check_paragraphs = false
+# 9. a callout drawn with only its icon in prod, labelled in words in stage: the icon says which
+# label it stands for, so the label is not extra text. A warning triangle against "WARNING" and a
+# lightbulb against "TIP" are silent; a lightbulb against "IMPORTANT" or "NOTE" is reported as
+# "callout type differs".
+check_callout_icon_label = true
+
+[style]
+compare_with_prod = false     # no font / size / colour comparison ...
+check_emphasis = true         # 2. ... only bold vs plain and italic vs upright, which runs on its own
+emphasis_any_weight = false   # not every weight step on its own: plain against bold ...
+emphasis_bold_over = 400      # ... where anything heavier than normal is bold (Medium and Semibold too)
+
+[assets]
+# [assets] report_types gates every picture finding before any other list sees it, so it is narrowed
+# to this run's three as well - otherwise they would be dropped here and never reach the report.
+report_types = ["image alignment", "image smaller", "icon alignment"]
+check_alignment = true        # 5. image position: left / centre / right
+alignment_sides_only = false  # centre -> left counts too, not only left -> right
+ignore_center_alignment = false
+align_min_shift = 0.10
+smaller_report_under = 0.5    # 6. only a picture under 50 % of the original - half size or less
+check_vertical_alignment = false
+picture_text = false
+pixelated_vs_vector = false
+
+[inline_icons]
+enabled = true                # 7. icon alignment
+check_alignment = true
+check_highlight = false
+
+[tables]
+enabled = true                # 4. a table past the right margin ...
+check_table_margin = true
+check_borders = false         # ... and nothing else about tables
+check_cell_borders = false
+check_row_background = false
+check_header_align = false
+check_header_padding = false
+check_cell_align = false
+check_single_column_center = false
+check_font_size = false
+check_icons = false
+check_cells = false
+report_cell_differs = false
+validate_reordered_cells = true   # keeps a reordered table from being read as missing content
+
+[layout]
+compare_with_prod = true      # 3. alignment differs: each line's alignment in A against B
+compare_bullets_with_prod = false
+check_bullets = false         # ... and nothing else from the layout pass
+check_bullet_position = false
+check_picture_rows = false
+check_picture_text_rows = false
+check_placement = false
+check_wrap = false
+
+# --- what does not run -----------------------------------------------------------------------------
+
+[typography]
+enabled = false               # the design-spec pass (fonts, sizes, colours, page geometry)
+
+[site]
+enabled = false
+
+[notes]
+compare_style = false
+
+[highlights]
+enabled = false
+
+[footer]
+enabled = false
+
+[integrity]
+glyphs = false
+offpage = false
+links = false

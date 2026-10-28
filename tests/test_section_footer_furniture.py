@@ -87,3 +87,64 @@ def test_a_heading_is_not_paired_with_a_footer_of_the_same_words(tmp_path, cfg):
         assert all(l["page"] == 0 for l in f["baseline"]), f["message"]   # prod's own heading page
     # and the footer text is no longer content missing from stage
     assert not [f for f in fs if "missing text" in (f.get("types") or [])], [f["message"] for f in fs]
+
+
+# --- what the narrow-band rule must not touch -------------------------------------------------------
+
+BOILER = ("Available menu options may vary depending on the input sources, functions and settings. "
+          "Menu options that are not available will become grayed out.")
+
+
+def _menus(path, *, headings, filler: int = 3) -> str:
+    """A manual whose every menu section opens with the same sentence under its heading - real body
+    text that repeats near the top of several pages, which is how these manuals are written. Each
+    section runs over a few more pages, so the sentence is on well under a third of them and only the
+    narrow-band rule can reach it."""
+    doc, toc = pymupdf.open(), []
+    for h in headings:
+        pg = doc.new_page(width=595, height=842)
+        toc.append([1, h, doc.page_count])
+        pg.insert_text((72, 62), h, fontsize=16, fontname="hebo")
+        for k, part in enumerate(BOILER.split(". ")):
+            pg.insert_text((72, 92 + 14 * k), part.strip() + ".", fontsize=10, fontname="helv")
+        pg.insert_text((72, 140), f"The {h} settings are described in the table below.", fontsize=10, fontname="helv")
+        for n in range(filler):
+            more = doc.new_page(width=595, height=842)
+            more.insert_text((72, 92), f"{h}: setting {n + 1} adjusts how the panel behaves in this mode.",
+                             fontsize=10, fontname="helv")
+    doc.set_toc(toc)
+    doc.save(path)
+    return str(path)
+
+
+HEADINGS = ["Display menu", "Color menu", "Audio menu", "Custom Key menu", "System menu"]
+
+
+def test_body_text_that_repeats_under_each_heading_is_kept(tmp_path, cfg):
+    """It sits inside the top band on five pages, but it is a paragraph, not a running header."""
+    d = extract.load(_menus(tmp_path / "prod.pdf", headings=HEADINGS), "prod", cfg)
+    kept = sum(1 for i, w in enumerate(d.words)
+               if " ".join(x.text for x in d.words[i:i + 4]) == "Available menu options may")
+    assert kept == len(HEADINGS), kept
+
+
+def test_stripping_it_turned_the_publication_s_own_boilerplate_into_a_duplicate(tmp_path, cfg):
+    """The regression this guards: with prod short of copies stage had, every menu section was
+    reported as "Content duplicated in stage"."""
+    prod = _menus(tmp_path / "a.pdf", headings=HEADINGS)
+    stage = _menus(tmp_path / "b.pdf", headings=HEADINGS)
+    r = engine.compare(prod, stage, cfg)
+    dups = [f for s in r["sections"] for f in s["findings"] if "duplicate content" in (f.get("types") or [])]
+    assert not dups, [f["message"][:90] for f in dups]
+
+
+def test_a_short_line_at_the_same_height_is_still_furniture(tmp_path, cfg):
+    """The rule still does its job: the footer naming the section is 6 words and goes."""
+    d = extract.load(_prod(tmp_path / "prod.pdf"), "prod", cfg)
+    assert _where(d) == [(0, 45)]
+
+
+def test_the_word_limit_is_configurable(tmp_path, cfg):
+    cfg["extract"]["edge_repeat_max_words"] = 2    # shorter than the footer: it stays in
+    d = extract.load(_prod(tmp_path / "prod.pdf"), "prod", cfg)
+    assert len(_where(d)) == 4

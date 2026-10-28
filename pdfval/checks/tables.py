@@ -964,6 +964,9 @@ def check(u: Unit) -> list[Finding]:
     if tcfg.get("check_icons", True):
         findings += _row_icons(u, rows_a, rows_b, fwd, target)
     findings += _overflow(u, al)
+    # (a web page reflows to its viewport: its tables have no print margin to break)
+    if tcfg.get("check_table_margin", False) and B.raw_tables is None:
+        findings += _past_margin(u)
     if tcfg.get("check_borders", True):
         findings += _borders(u, al, ta_pages, tb_pages)
     # (a web page's PDF is a screenshot: no rules or fills to read - its borders / shading cannot be compared)
@@ -974,6 +977,8 @@ def check(u: Unit) -> list[Finding]:
         findings += _row_background(u, tb_pages)
     if tcfg.get("check_header_align", True):
         findings += _header_align(u, tb_pages)
+    if tcfg.get("check_header_padding", True):
+        findings += _header_padding(u, tb_pages)
     # on: table cell text must be left-aligned (design spec), a narrow centred ID/number column
     # included - [tables] check_cell_align = false brings back the old behaviour of not reporting it
     # (a web page's PDF is a screenshot of a reflowed page: its cell geometry is not the design spec's)
@@ -1054,6 +1059,59 @@ def _is_header_bar(doc: Doc, row: TRow) -> bool:
     return (r + g + b) / 3 < 110
 
 
+def _header_padding(u: Unit, tb: list) -> list[Finding]:
+    """Stage table headers on a background bar: the text must not sit against the cell border.
+
+    The design spec pads a cell on all four sides; a header whose text starts at (or within a hair of)
+    the column's left border reads as glued to it. Judged on the stage document alone, against the
+    spec - the header bar is what marks the row, so a table with no background bar is not judged here.
+    One finding per table, naming the cells. [tables] check_header_padding / header_min_padding.
+    """
+    tcfg = u.cfg["tables"]
+    tol = float(tcfg.get("header_min_padding", 4.0))
+    sev = tcfg.get("header_padding_severity", "error")
+    A, B = u.a, u.b
+    b2a = {j: i for i, j in u.pairs}
+    rcfg = u.cfg["report"]
+    out = []
+    for t in tb:
+        raw = next((r for r in _raw(B, t.page) if r[0] == t.key[1]), None)
+        if not raw or not is_data_table(B, t):
+            continue
+        head = t.rows[0]
+        # only the header, and only where the stage really draws the background bar the spec asks for
+        if not _is_header_bar(B, head):
+            continue
+        # a nested header (a merged bar cell such as "Screen size" split into "Inch" / "mm" right below
+        # it) carries the same padding rule one row down - it is still naming the columns, not data
+        rows = [head] + ([t.rows[1]] if len(t.rows) > 1 and not _is_header_bar(B, t.rows[1])
+                         and t.rows[1].box[1] - head.box[3] <= 2 else [])
+        bad = []
+        for x0, x1 in raw[3]:
+            words = [i for row in rows for i in row.idx if x0 - 1 <= (B.words[i].bbox[0] + B.words[i].bbox[2]) / 2 <= x1 + 1]
+            if not words:
+                continue
+            left = min(B.words[i].bbox[0] for i in words) - x0
+            if left < tol:  # negative = the text starts outside the column's border
+                bad.append((sorted(words, key=lambda i: (B.words[i].line, B.words[i].bbox[0])), left))
+        if not bad:
+            continue
+        idx = [i for ws, _ in bad for i in ws]
+        names = "; ".join(f"“{' '.join(B.words[i].text for i in ws)}” "
+                          + ("touching the border" if gap <= 0.5 else f"{gap:.1f}pt from the border")
+                          for ws, gap in bad)
+        a_idx = [b2a[j] for j in idx if j in b2a]
+        out.append(Finding(
+            "tables", sev,
+            f"Table header text against the cell border in stage ({len(bad)} "
+            f"cell{'s' if len(bad) > 1 else ''}): {names} — the header bar's cells must be padded, "
+            f"at least {tol:.0f}pt before the text (design spec)",
+            locs(A, a_idx, rcfg["max_locs"]) if a_idx else [], locs(B, idx, rcfg["max_locs"]),
+            {"kind": "table header padding", "cells": len(bad),
+             "gap_pt": round(min(g for _, g in bad), 2)}, types=["table header padding"]))
+    return out
+
+
 def _header_align(u: Unit, tb: list) -> list[Finding]:
     """Table header cells: each line of header text is left-aligned in its column (design spec: table
     headers are always left-aligned, never centred or right-aligned - an absolute rule, not judged
@@ -1105,14 +1163,47 @@ def _header_align(u: Unit, tb: list) -> list[Finding]:
     return out
 
 
+# a cell whose text is a list item begins with its marker ("1.", "a)", "•"), which hangs to the left of
+# the text it introduces
+_CELL_MARKER = re.compile(r"^(?:[\u2022\u25cf\u25aa\u25e6\u00b7\-\u2013]|\(?[0-9]{1,3}[.)]|\(?[a-zA-Z][.)]|[ivxIVX]{1,4}[.)])$")
+
+
+def _text_left(B, ws: list[int]) -> float:
+    """The left edge a cell's first line sets - measured past a list marker.
+
+    A cell holding "1. Press and hold [CH-] button." starts with the marker, which hangs left of the
+    text; a cell of plain words starts with the text itself. Measuring both from their first word
+    compares a hanging indent against a text edge and calls a table misaligned when every cell is in
+    fact correct - 4pt for the list cells, 9pt for the plain ones, in a table nobody would look at
+    twice. The marker is skipped so the column's rows are compared on the same thing."""
+    xs = sorted(ws, key=lambda i: B.words[i].bbox[0])
+    if len(xs) > 1 and _CELL_MARKER.match(B.words[xs[0]].text.strip()):
+        return B.words[xs[1]].bbox[0]
+    return B.words[xs[0]].bbox[0]
+
+
+def _rowspan(rows: list[int]) -> str:
+    """Row numbers as runs: [1, 2, 5] -> "rows 1-2, 5"; [3] -> "row 3"."""
+    runs, start = [], None
+    for k, n in enumerate(rows):
+        if start is None:
+            start = n
+        if k + 1 == len(rows) or rows[k + 1] != n + 1:
+            runs.append(str(start) if start == n else f"{start}-{n}")
+            start = None
+    return ("rows " if len(rows) > 1 else "row ") + ", ".join(runs)
+
+
 def _cell_align(u: Unit, tb: list) -> list[Finding]:
     """Every row of a table column starts at the same left edge - the header rows included.
 
-    Judged on stage alone (an absolute rule, not against what prod happens to do), and read from the
+    Judged on stage alone (an absolute rule, not against what prod happens to do) and read from the
     table itself: whatever cell padding a column uses, all of its rows must use it. Reported when they
     do not - the header rows set against the cell border while the data rows are indented, one header
     row indented and the next not, or a column whose text is centred (its rows then sit at as many left
-    edges as they have widths). One finding per table, naming the columns and the rows that are off.
+    edges as they have widths). One finding per table, naming the columns and the ROW NUMBERS that are
+    off; the text inside the cells is never quoted, only where it sits (the finding's screenshots mark
+    the cells themselves).
 
     [tables] check_cell_align, cell_align_tolerance (pt two left edges may differ and still be one
     edge), cell_align_min_rows, cell_align_severity.
@@ -1131,7 +1222,7 @@ def _cell_align(u: Unit, tb: list) -> list[Finding]:
         cols = []
         for ci, (x0, x1) in enumerate(raw[3]):
             cells = []
-            for row in t.rows:
+            for ri, row in enumerate(t.rows):
                 words = [i for i in row.idx if x0 - 1 <= (B.words[i].bbox[0] + B.words[i].bbox[2]) / 2 <= x1 + 1]
                 if not words:
                     continue
@@ -1141,28 +1232,32 @@ def _cell_align(u: Unit, tb: list) -> list[Finding]:
                 for i in words:
                     by_line[B.words[i].line].append(i)
                 ws = by_line[min(by_line)]
-                cells.append((sorted(words, key=lambda i: (B.words[i].line, B.words[i].bbox[0])),
+                cells.append((ri + 1, sorted(words, key=lambda i: (B.words[i].line, B.words[i].bbox[0])),
                               min(B.words[i].bbox[0] for i in ws) - x0))
-            if len(cells) < min_rows or max(l for _, l in cells) - min(l for _, l in cells) <= tol:
+            if len(cells) < min_rows or max(l for *_, l in cells) - min(l for *_, l in cells) <= tol:
                 continue  # too few filled cells to read an edge from, or one edge for the whole column
-            # the edge most of the rows sit at is the column's own; the rest are named with theirs
+            # the edge most of the rows sit at is the column's own; the rest are named by their row number
             groups: dict[int, list] = defaultdict(list)
-            for ws, l in cells:
-                groups[int(round(l / max(tol, 1)))].append((ws, l))
+            for ri, ws, l in cells:
+                groups[int(round(l / max(tol, 1)))].append((ri, ws, l))
             main = max(groups.values(), key=len)
-            home = sum(l for _, l in main) / len(main)
-            off = sorted((x for g in groups.values() if g is not main for x in g), key=lambda x: x[1])
-            cols.append((ci, home, len(main), off))
+            home = sum(l for *_, l in main) / len(main)
+            off = sorted((x for g in groups.values() if g is not main for x in g))
+            if off:
+                cols.append((ci, home, len(main), off))
         if not cols:
             continue
-        idx = [i for _, _, _, off in cols for ws, _ in off for i in ws]
-        say = lambda ws: " ".join(B.words[i].text for i in ws)
-        names = "; ".join(
-            f"column {ci + 1}: {n} row(s) at {home:.0f}pt, "
-            + ", ".join(f"“{say(ws)}” at {l:.0f}pt" for ws, l in off[:3])
-            + (f" (+{len(off) - 3} more row(s))" if len(off) > 3 else "")
-            for ci, home, n, off in cols[:3])
-        more = f" (+{len(cols) - 3} more column(s))" if len(cols) > 3 else ""
+        idx = [i for *_, off in cols for _, ws, _ in off for i in ws]
+        # by position only: which column, which rows, how far in - never the data printed in the cells
+        def edges(off) -> str:
+            at: dict[int, list] = defaultdict(list)   # the same buckets the groups were built with
+            for ri, _, l in off:
+                at[int(round(l / max(tol, 1)))].append((ri, l))
+            return ", ".join(f"{_rowspan(sorted(r for r, _ in v))} at {sum(l for _, l in v) / len(v):.0f}pt"
+                             for _, v in sorted(at.items()))
+        names = "; ".join(f"column {ci + 1}: {n} row(s) at {home:.0f}pt, {edges(off)}"
+                          for ci, home, n, off in cols[:4])
+        more = f" (+{len(cols) - 4} more column(s))" if len(cols) > 4 else ""
         a_idx = [b2a[j] for j in idx if j in b2a]
         out.append(Finding(
             "tables", sev,
@@ -1741,8 +1836,14 @@ def _cell_borders(u: Unit, al, ta: list) -> list[Finding]:
     return out
 
 
-def _crossing(doc: Doc, li: int, tbox) -> bool:
-    """The text line runs across a border of the table it sits in."""
+def _crossing(doc: Doc, li: int, tbox, edge_tol: float = 3.0) -> str:
+    """Which border of its table the text line runs across: "edge" (the table's own outer border - the
+    text sticks out of the table), "cell" (a rule between two cells), or "" (inside its cell).
+
+    The two are different defects. Text crossing a cell rule is a column that did not fit its
+    neighbour; text crossing the OUTER border is the table itself breaking - a column pushed past the
+    table's edge, a header cut off - which is what a reader sees as a broken table. "edge" wins when a
+    line crosses both."""
     ln = doc.lines[li]
     x0, y0, x1, y1 = ln.bbox
     cy = (y0 + y1) / 2
@@ -1752,14 +1853,20 @@ def _crossing(doc: Doc, li: int, tbox) -> bool:
     ver, hor = _rules(doc, ln.page)
     inside = lambda x, y: tbox[0] - 2 <= x <= tbox[2] + 2 and tbox[1] - 2 <= y <= tbox[3] + 2
     m = 1.5  # glyph boxes touch a rule by a hair when text sits tight against it
+    hit = ""
+    at_edge = lambda v, lo, hi: abs(v - lo) <= edge_tol or abs(v - hi) <= edge_tol
     for x, ya, yb in ver:
         if inside(x, cy) and ya <= cy <= yb and x0 < x - m and x1 > x + m:
-            return True
+            if at_edge(x, tbox[0], tbox[2]):
+                return "edge"
+            hit = hit or "cell"
     for y, xa, xb in hor:
         overlap = min(x1, xb) - max(x0, xa)
         if inside((max(x0, xa) + min(x1, xb)) / 2, y) and overlap > 4 and y0 < y - m and y1 > y + m:
-            return True
-    return False
+            if at_edge(y, tbox[1], tbox[3]):
+                return "edge"
+            hit = hit or "cell"
+    return hit
 
 
 def _overflow(u: Unit, al: Aligner) -> list[Finding]:
@@ -1784,7 +1891,8 @@ def _overflow(u: Unit, al: Aligner) -> list[Finding]:
                 if not (tbox[0] <= cx <= tbox[2] and tbox[1] <= cy <= tbox[3]):
                     continue
                 seen.add(w.line)
-                if not _crossing(B, w.line, tbox):
+                where = _crossing(B, w.line, tbox)
+                if not where:
                     continue
                 idx_b = [k for k in range(*u.b_range) if B.words[k].line == w.line]
                 idx_a = [al.b2a[k] for k in idx_b if k in al.b2a]
@@ -1801,10 +1909,72 @@ def _overflow(u: Unit, al: Aligner) -> list[Finding]:
                 text = snippet(B, idx_b, 14)
                 out.append(Finding(
                     "tables", u.cfg["tables"].get("overflow_severity", "error"),
-                    f"Text outside the table border in stage: “{text}” runs across a cell border (stage p.{p + 1})",
+                    f"Text outside the table border in stage: “{text}” "
+                    + ("sticks out past the table's own border" if where == "edge"
+                       else "runs across a cell border")
+                    + f" (stage p.{p + 1})",
                     locs(A, idx_a) if idx_a else [], [Loc(p, B.lines[w.line].bbox)],
-                    {"kind": "overflow", "text": text},
+                    {"kind": "overflow", "text": text, "where": where},
                     baseline_at=None if idx_a else al.loc_in_a(idx_b[0]), types=["text outside table border"]))
+    return out
+
+
+def _past_margin(u: Unit) -> list[Finding]:
+    """A stage table that runs past the page's right text margin - the table is wider than the column
+    the body text is set in, so it breaks the page layout.
+
+    Each page's margin comes from extract._measure, which reads the body lines of the pages of that
+    parity - the right edge is where the longest of them end. Body text does not always reach the
+    column edge (short paragraphs, a page of headings), and a table may legitimately fill a column the
+    text does not, so the mirror of the opposite margin is taken as a floor: a table is past the
+    margin only when it also passes the column the page's own left margin implies.
+
+    Reported as a regression, not as an absolute rule: a prod table that already hangs over its own
+    margin is how the publication is drawn, and stage drawing it the same way is not a defect - the
+    same copy on both sides must raise nothing. What is reported is stage breaking a margin prod
+    keeps. [tables] table_margin_vs_prod = false makes it absolute again.
+
+    [tables] check_table_margin, table_margin_tolerance, table_margin_severity.
+    """
+    A, B = u.a, u.b
+    tol = u.cfg["tables"].get("table_margin_tolerance", 3.0)
+    sev = u.cfg["tables"].get("table_margin_severity", "error")
+
+    def over(doc, page: int, box) -> tuple[float, float, float, float]:
+        """(past the right, past the left, the column's left, the column's right) for a table box."""
+        pg = doc.pages[page]
+        right, left = max(pg.right, pg.width - pg.left), min(pg.left, pg.width - pg.right)
+        return box[2] - right, left - box[0], left, right
+
+    prod_pages = sorted({A.words[i].page for i in range(*u.a_range)})
+    prod_over = any(max(over(A, p, tb)[:2]) > tol for p in prod_pages for _, tb, _, _ in _raw(A, p)) \
+        if u.cfg["tables"].get("table_margin_vs_prod", True) else False
+
+    out, seen = [], set()
+    for j in range(*u.b_range):
+        page = B.words[j].page
+        if page in seen:
+            continue
+        seen.add(page)
+        for _key, tbox, _rows, _grid in _raw(B, page):
+            over_r, over_l, left, right = over(B, page, tbox)
+            if max(over_r, over_l) <= tol or prod_over:
+                continue   # inside the column, or prod hangs over its own margin here too
+            side = []
+            if over_r > tol:
+                side.append(f"{over_r:.0f}pt past the right margin ({tbox[2]:.0f}pt vs {right:.0f}pt)")
+            if over_l > tol:
+                side.append(f"{over_l:.0f}pt past the left margin ({tbox[0]:.0f}pt vs {left:.0f}pt)")
+            out.append(Finding(
+                "tables", sev,
+                f"Table breaks the page margin in stage (p.{page + 1}): the table is "
+                + " and ".join(side)
+                + f" - it is wider than the text column ({right - left:.0f}pt)",
+                [], [Loc(page, tuple(tbox))],
+                {"kind": "table past margin", "over_right": round(max(over_r, 0.0), 1),
+                 "over_left": round(max(over_l, 0.0), 1), "table_width": round(tbox[2] - tbox[0], 1),
+                 "column_width": round(right - left, 1)},
+                types=["table past margin"]))
     return out
 
 

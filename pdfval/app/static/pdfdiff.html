@@ -1,0 +1,318 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PDF A ⇄ B</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #fff; --ink: #1b2130; --muted: #667085; --line: #e4e7ec; --soft: #f9fafb;
+    --accent: #0f766e; --accent-ink: #fff;
+    --fail: #d92d20; --warn: #b54708; --pass: #067647;
+    --radius: 10px; --shadow: 0 1px 2px rgb(16 24 40 / .06), 0 1px 3px rgb(16 24 40 / .08);
+  }
+  :root[data-theme="dark"] { --bg:#0f1218; --panel:#171b23; --ink:#e6e8ec; --muted:#98a2b3; --line:#2a303b; --soft:#1d222c;
+    --accent:#2dd4bf; --accent-ink:#042f2e; --fail:#f97066; --warn:#fdb022; --pass:#47cd89; --shadow:none; }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme="system"] { --bg:#0f1218; --panel:#171b23; --ink:#e6e8ec; --muted:#98a2b3; --line:#2a303b; --soft:#1d222c;
+      --accent:#2dd4bf; --accent-ink:#042f2e; --fail:#f97066; --warn:#fdb022; --pass:#47cd89; --shadow:none; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  button, input { font: inherit; color: inherit; }
+  header.top { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:24px; padding:0 24px; height:56px;
+               background:var(--panel); border-bottom:1px solid var(--line); }
+  .brand { font-weight:700; display:flex; align-items:center; gap:8px; }
+  .brand .logo { width:26px; height:26px; border-radius:7px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:13px; }
+  nav a { color:var(--muted); padding:17px 2px; margin-right:18px; border-bottom:2px solid transparent; }
+  nav a.on { color:var(--ink); border-bottom-color:var(--accent); }
+  main { max-width:900px; margin:0 auto; padding:24px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .muted { color:var(--muted); } .small { font-size:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:18px; margin-bottom:16px; }
+  .btn { border:1px solid var(--line); background:var(--panel); padding:8px 14px; border-radius:8px; cursor:pointer;
+         display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
+  .btn.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+  .btn[disabled] { opacity:.5; cursor:not-allowed; }
+  .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .spacer { flex:1 1 auto; }
+  .drop { border:1.5px dashed var(--line); border-radius:10px; padding:22px; text-align:center; background:var(--soft); }
+  .drop.over { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 8%, var(--soft)); }
+  .drop b { display:block; margin-bottom:4px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:640px) { .grid2 { grid-template-columns:1fr; } }
+  input[type=text] { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--soft); }
+  table { border-collapse:collapse; width:100%; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; font-size:13px; }
+  th { background:var(--soft); font-weight:600; }
+</style>
+
+<header class="top">
+  <div class="brand"><span class="logo">PV</span> pdfval</div>
+  <nav><a href="/">Runs</a><a href="/links">Link check &amp; Guide A ⇄ B</a><a href="/pdfdiff" class="on">PDF A ⇄ B</a></nav>
+</header>
+
+<main>
+  <h1>PDF A ⇄ B</h1>
+  <p class="muted">Upload two PDFs - A (the reference) and B (the one to check) - and find every difference between
+    them visually: text, tables, images, layout and typography, each with a side-by-side screenshot of the exact
+    spot. This runs the same section-by-section validation as the main app's "New comparison" page, with none of
+    the AEM / prod-library options - just the two files.</p>
+
+  <div class="card">
+    <div class="grid2">
+      <div>
+        <b>A - reference</b>
+        <div class="drop" id="drop-a" style="margin-top:8px">
+          <b id="name-a">Drop a PDF here, or</b>
+          <input type="file" id="file-a" accept="application/pdf" style="margin-top:6px">
+        </div>
+      </div>
+      <div>
+        <b>B - to check</b>
+        <div class="drop" id="drop-b" style="margin-top:8px">
+          <b id="name-b">Drop a PDF here, or</b>
+          <input type="file" id="file-b" accept="application/pdf" style="margin-top:6px">
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:14px"><label class="small muted">Name for this run (optional)
+      <input type="text" id="run-name" placeholder="e.g. SL04 manual - draft 2 vs draft 3"></label></div>
+    <div class="row" style="margin-top:14px">
+      <span class="spacer"></span>
+      <span id="status" class="small muted"></span>
+      <button class="btn primary" id="go" disabled>Validate</button>
+    </div>
+    <div id="err" class="small" style="color:var(--fail); margin-top:10px; display:none"></div>
+  </div>
+
+  <h2 style="font-size:18px;margin:28px 0 4px">Two folders at once</h2>
+  <p class="muted">Every PDF in folder A is paired with the one of the same file name in folder B; tick the ones
+    to run and press Validate - each pair queues on the Runs page with its own progress. Open the folder in the
+    file picker, select all the PDFs in it (e.g. Cmd/Ctrl+A) and choose them - or drag them in - or, when both
+    folders are already on this machine, type their path instead.</p>
+  <div class="card">
+    <div class="grid2">
+      <div>
+        <b>A - reference</b>
+        <div class="drop" id="fdrop-a" style="margin-top:8px">
+          <b id="fname-a">Drop PDFs here, or</b>
+          <input type="file" id="ffolder-a" accept="application/pdf" multiple style="margin-top:6px">
+        </div>
+      </div>
+      <div>
+        <b>B - to check</b>
+        <div class="drop" id="fdrop-b" style="margin-top:8px">
+          <b id="fname-b">Drop PDFs here, or</b>
+          <input type="file" id="ffolder-b" accept="application/pdf" multiple style="margin-top:6px">
+        </div>
+      </div>
+    </div>
+    <details style="margin-top:12px"><summary class="small muted">Both folders already on this machine? Type their path instead</summary>
+      <div class="grid2" style="margin-top:10px">
+        <div><label class="small muted">Folder A (reference)
+          <input type="text" id="folder-a" placeholder="/path/to/prod-pdfs"></label></div>
+        <div><label class="small muted">Folder B (to check)
+          <input type="text" id="folder-b" placeholder="/path/to/stage-pdfs"></label></div>
+      </div>
+      <div class="row" style="margin-top:10px"><span class="spacer"></span>
+        <button class="btn" id="list-match" type="button">List &amp; match (by path)</button></div>
+    </details>
+    <div id="match-err" class="small" style="color:var(--fail); margin-top:10px; display:none"></div>
+    <div id="match-status" class="small muted" style="margin-top:6px"></div>
+    <div id="match-out" style="margin-top:12px"></div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const picked = { a: null, b: null };
+
+function wireDrop(key, dropSel, fileSel, nameSel) {
+  const drop = $(dropSel), file = $(fileSel), name = $(nameSel);
+  const take = f => { if (!f) return; picked[key] = f; name.textContent = f.name; updateGo(); };
+  file.addEventListener('change', () => take(file.files[0]));
+  // a dragged file's .type is unreliable (empty in several real-world cases - some file managers,
+  // some OSes, drags that carry no MIME info at all) - the extension is what actually tells a PDF apart
+  const isPdf = f => f && (f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+  drop.addEventListener('dragenter', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault(); e.stopPropagation(); drop.classList.remove('over');
+    const f = e.dataTransfer.files[0];
+    if (isPdf(f)) take(f);
+    else if (f && f.type === '' && !f.size && !/\.[a-z0-9]+$/i.test(f.name))
+      { $('#err').textContent = `"${f.name}" looks like a folder - drop a single PDF here, or use "Two folders at once" below.`; $('#err').style.display = 'block'; }
+    else if (f) { $('#err').textContent = `"${f.name}" is not a PDF.`; $('#err').style.display = 'block'; }
+  });
+}
+wireDrop('a', '#drop-a', '#file-a', '#name-a');
+wireDrop('b', '#drop-b', '#file-b', '#name-b');
+
+function updateGo() { $('#go').disabled = !(picked.a && picked.b); }
+
+function upload(file, label) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', '/api/upload?name=' + encodeURIComponent(file.name));
+    x.upload.onprogress = e => $('#status').textContent = `Uploading ${label}… ${Math.round(100 * e.loaded / e.total)}%`;
+    x.onload = () => x.status < 300 ? resolve(JSON.parse(x.responseText).path) : reject(new Error(JSON.parse(x.responseText).error));
+    x.onerror = () => reject(new Error('upload failed'));
+    x.send(file);
+  });
+}
+
+$('#go').onclick = async () => {
+  const go = $('#go'), err = $('#err');
+  go.disabled = true; err.style.display = 'none';
+  try {
+    const baseline = await upload(picked.a, 'A');
+    const candidate = await upload(picked.b, 'B');
+    $('#status').textContent = 'Starting…';
+    const r = await fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseline, candidate, name: $('#run-name').value.trim(), options: { mode: 'pdf', report_style: 'sitediff' } }) });
+    const job = await r.json();
+    if (!r.ok) throw new Error(job.error || 'Could not start the comparison');
+    location.href = '/#/run/' + job.id;
+  } catch (e) {
+    err.textContent = e.message; err.style.display = 'block';
+    go.disabled = false; $('#status').textContent = '';
+  }
+};
+
+// ---- two folders at once: matched by file name, queued as a batch (Runs page shows each one's own progress)
+let MATCHED = [];
+try {
+  $('#folder-a').value = localStorage.getItem('pdfdiff.folderA') || '';
+  $('#folder-b').value = localStorage.getItem('pdfdiff.folderB') || '';
+} catch (e) {}
+$('#folder-a').addEventListener('input', () => { try { localStorage.setItem('pdfdiff.folderA', $('#folder-a').value); } catch (e) {} });
+$('#folder-b').addEventListener('input', () => { try { localStorage.setItem('pdfdiff.folderB', $('#folder-b').value); } catch (e) {} });
+
+function showMatched(j) {
+  const out = $('#match-out');
+  MATCHED = j.matched || [];
+  if (!MATCHED.length) {
+    const onlyA = (j.only_a || []).length, onlyB = (j.only_b || []).length;
+    out.innerHTML = '<p class="muted">No PDF in A shares a file name with one in B.'
+      + (onlyA || onlyB ? ' (' + onlyA + ' only in A, ' + onlyB + ' only in B)' : '') + '</p>';
+    return;
+  }
+  const rows = MATCHED.map((m, i) => '<tr><td><input type="checkbox" class="m-pick" data-i="' + i
+    + '" checked></td><td>' + esc(m.name) + '</td></tr>').join('');
+  out.innerHTML = '<div class="row" style="margin-bottom:8px"><b>' + MATCHED.length + ' matched pair(s)</b>'
+    + '<span class="muted">' + ((j.only_a || []).length ? ' · only in A: ' + j.only_a.length : '')
+    + ((j.only_b || []).length ? ' · only in B: ' + j.only_b.length : '') + '</span>'
+    + '<span class="spacer"></span>'
+    + '<button class="btn sm" id="m-all" type="button">Select all</button>'
+    + '<button class="btn sm" id="m-none" type="button">Select none</button>'
+    + '<button class="btn sm primary" id="m-run" type="button">Validate selected</button></div>'
+    + '<table><tr><th></th><th>Name</th></tr>' + rows + '</table>';
+  $('#m-all').onclick = () => document.querySelectorAll('.m-pick').forEach(c => c.checked = true);
+  $('#m-none').onclick = () => document.querySelectorAll('.m-pick').forEach(c => c.checked = false);
+  $('#m-run').onclick = runMatched;
+}
+
+const normStem = n => n.replace(/\.pdf$/i, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+// a chosen/dropped folder's PDFs uploaded one by one, then matched client-side by file name - the server
+// never sees the folder itself (the browser gives file contents only, never a real folder path)
+async function uploadFolderPdfs(files, label) {
+  const pdfs = [...files].filter(f => /\.pdf$/i.test(f.name));
+  const by = {};
+  for (let k = 0; k < pdfs.length; k++) {
+    $('#match-status').textContent = `Uploading ${label}: ${pdfs[k].name} (${k + 1}/${pdfs.length})…`;
+    const path = await upload(pdfs[k], label);
+    by[normStem(pdfs[k].name)] = { name: pdfs[k].name, path };
+  }
+  return by;
+}
+
+const FOLDERS = { a: null, b: null };
+
+async function matchUploadedFolders() {
+  const merr = $('#match-err');
+  merr.style.display = 'none';
+  if (!FOLDERS.a || !FOLDERS.b) return;
+  $('#match-out').innerHTML = '';
+  try {
+    const keys = Object.keys(FOLDERS.a).filter(k => k in FOLDERS.b);
+    const matched = keys.map(k => ({ name: FOLDERS.a[k].name, a: FOLDERS.a[k].path, b: FOLDERS.b[k].path }));
+    const only_a = Object.keys(FOLDERS.a).filter(k => !(k in FOLDERS.b)).map(k => FOLDERS.a[k].name);
+    const only_b = Object.keys(FOLDERS.b).filter(k => !(k in FOLDERS.a)).map(k => FOLDERS.b[k].name);
+    $('#match-status').textContent = '';
+    showMatched({ matched, only_a, only_b });
+  } catch (e) {
+    merr.textContent = e.message; merr.style.display = 'block';
+  }
+}
+
+function wireFolderPick(key, dropSel, fileSel, nameSel) {
+  const drop = $(dropSel), file = $(fileSel), name = $(nameSel);
+  const take = async (files) => {
+    if (!files || !files.length) return;
+    name.textContent = `${files.length} file(s) selected`;
+    FOLDERS[key] = await uploadFolderPdfs(files, key.toUpperCase());
+    name.textContent = `${Object.keys(FOLDERS[key]).length} PDF(s) uploaded`;
+    await matchUploadedFolders();
+  };
+  file.addEventListener('change', () => take(file.files));
+  drop.addEventListener('dragenter', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', async e => {
+    e.preventDefault(); e.stopPropagation(); drop.classList.remove('over');
+    // a dropped folder arrives as directory entries, not plain File objects - walked recursively for
+    // every PDF inside; a plain file dropped here (not a folder) is still accepted on its own
+    const items = e.dataTransfer.items;
+    if (items && items.length && items[0].webkitGetAsEntry) {
+      const files = [];
+      const walk = (entry) => new Promise(resolve => {
+        if (entry.isFile) {
+          entry.file(f => { files.push(f); resolve(); }, resolve);
+        } else if (entry.isDirectory) {
+          const reader = entry.createReader();
+          const readAll = () => reader.readEntries(async entries => {
+            if (!entries.length) return resolve();
+            await Promise.all(entries.map(walk));
+            readAll();
+          }, resolve);
+          readAll();
+        } else resolve();
+      });
+      await Promise.all([...items].map(it => walk(it.webkitGetAsEntry())));
+      take(files);
+    } else {
+      take(e.dataTransfer.files);
+    }
+  });
+}
+wireFolderPick('a', '#fdrop-a', '#ffolder-a', '#fname-a');
+wireFolderPick('b', '#fdrop-b', '#ffolder-b', '#fname-b');
+
+$('#list-match').onclick = async () => {
+  const a = $('#folder-a').value.trim(), b = $('#folder-b').value.trim();
+  const merr = $('#match-err'), out = $('#match-out');
+  merr.style.display = 'none'; out.innerHTML = '';
+  if (!a || !b) { merr.textContent = 'Give both folders.'; merr.style.display = 'block'; return; }
+  out.innerHTML = '<span class="muted">Scanning…</span>';
+  const r = await fetch('/api/pdfdiff/match?a=' + encodeURIComponent(a) + '&b=' + encodeURIComponent(b));
+  const j = await r.json();
+  if (!r.ok) { out.innerHTML = ''; merr.textContent = j.error || 'Could not scan those folders'; merr.style.display = 'block'; return; }
+  showMatched(j);
+};
+
+async function runMatched() {
+  const merr = $('#match-err');
+  merr.style.display = 'none';
+  const picked_ = [...document.querySelectorAll('.m-pick:checked')].map(c => MATCHED[+c.dataset.i]);
+  if (!picked_.length) { merr.textContent = 'Tick at least one pair.'; merr.style.display = 'block'; return; }
+  const pairs = picked_.map(m => ({ baseline: m.a, candidate: m.b, name: m.name.replace(/\.pdf$/i, '') }));
+  const r = await fetch('/api/pairs/run', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pairs: pairs, options: { mode: 'pdf', report_style: 'sitediff' } }) });
+  const j = await r.json();
+  if (!r.ok) { merr.textContent = j.error || 'Could not start'; merr.style.display = 'block'; return; }
+  location.href = '/#/runs';
+}
+</script>

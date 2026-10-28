@@ -273,6 +273,12 @@ def _list_items(doc: Doc, rng: tuple[int, int], is_marker, tol_em: float, max_ga
         elif cur is not None and doc.lines[li].block == doc.lines[doc.words[cur["text"]].line].block:
             if cur["hang"] is None:  # first wrapped line of the item
                 cur["hang"] = w.bbox[0] - doc.words[cur["text"]].bbox[0]
+                # the wrapped line should resume under the item's own text, not under its number/bullet:
+                # a line starting at (or left of) the marker's own x reads as "under the number" to a reader
+                mk = doc.words[cur["marker"]]
+                if w.bbox[0] <= mk.bbox[0] + tol_em * max(w.style.size, 1):
+                    cur["wrap_under_marker"] = True
+                    cur["wrap_bbox"] = tuple(doc.lines[li].bbox)
         else:
             cur = None
         owner[li] = cur
@@ -469,6 +475,9 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
     line_start = lambda d, k: d.words[k].line_start
     kind_of = lambda d, x: (f"numbered {x['style']}" if x.get("style") else f"bullet “{d.words[x['marker']].text}”")
     groups: dict[tuple, list] = defaultdict(list)
+    # absolute (not a prod-vs-stage difference): a wrapped line resuming under the NUMBER instead of
+    # under the item's own text reads wrong on its own, whether or not the other side has the same bug
+    wrap_findings: list[Finding] = []
     for i, j in _item_pairs(u, ia, ib):
         xa, xb = ia.get(i), ib.get(j)
         if not xa and not xb:
@@ -477,6 +486,10 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
         if (xa and _cells_apart(A, xa["marker"], i)) or (xb and _cells_apart(B, xb["marker"], j)):
             # the “marker” is a table's numbering column (“12.” in the “No.” cell, “Dashboard” in the next one):
             # a column of the table, not a list marker - neither its presence nor its place is a list issue
+            continue
+        # a list inside a table cell is not checked at all ([layout] check_bullets_in_tables): the cell
+        # is laid out by the table, and its markers are the table's own styling, not the document's lists
+        if not lcfg.get("check_bullets_in_tables", False) and (_in_table(A, i) or _in_table(B, j)):
             continue
         if not (xa and xb):  # a bullet / number on one side only, the other side's text starts its line plainly
             if (xa and line_start(B, j)) or (xb and line_start(A, i)):
@@ -504,6 +517,17 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
                 groups[(wa.role, "numbering sequence", f"“{ma.text}”",
                         f"“{mb.text}” {what_b}" + (f" (expected “{xb['enum'][1].replace('X', exp)}”)" if exp else ""))
                        ].append((xa, xb, i, j))
+            elif (xa.get("value") is not None and xb.get("value") is not None
+                  and xa["value"] != xb["value"]):
+                # The same step, numbered differently: prod counts "5." where stage says "1.". Stage has
+                # broken one list into several, so every item starts its own list - and a list that starts
+                # at 1 counts as in sequence (see in_sequence above), which is why a whole procedure
+                # renumbered to "1." over and over raised nothing at all. The item is matched to prod's,
+                # so comparing the two numbers is what catches it.
+                groups[(wa.role, "numbering sequence", f"“{ma.text}”",
+                        f"“{mb.text}” where prod numbers it “{ma.text}”"
+                        + (" (the list starts again here)" if xb["value"] == 1 and xa["value"] > 1 else ""))
+                       ].append((xa, xb, i, j))
         elif (xa.get("enum") is None) != (xb.get("enum") is None):  # numbered on one side, bullet on the other
             groups[(wa.role, "numbering style", xa.get("style") or f"bullet “{ma.text}”",
                     xb.get("style") or f"bullet “{mb.text}”")].append((xa, xb, i, j))
@@ -523,7 +547,9 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
             # space between them is the column layout, not a bullet gap / indent
             continue
         if _in_table(A, i) or _in_table(B, j):
-            continue  # a list inside a table cell: where its bullets sit is the cell's own layout
+            # where a list inside a table cell sits is the cell's own layout - never compared, even when
+            # check_bullets_in_tables brings the markers themselves back
+            continue
         vals = {
             # only comparable when both are measured against the same kind of line
             "bullet indent": ((ma.bbox[0] - xa["ref"]) / em_a, (mb.bbox[0] - xb["ref"]) / em_b)
@@ -535,6 +561,19 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
         for prop, (va, vb) in vals.items():
             if va is not None and vb is not None and abs(va - vb) > tol:
                 groups[(wa.role, prop, f"{va:+.1f}em", f"{vb:+.1f}em")].append((xa, xb, i, j))
+        for side, x, d in (("prod", xa, A), ("stage", xb, B)):
+            if not x.get("wrap_under_marker"):
+                continue
+            mk = d.words[x["marker"]]
+            box = (min(mk.bbox[0], x["wrap_bbox"][0]), mk.bbox[1], max(mk.bbox[2], x["wrap_bbox"][2]), x["wrap_bbox"][3])
+            loc = [Loc(mk.page, box)]
+            wrap_findings.append(Finding(
+                "layout", lcfg.get("severity", {}).get("indent", "warning"),
+                f"[{wa.role}] Wrapped line not indented under the text in {side}: the continuation sits "
+                f"under the number (“{mk.text}”) instead of under “{_item_start(d, x['text'])}”",
+                loc if side == "prod" else [], loc if side == "stage" else [],
+                {"role": wa.role, "kind": "wrap under number", "side": side},
+                types=["wrap under number", "bullet"]))
 
     # which item a paragraph belongs to is the list's structure (like a missing bullet), not a
     # measurement: compared with prod even when positions are judged against the spec only
@@ -609,7 +648,7 @@ def _bullets(u: Unit, positions: bool = True) -> list[Finding]:
             else ["indent", "bullet"],
             links=paired_locs(A, B, pairs, rcfg["max_locs"]),
         ))
-    return findings + level_findings
+    return findings + level_findings + wrap_findings
 
 
 _BOXES: dict[tuple, list] = {}

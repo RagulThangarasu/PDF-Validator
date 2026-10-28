@@ -7,7 +7,9 @@ compared with prod's icon instead of being reported as a label on one side only.
 
 The icon is read from its drawing: rendered, its marks (light on a dark disc, or dark on a light one)
 split into connected parts -
-  exclamation  two parts on the icon's vertical axis: a tall bar with a small dot below it
+  exclamation  two parts on the icon's vertical axis: a tall bar with a small dot below it, on a disc
+  triangle     the same bar and dot, but drawn inside a triangle standing on its base (a Warning,
+               where the disc is an Important - the two carry the same mark and differ only in outline)
   pencil       its marks (body, point, eraser) along one line slanted 25-65 degrees
   lightbulb    a large round bulb on the vertical axis with flat base stripes below it (a Tip)
 anything else is not recognised (None): the finding stays as it was.
@@ -69,6 +71,28 @@ def _parts(mask: np.ndarray, min_px: int) -> list[np.ndarray]:
     return out
 
 
+def _triangular(g: np.ndarray) -> bool:
+    """The icon's own outline is a triangle standing on its base, not a disc or a square.
+
+    Read from the ink itself: the background is the colour of the corners (an icon is drawn inside its
+    box, so the corners are always outside the shape), and every row's ink width is measured. A
+    triangle is a wedge - near the apex it is a fraction of the width it has at the foot - while a
+    disc, a square and a rounded badge are as wide at the top as at the bottom.
+    """
+    H, W = g.shape
+    if H < 12 or W < 12:
+        return False
+    corners = np.concatenate([g[:3, :3].ravel(), g[:3, -3:].ravel(), g[-3:, :3].ravel(), g[-3:, -3:].ravel()])
+    bg = float(np.median(corners))
+    ink = np.abs(g.astype(np.float32) - bg) > 40
+    rows = ink.sum(axis=1)
+    if rows.max() < 0.4 * W:
+        return False                      # nothing solid enough to read a shape from
+    band = lambda lo, hi: float(rows[int(lo * H):max(int(hi * H), int(lo * H) + 1)].mean())
+    top, foot = band(0.08, 0.28), band(0.72, 0.95)
+    return foot > 0.55 * W and top < 0.5 * foot
+
+
 def kind(doc: Doc, page: int, box: tuple) -> str | None:
     """'exclamation', 'pencil', 'lightbulb' or None for the icon drawn in `box`."""
     r = pymupdf.Rect(box)
@@ -88,12 +112,14 @@ def kind(doc: Doc, page: int, box: tuple) -> str | None:
     for p in parts:
         ys, xs = p[:, 0], p[:, 1]
         geo.append({"cx": xs.mean(), "cy": ys.mean(), "w": np.ptp(xs) + 1, "h": np.ptp(ys) + 1, "n": len(p), "pts": p})
-    # exclamation: a tall bar and a dot below it, both on the vertical axis
+    # exclamation: a tall bar and a dot below it, both on the vertical axis. On a disc that is an
+    # Important; in a triangle it is a Warning, which the two are told apart by here - the icon's own
+    # outline, narrow at the top and wide at the foot, against a disc that is as wide at both ends
     if len(geo) == 2:
         bar, dot = sorted(geo, key=lambda q: q["cy"])
         if all(abs(q["cx"] - W / 2) <= 0.15 * W for q in (bar, dot)) and bar["h"] >= 2.2 * bar["w"] \
                 and dot["h"] <= 0.6 * bar["h"] and dot["cy"] > bar["cy"] + bar["h"] / 2:
-            return "exclamation"
+            return "triangle" if _triangular(g) else "exclamation"
     # lightbulb: a centred bulb (its body and base stripes may be one mark) that is taller than it is wide,
     # with light rays above and beside it
     big = geo[0]

@@ -561,8 +561,13 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
     only_types = cfg.get("report", {}).get("only_types")
     if only_types:  # [report] only_types: a scoped run (e.g. "formatting only") - everything else is dropped
         only_types = set(only_types)
+        # a picture issue kept for the image report (a label on the prod artwork, its red overlay) is
+        # normally exempt, since it never reaches the other reports anyway. [report] only_types_strict
+        # drops those too, for a run whose whole point is that it holds these kinds and nothing else.
+        strict = cfg.get("report", {}).get("only_types_strict", False)
         for _, fs, _ in ran:
-            fs[:] = [f for f in fs if set(f.types or []) & only_types or f.detail.get("image_report_only")]
+            fs[:] = [f for f in fs if set(f.types or []) & only_types
+                     or (not strict and f.detail.get("image_report_only"))]
     # bold / italic on the same words is a content difference (reported with the text, not as CSS)
     for _, fs, _ in ran:
         for f in fs:
@@ -675,7 +680,10 @@ def compare(baseline: str, candidate: str, cfg: dict | None = None, *, only: str
             "mode": (candidate_meta or {}).get("mode", "pdf"),
             "matched_sections": len(pairs),
             "typography": checks_typography.reference(B, cfg),  # the Figma type scale stage is checked against
-            "report": {"exclude_groups": list(cfg.get("report", {}).get("exclude_groups") or [])},
+            "report": {"exclude_groups": list(cfg.get("report", {}).get("exclude_groups") or []),
+                       # "<publication> new.pdf" (report/new_report.py) and the size change it lists
+                       "new_report": bool(cfg.get("report", {}).get("new_report", True)),
+                       "new_report_size_change": float(cfg.get("report", {}).get("new_report_size_change", 0.40))},
         },
         "summary": {
             "sections": len(out_sections),

@@ -5,7 +5,8 @@ pictures of the row differ in height. Compared row by row: how far each caption 
 caption that moved clearly more or less than the others of its row is out of line.
 
 Only captions: a short line with a picture right above it, and other such lines beside it. Running text in
-columns is not looked at (it reflows), nor a row whose captions stage no longer sets side by side."""
+columns is not looked at (it reflows). A row whose captions stage no longer sets side by side is
+reported too - prod sets them level under their pictures, stage stacks them one under another."""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -97,7 +98,21 @@ def check(u: Unit) -> list[Finding]:
                 continue
             order = sorted(sb, key=lambda s: s.bbox[0])
             if any(b.bbox[0] < a.bbox[2] + 4 for a, b in zip(order, order[1:])):
-                continue  # stage does not set them side by side (stacked): another layout, not a row out of line
+                # Stage no longer sets the row's captions side by side: prod has them level under
+                # their pictures, stage stacks them one under another. That used to be skipped as
+                # "another layout" - but it is the layout difference a reader sees first, so it is
+                # reported in its own right rather than measured as a row out of line.
+                out.append(Finding(
+                    "layout", cfg.get("severity", "warning"),
+                    "Picture captions no longer side by side in stage: "
+                    + ", ".join(f"\u201c{A.lines[li].text.strip()}\u201d" for li, _ in got)
+                    + f" stand level under their pictures in one row in prod; stage stacks them one "
+                      f"under another (prod p.{page + 1} \u2194 stage p.{sb[0].page + 1})",
+                    [Loc(page, tuple(A.lines[li].bbox)) for li, _ in got],
+                    [Loc(B.lines[lj].page, tuple(B.lines[lj].bbox)) for _, lj in got],
+                    {"property": "caption row", "captions": len(got), "stacked": True},
+                    types=["caption row"]))
+                continue
             h = median(A.lines[li].bbox[3] - A.lines[li].bbox[1] for li, _ in got)
             moved = [B.lines[lj].bbox[1] - A.lines[li].bbox[1] for li, lj in got]
             mid = median(moved)

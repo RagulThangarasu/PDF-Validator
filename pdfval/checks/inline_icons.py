@@ -183,6 +183,22 @@ def check(u: Unit) -> list[Finding]:
                     found["missing"].append((box, page, Loc(wb.page, gapbox), where))
                 continue
             spage, sbox, sdpi = hit
+            # how the icon sits on the line it is set in: its centre against the centre of the word
+            # beside it, as a share of that word's height. Prod centres the icon on the text; stage
+            # dropping it to the baseline or lifting it above the cap height is what the reader sees
+            # as a misaligned icon, whatever its size. The word is the same word on both sides (it is
+            # how the icon was found), so the two offsets are directly comparable.
+            if cfg.get("check_alignment", True):
+                aw = A.words[before if before is not None and jb is not None else after]
+                bw = B.words[jb if before is not None and jb is not None else ja]
+                ha, hb = max(aw.bbox[3] - aw.bbox[1], 1e-6), max(bw.bbox[3] - bw.bbox[1], 1e-6)
+                off_a = ((box[1] + box[3]) / 2 - (aw.bbox[1] + aw.bbox[3]) / 2) / ha
+                off_b = ((sbox[1] + sbox[3]) / 2 - (bw.bbox[1] + bw.bbox[3]) / 2) / hb
+                if abs(off_b - off_a) >= cfg.get("align_differs_over", 0.35):
+                    low = "lower" if off_b > off_a else "higher"
+                    found["alignment"].append((box, page, Loc(spage, sbox),
+                                               f"{where} (sits {low} on the line than in prod: "
+                                               f"{off_a:+.0%} → {off_b:+.0%} of the text height)"))
             la, lb = _look(A, page, box), _look(B, spage, sbox)
             diff = sum(abs(x - y) for x, y in zip(la, lb)) / (255 * len(la))
             if diff <= cfg.get("differs_over", 0.30) and cfg.get("check_highlight", True) \
@@ -215,7 +231,9 @@ def check(u: Unit) -> list[Finding]:
             "pixelated": ("icon pixelated", "Icon pixelated in stage",
                           "stage's icon is a low-resolution bitmap (blurs when zoomed or printed) where prod's is sharp"),
             "wrapped": ("icon wraps to next line", "Icon wraps onto the next line in stage",
-                       "the icon sits beside its word on one line in prod, pushed onto the next line in stage")}
+                       "the icon sits beside its word on one line in prod, pushed onto the next line in stage"),
+            "alignment": ("icon alignment", "Icon not aligned with its text in stage",
+                          "the icon sits higher or lower on its line than it does in prod")}
     for kind, items in found.items():
         typ, head, why = text[kind]
         if kind == "highlight":

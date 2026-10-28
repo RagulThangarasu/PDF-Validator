@@ -253,6 +253,15 @@ def _duplicate_content(results, A: Doc, min_words: int, overlap: float) -> None:
             if len(extra) < min_words:
                 continue
             need = Counter(extra)
+            # prod's own copy of this section first: a sentence the template repeats under every menu
+            # ("Available menu options may vary depending on the input sources ...") is in prod here
+            # too, so stage is not duplicating anything - it only fell out as extra text because the
+            # aligner paired this section's words elsewhere. Without this the same boilerplate was
+            # reported once per section, each time as "prod text from <some other section>".
+            own = next((toks for pu, toks in prod if pu is u), None)
+            if own and SequenceMatcher(None, own, extra, autojunk=False) \
+                    .find_longest_match(0, len(own), 0, len(extra)).size >= overlap * len(extra):
+                continue
             best = None
             for (pu, toks), (_, bag) in zip(prod, bags):
                 if pu is u:
@@ -2149,6 +2158,9 @@ _WHY = {
     "spec page structure": ("Print page structure off the design spec", "The Print version has a cover, Q&A index or TOC, or the first page header is missing or repeated."),
     "table header alignment": ("Table header not left-aligned", "A table header cell's text is not left-aligned in its column (design spec: table headers are always left-aligned)."),
     "table cell alignment": ("Table cells not aligned", "The rows of one table column do not all start at the same left edge - a header row set against the cell border while the data rows are indented, or a column whose text is centred."),
+    "wide gap": ("Word gap differs", "Stage leaves a hole of several character widths between two words where prod has a single space."),
+    "table past margin": ("Table breaks the page margin", "The table is wider than the text column: it runs past the page's right (or left) margin and breaks the layout."),
+    "icon alignment": ("Icon not aligned with its text", "An icon in a sentence sits higher or lower on its line than the same icon does in prod."),
     "single column alignment": ("Single-column table cell not centred", "A one-column table's cell text is not centred (design spec: a single-column table's text is always centred)."),
     "row background": ("Table row background differs", "Rows that one side shades (group rows between the data rows) are plain on the other."),
     "spec text-align": ("Text not left-aligned", "Body text is centred or right-aligned; the design spec left-aligns all content."),

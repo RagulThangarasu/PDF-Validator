@@ -614,6 +614,70 @@ def is_site_root(url: str) -> bool:
     return path.startswith("/content/") and "." not in last and not re.fullmatch(r"[a-z]{2}([-_][a-zA-Z]{2,4})?", last)
 
 
+WCM = "?wcmmode=disabled"   # the published view: the page without the author's editing frame
+
+
+def publications(root_url: str, cfg: dict, lang: str = "", with_start: bool = True, limit: int = 300) -> dict:
+    """Every publication under a folder of AEM Sites - the map-level parent page of each one.
+
+    A published AEM Guides topic records the map it came from (basePath) and its publication's parent
+    page (indexPath); grouping every topic under the folder by indexPath is AEM's own answer to "which
+    publications live here", at whatever depth they sit. Read-only (one QueryBuilder query, plus one
+    small request per publication for its first topic page when `with_start`).
+
+    Returns {"root", "publications": [{site, url, start, map, maps, pages, title}], "count"}; `url` is
+    the publication's parent page and `start` the page a crawl should begin at - the parent page is
+    often an empty landing page whose own navigation only appears on its first topic.
+    """
+    import json
+    from collections import Counter, defaultdict
+    from urllib import request as _rq
+    from urllib.parse import urlencode, urlsplit
+
+    author, auth = _auth(cfg)
+    root = urlsplit(root_url).path.rstrip("/") if "//" in (root_url or "") else (root_url or "").rstrip("/")
+    root = root.split("/sites.html", 1)[1] if "/sites.html" in root else root
+    root = root or cfg.get("sites_root") or "/content/guide"
+    q = {"path": root, "type": "cq:PageContent", "property": "basePath", "property.operation": "exists",
+         "p.limit": "-1", "p.hits": "selective", "p.properties": "basePath indexPath jcr:title"}
+    req = _rq.Request(f"{author}/bin/querybuilder.json?{urlencode(q)}", headers={"Authorization": auth})
+    with _rq.urlopen(req, timeout=120) as r:
+        hits = json.load(r).get("hits", [])
+    maps: dict = defaultdict(Counter)
+    for h in hits:
+        if h.get("basePath") and h.get("indexPath"):
+            maps[h["indexPath"]][h["basePath"]] += 1
+    want = (lang or "").lower()
+    out = []
+    for index in sorted(maps):
+        if want and index.strip("/").split("/")[-1].lower() != want:
+            continue
+        counted = maps[index]
+        # the published view (?wcmmode=disabled), as the rest of this module gives its URLs: an author
+        # page carries the editing frame, whose own chrome is not the guide's and whose left navigation
+        # is not the reader's - a crawl started on it reads the author UI instead of the manual
+        out.append({"site": index, "url": f"{author}{index}.html{WCM}", "start": f"{author}{index}.html{WCM}",
+                    "map": counted.most_common(1)[0][0], "maps": sorted(counted),
+                    "pages": sum(counted.values()),
+                    "title": index.strip("/").split("/")[-2] if index.count("/") > 1 else index.strip("/")})
+    out = out[:limit]
+    if with_start:
+        for pub in out:
+            # the parent page is often an empty landing page: the crawl starts at its first topic, which
+            # is where the left navigation of the publication is rendered
+            try:
+                kid_req = _rq.Request(f"{author}{pub['site']}.1.json", headers={"Authorization": auth})
+                with _rq.urlopen(kid_req, timeout=30) as r:
+                    kids = [k for k, v in json.load(r).items()
+                            if isinstance(v, dict) and v.get("jcr:primaryType") == "cq:Page"]
+                if kids:
+                    pub["start"] = f"{author}{pub['site']}/{kids[0]}.html{WCM}"
+                    pub["first_page"] = kids[0]
+            except Exception:
+                pass  # the parent page stays the start: one unreachable child must not lose the listing
+    return {"root": root, "author": author, "count": len(out), "publications": out}
+
+
 def site_for_pdf(pdf_path: str, root_url: str, cfg: dict, lang: str = "en") -> dict:
     """The guide of a prod PDF's product in AEM Sites, searched under the folder `root_url` names: every topic
     page there records the map it was published from (basePath) and its guide's language page (indexPath). The

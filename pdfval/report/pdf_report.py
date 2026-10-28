@@ -83,7 +83,10 @@ def _pct_status(c: dict) -> str:
 
 
 INCLUDE_ALL = {"summary": True, "genuine": True, "critical": True, "coverage": False, "truncated": True,
-               "sections": True, "toc": True, "toc_compare": True, "stylemap": True, "issues": True, "screenshots": True}
+               "sections": True, "toc": True, "toc_compare": True, "stylemap": True, "issues": True,
+               # "nav": the Left navigation listing (the whole TOC against the left navigation,
+               # entry by entry). Its own report measures it; the consolidated file leaves it out.
+               "screenshots": True, "typescale": True, "nav": True}
 
 # picture issues the PDF report itself shows (with prod / stage screenshots): size and resolution
 PDF_IMAGE_TYPES = {"image smaller", "image bigger", "size / aspect", "image pixelated", "image vertical alignment",
@@ -106,6 +109,56 @@ GENUINE = {"include": {"summary": True, "categories": False, "genuine": "counts"
            # ... and a picture's own text and artwork (callout numbers, labels, leader lines missing in stage): every
            # image issue is in this report as well, so nothing found about a picture has to be looked up elsewhere
            "filter": {"genuine_only": True, "no_images": True, "keep_types": sorted(PDF_IMAGE_TYPES), "picture_text": True}}
+
+# The consolidated report: one file per publication, the run's metrics and the CONTENT differences.
+# Nothing else - no pictures, no icons, no tables, no hyperlinks, no bullets or indents, no TOC, no
+# design spec. All of those are still found and still written in full to genuine-issues.pdf and the
+# image report; this file answers one question, "does stage say what prod says".
+CONSOLIDATED_TYPES = (
+    # the text itself: missing, added, changed, moved, repeated, or emphasised differently
+    "missing text", "extra text", "changed text", "punctuation character", "diacritic",
+    "superscript character", "spacing", "wide gap", "paragraph break", "reordered",
+    "duplicate content", "content in wrong section", "emphasis", "label joined", "text highlight",
+    # content at section level: a heading reworded, a whole section gone, added or repeated
+    "heading text", "missing section", "extra section", "duplicate section",
+    # ... and every way a PICTURE can be aligned differently in stage. Prod centres the board
+    # illustration and stage sets it left; a caption row that stood level under its pictures is
+    # stacked; an icon that sat beside its word is pushed onto the next line. All of these are
+    # differences a reader sees at once, so they belong in the one file handed over.
+    "image alignment", "image vertical alignment", "spec image alignment",
+    "icon alignment", "icon wraps to next line",
+    "caption row", "picture row", "picture text row",
+)
+
+# METRICS_ONLY - the stage PDF's report cut down to the numbers.
+# The summary metrics and nothing else: no TOC or table of contents, no TOC comparison, no left
+# navigation, no Figma design-spec type scale, no section listing, no stylemap, no issue pages and
+# no screenshots. Nothing is listed issue by issue, so the report never states that content is
+# missing - "data missing" and every other finding type stays out of it with the issue pages.
+# STAGE_REPORT - genuine-issues.pdf with four sections taken out: the table of contents, the
+# TOC comparison, the left navigation and the hyperlinks listing. Everything else that report
+# carries is kept untouched - every genuine issue with its prod / stage screenshots, the content
+# findings and the picture findings included.
+STAGE_REPORT = {"include": {**GENUINE["include"], "toc": False, "toc_compare": False, "nav": False,
+                            "site_links": False},
+                "filter": dict(GENUINE["filter"])}
+
+METRICS_ONLY = {"include": {"summary": True, "genuine": "counts", "categories": False, "css": False,
+                            "critical": False, "coverage": False, "truncated": False, "sections": False,
+                            "toc": False, "toc_compare": False, "nav": False, "stylemap": False,
+                            "issues": True, "screenshots": True, "typescale": False,
+                            "site_margin": False, "site_fontsize": False, "site_links": False,
+                            "site_images": True},
+                # the metrics, then the CONTENT and the PICTURE issues with their screenshots.
+                # Nothing else: no TOC or table of contents, no TOC comparison, no left navigation,
+                # no design-spec font sizes, no CSS, layout, tables, bullets or hyperlinks.
+                "filter": {"genuine_only": True,
+                           "types": sorted(set(CONSOLIDATED_TYPES) | PDF_IMAGE_TYPES),
+                           "picture_text": True}}
+
+CONSOLIDATED_BODY = {"include": {**GENUINE["include"], "typescale": False, "toc": False, "toc_compare": False,
+                                 "nav": False},
+                     "filter": {"genuine_only": True, "types": sorted(CONSOLIDATED_TYPES)}}
 
 # content.docx - the content review on its own. Is the text there, is it emphasised the same way, do the
 # hyperlinks work and arrive where prod's arrive, and is the text aligned the same. Nothing else: no
@@ -276,6 +329,12 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
     can loop forever when a long table starts part-way down a page after another table).
     include: which parts to render (INCLUDE_ALL keys); note: the filters applied."""
     inc = {**INCLUDE_ALL, **(include or {})}
+    if not any((inc["summary"], inc["critical"], inc["sections"], inc["toc"], inc["stylemap"],
+                inc.get("coverage"), inc.get("css"), inc.get("categories"))):
+        # a scoped report (report/new_report.py) whose pages are its issue list: no front page at all.
+        # Built before the run's summary is read, so such a report does not need one to exist - the
+        # caller still gets a first block to title, which is all it indexes.
+        return ["<h1>PDF Parity Report</h1>"]
     sm, meta = result["summary"], result["meta"]
     doc_row = lambda label, m: (f"<tr><th>{label}</th><td>{escape(m['url'])} (web page, rendered and read from its DOM)</td></tr>"
                                 if m.get("url") else
@@ -297,9 +356,12 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
         f"{sm['content']['missing_words']} missing · {sm['content']['extra_words']} extra · "
         f"{sm['content']['spacing_issues']} spacing · pass ≥ {sm['content']['pass_pct']}%, warn ≥ {sm['content']['warn_pct']}% · "
         f"sections {sm['content']['pass']} pass / {sm['content']['warn']} warn / {sm['content']['fail']} fail</td></tr>",
-        f"<tr><th>Critical / breaking</th><td><b style='color:{'#b42318' if sm['critical']['total'] else '#16a34a'}'>"
-        f"{sm['critical']['total']}</b> " + (" · ".join(f"{v} × {escape(k)}" for k, v in sm["critical"]["by_kind"].items())
-                                             or "— no missing sections, rows, images, files, links or glyphs") + "</td></tr>",
+        # [include] critical: the breakdown names what is absent (sections, rows, images). A report
+        # asked for the metrics alone leaves the row out rather than listing missing content.
+        (f"<tr><th>Critical / breaking</th><td><b style='color:{'#b42318' if sm['critical']['total'] else '#16a34a'}'>"
+         f"{sm['critical']['total']}</b> " + (" · ".join(f"{v} × {escape(k)}" for k, v in sm["critical"]["by_kind"].items())
+                                              or "— no missing sections, rows, images, files, links or glyphs")
+         + "</td></tr>") if inc.get("critical", True) else "",
         (f"<tr><th>CSS / layout</th><td>{sm['css']['issues']} issues (style {sm['css']['style']}, layout {sm['css']['layout']}) "
          "— reported separately, not part of the content %</td></tr>" if inc.get("css", True) else ""),
         "<tr><th>All findings</th><td>" + " · ".join(f"<b style='color:{CHECK_COLOR.get(k, '#475569')}'>{k}</b> {v}"
@@ -322,7 +384,9 @@ def _summary_html(result: dict, include: dict | None = None, note: str = "", n_i
                         + (" · ".join(f"{escape(t)} {n}" for t, n in bc["types"].items()) or "—") + "</td></tr>")
         html.append("</table>")
     typo = meta.get("typography")
-    if inc["summary"] and typo and typo.get("styles"):  # the Figma type scale the typography issues refer to
+    # the Figma type scale the typography issues refer to. Its own switch, not the summary's: the
+    # consolidated report wants the metrics without the spec table (see writer.CONSOLIDATED_BODY)
+    if inc["summary"] and inc.get("typescale", True) and typo and typo.get("styles"):
         m = typo.get("margins") or {}
         th = typo.get("theme") or {}
         theme = (f" Theme <b>{escape(th['name'])}</b> (accent {escape(th.get('accent') or '')}), "
@@ -916,9 +980,16 @@ def _text(c: "_Canvas", x: float, y: float, text: str, color: str, bold: bool) -
     tw.write_text(c.page, color=_rgb(color))
 
 
-def _section_header(c: _Canvas, s: dict, cont: bool = False):
-    # a passing section needs no badge here: only WARN / FAIL are worth flagging
-    status = [(s["status"].upper(), STATUS_COLOR[s["status"]], True)] if s["status"] != "pass" else []
+def _section_header(c: _Canvas, s: dict, cont: bool = False, status_label: tuple[str, str] | None = None):
+    # a passing section needs no badge here: only WARN / FAIL are worth flagging. A scoped report can
+    # hand over its own wording (options["status_label"]): report/new_report.py lists checks a person
+    # still has to look at, so its sections are marked MANUAL REVIEW rather than FAIL.
+    if s["status"] == "pass":
+        status = []
+    elif status_label:
+        status = [(status_label[0], status_label[1], True)]
+    else:
+        status = [(s["status"].upper(), STATUS_COLOR[s["status"]], True)]
     c.runs([(s["title"] + (" (cont.)" if cont else "") + "   ", "#1d2330", True), *status], 13)
     c.runs([(f"Prod p.{s['baseline']['start']['page'] + 1}–{s['baseline']['end']['page'] + 1}  ·  "
              f"Stage p.{s['candidate']['start']['page'] + 1}–{s['candidate']['end']['page'] + 1}  ·  "
@@ -1180,10 +1251,12 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
           progress: Callable[[float, str], None] | None = None, options: dict | None = None,
           filename: str = "report.pdf") -> Path:
     """options = {"include": {summary, critical, sections, toc, stylemap, issues, screenshots: bool},
-                  "filter": {categories, types, severities, critical_only, sections, q}}"""
+                  "filter": {categories, types, severities, critical_only, sections, q},
+                  "status_label": (text, colour) for the badge on a section that does not pass}"""
     out = Path(out_dir)
     opts = options or {}
     inc = {**INCLUDE_ALL, **(opts.get("include") or {})}
+    status_label = opts.get("status_label")
     issues = select_issues(result, opts.get("filter"), severities) if inc["issues"] else []
     note = describe(opts.get("filter"), len(issues)) if options else ""
     toc = result.get("toc") if inc.get("toc_compare") else None
@@ -1228,11 +1301,19 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
         _toc_section(c, toc, result["meta"].get("mode") == "html", out)
     site = result.get("site")
     if site and not site.get("error"):
-        _nav_section(c, site)
-        _margin_break_section(c, site, out)
-        _font_size_section(c, site, out)
-        _image_section(c, site, out)
-        _hyperlinks_section(c, site, out)
+        # the site checklist sections are issue listings like any other: a report built for the
+        # metrics alone (METRICS_ONLY) carries none of them, and the design-spec font-size table
+        # follows the same switch as the Figma type scale it measures against
+        if inc.get("nav", True):
+            _nav_section(c, site)
+        if inc.get("site_margin", True):
+            _margin_break_section(c, site, out)
+        if inc.get("typescale", True) and inc.get("site_fontsize", True):
+            _font_size_section(c, site, out)
+        if inc.get("site_images", True):
+            _image_section(c, site, out)
+        if inc.get("site_links", True):
+            _hyperlinks_section(c, site, out)
     col_w, gap, max_h = (c.width - 16) / 2, 16, 320
     current = group = None
     for k, (s, f) in enumerate(issues):
@@ -1295,11 +1376,11 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
                 c.new_page()
             elif c.y > c.M:
                 c.y += 10
-            _section_header(c, s)
+            _section_header(c, s, status_label=status_label)
             current = s
         elif not c.room(need):
             c.new_page()
-            _section_header(c, s, cont=True)
+            _section_header(c, s, cont=True, status_label=status_label)
         pa = f"p.{f['baseline'][0]['page'] + 1}" if f["baseline"] else "—"
         pc = f"p.{f['candidate'][0]['page'] + 1}" if f["candidate"] else "—"
         c.runs(([(f["bug"] + "  ·  ", "#1d2330", True)] if f.get("bug") else [])
@@ -1311,7 +1392,7 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
         for label, line, colour, red in msg_lines:
             if not c.room(12.2):
                 c.new_page()
-                _section_header(c, s, cont=True)
+                _section_header(c, s, cont=True, status_label=status_label)
             body = [(line, "#1d2330", False)]
             if red and any(red):
                 body, k = [], 0
@@ -1328,7 +1409,7 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
                     (a["guid"] + ("  ↗" if a.get("url") else ""), "#0f766e", True, a.get("url")), (near, "#6a7282", False)], 8)
         if img_h and not c.room(img_h + 16 + (11 if a else 0)):
             c.new_page()
-            _section_header(c, s, cont=True)
+            _section_header(c, s, cont=True, status_label=status_label)
         if img_h:
             c.y += 2
             for col, (side, label) in enumerate((("baseline", "PROD"), ("candidate", "STAGE"))):

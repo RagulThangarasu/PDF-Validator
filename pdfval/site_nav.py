@@ -636,11 +636,13 @@ def _same(a: str, b: str, ratio: float = 0.9) -> bool:
 
 
 def _row(group: str, status: str, item: str, expected: str = "", actual: str = "", page: str = "", note: str = "",
-         where: str = "", shot: dict | None = None, kind: str = "") -> dict:
+         where: str = "", shot: dict | None = None, kind: str = "", body: bool = False) -> dict:
     r = {"group": group, "status": status, "item": item, "expected": expected, "actual": actual,
          "page": page, "note": note, "where": where}
     if kind:  # what the row is about, for reports that pick out one kind of issue (report/aem_site_report.py)
         r["kind"] = kind
+    if body:  # a hyperlink in the page body (not the chrome), for report/body_link_report.py
+        r["body"] = True
     if shot:  # {"page_shot": "site-shots/<hash>.png", "box": [x0, y0, x1, y1]} - crops a screenshot for the report
         r["shot"] = shot
     return r
@@ -758,7 +760,7 @@ def _guid_link_rows(pages: list[dict]) -> list[dict]:
             if isinstance(it, dict) and it.get("href"):
                 chrome.append({"text": it.get("text", ""), "href": it.get("href", ""),
                                "where": it.get("where", ""), "box": it.get("box")})
-        for it in (p.get("content_links") or []) + chrome:
+        for it, in_body in [(x, True) for x in (p.get("content_links") or [])] + [(x, False) for x in chrome]:
             href, text = it.get("href") or "", it.get("text") or ""
             in_href, in_text = _GUID.search(href), _GUID.search(text)
             if not in_href and not in_text:
@@ -769,7 +771,7 @@ def _guid_link_rows(pages: list[dict]) -> list[dict]:
                              (in_href or in_text).group(0), p["url"],
                              f"The link's {where_found} still carries the DITA topic's GUID - "
                              f"\u201c{text[:40] or href[:60]}\u201d \u2192 {href[:120]}",
-                             it.get("where", ""), shot=shot, kind="link-guid"))
+                             it.get("where", ""), shot=shot, kind="link-guid", body=in_body))
     return rows
 
 
@@ -1140,16 +1142,17 @@ def evaluate(site: dict, baseline: str, cfg: dict | None = None, typography_cfg:
             rows.append(_row("layout", "pass", "Page layout", "",
                              f"{len(p.get('images') or [])} picture(s) present", p["url"]))
 
-    # ---- links in the content itself: every cross-reference opens (no broken link, no dead anchor).
-    # Their text is a phrase in a sentence, not the target page's title, so only that the link opens is
-    # checked - [site] check_content_links = false to drop
-    if cfg.get("check_content_links", True):
+    # ---- links in the content itself: every cross-reference opens (no broken link, no dead anchor) and
+    # does not land on a raw DITA GUID address. Their text is a phrase in a sentence, not the target
+    # page's title, so only that the link opens is checked - [site] check_body_links = false to drop.
+    # These rows are tagged `body`: report/body_link_report.py is built from them alone
+    if cfg.get("check_body_links", cfg.get("check_content_links", True)):
         for p in pages:
             for it in p.get("content_links") or []:
                 if not it.get("href"):
                     continue
                 rows.append(_link_row("links", it.get("text") or _short(it["href"]), it["href"], links, p["url"],
-                                      shot=shot_of(p, it), check_title=False))
+                                      shot=shot_of(p, it), check_title=False, body=True))
 
     # ---- breadcrumb: present above the H1, each crumb's link opens (no broken link) and lands on the
     # right page (no wrong redirect), and the gap above the H1 matches the spec (config/typography.toml
@@ -1244,27 +1247,38 @@ def _short(u: str) -> str:
 
 
 def _link_row(group: str, text: str, href: str, links: dict, page: str, shot: dict | None = None,
-              check_title: bool = True) -> dict:
+              check_title: bool = True, body: bool = False) -> dict:
     k = key(href)
     st = links.get(k)
     frag = href.split("#", 1)[1] if "#" in href else ""
     if urlsplit(href).scheme not in ("http", "https"):
-        return _row(group, "warn", text, "a page link", href, page, "Not an http(s) link", shot=shot, kind="link-not-http")
+        return _row(group, "warn", text, "a page link", href, page, "Not an http(s) link", shot=shot,
+                    kind="link-not-http", body=body)
     if not st:
-        return _row(group, "warn", text, "opens", "not checked", page, href, shot=shot, kind="link-unchecked")
+        return _row(group, "warn", text, "opens", "not checked", page, href, shot=shot, kind="link-unchecked", body=body)
     if st.get("error") or not 0 < st.get("status", 0) < 400:
         return _row(group, "fail", text, "HTTP 200", st.get("error") or f"HTTP {st['status']}", page, href, shot=shot,
-                    kind="link-broken")
+                    kind="link-broken", body=body)
     landed = st.get("h1") or re.split(r"\s+[|–-]\s+", st.get("title") or "")[0]
     if frag and frag not in (st.get("ids") or []):
         return _row(group, "fail", text, f"#{frag} on {_short(href)}", "anchor not found", page, href, shot=shot,
-                    kind="link-broken")
+                    kind="link-broken", body=body)
+    # the link opens, but the address it ends on carries a DITA GUID: a readable address that redirects to
+    # the raw GUID page (GUID-17f6ffdc-….html). The reader lands on a page whose URL is not shareable and
+    # whose title AEM never resolved - reported even though the HTTP status is fine
+    final = st.get("url") or ""
+    redirected = _GUID.search(final)
+    if redirected and not _GUID.search(href):
+        return _row(group, "fail", text, "a readable page address", redirected.group(0), page,
+                    f"The link redirects to a GUID address — {href[:120]} → {final[:160]}", shot=shot,
+                    kind="link-guid-redirect", body=body)
     # a left-nav / pager link's own text is the target page's title: it must match. A breadcrumb crumb's
     # label ("Home", a category name) is not: check_title=False there - only that the link opens, not what it says
     if check_title and landed and not _same(landed, text, 0.8) and not _same(st.get("title", ""), text, 0.8) and not frag:
         return _row(group, "fail", text, text, f"opens “{landed}”", page, f"{href} → {st.get('url', '')}", shot=shot,
-                    kind="link-wrong-target")
-    return _row(group, "pass", text, text, landed or f"HTTP {st['status']}", page, href, shot=shot, kind="link-ok")
+                    kind="link-wrong-target", body=body)
+    return _row(group, "pass", text, text, landed or f"HTTP {st['status']}", page, href, shot=shot, kind="link-ok",
+                body=body)
 
 
 def _words(doc, limit: int = 0) -> set[str]:

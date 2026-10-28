@@ -138,8 +138,9 @@ def _drawn_pair_geometry(u, x: "Image", y: "Image", acfg: dict, icon_w: float) -
     whose prod pictures are all drawn - FrameMaker artwork - no picture was ever measured.)"""
     out = []
     rel_x, rel_y = _rel_width(u.a, x), _rel_width(u.b, y)
-    if max(rel_x, rel_y) < icon_w or rel_x <= 0:
+    if rel_x <= 0:
         return out
+    icon = max(rel_x, rel_y) < icon_w  # an icon: size/geometry is skipped, alignment is still checked below
     grow = rel_y / rel_x - 1
     wx, hx = x.bbox[2] - x.bbox[0], x.bbox[3] - x.bbox[1]
     wy, hy = y.bbox[2] - y.bbox[0], y.bbox[3] - y.bbox[1]
@@ -150,7 +151,7 @@ def _drawn_pair_geometry(u, x: "Image", y: "Image", acfg: dict, icon_w: float) -
     web = u.b.raw_tables is not None
     same_shape = hx > 0 and hy > 0 and 0.85 <= (wy / hy) / (wx / hx) <= 1.18
     confirmed = same_shape if web else (hx > 0 and (hy / hx - 1) * grow > 0 and abs(hy / hx - 1) > 0.5 * abs(grow))
-    if size_reported(rel_x, rel_y, acfg) and confirmed:
+    if not icon and size_reported(rel_x, rel_y, acfg) and confirmed:
         out.append(Finding(
             "assets", acfg.get("geometry_severity", "warning"),
             f"Image {'smaller' if grow < 0 else 'bigger'} in stage by {abs(grow):.0%} (prod p.{x.page + 1} ↔ stage p.{y.page + 1}): "
@@ -179,8 +180,15 @@ def _drawn_pair_geometry(u, x: "Image", y: "Image", acfg: dict, icon_w: float) -
 def size_reported(rel_x: float, rel_y: float, acfg: dict) -> bool:
     """A size difference worth reporting: the stage picture grew or shrank by more than [assets]
     size_ratio_tolerance (relative, default 5 %) or width_tolerance (as a fraction of the content box) -
-    either direction, not only a big shrink, so every real size change is captured with its exact numbers."""
+    either direction, not only a big shrink, so every real size change is captured with its exact numbers.
+
+    [assets] smaller_report_under narrows that for shrinking alone: set to 0.6 only a picture drawn at
+    under 60 % of the original is reported, and every smaller change is left alone. 0 = report them all
+    (the default), and it never affects a picture that grew."""
     if rel_x <= 0:
+        return False
+    floor = acfg.get("smaller_report_under", 0.0)
+    if floor and rel_y < rel_x and rel_y / rel_x >= floor:
         return False
     return abs(rel_x - rel_y) > acfg.get("width_tolerance", 0.10) or \
         abs(rel_y / rel_x - 1) > acfg.get("size_ratio_tolerance", 0.05)
@@ -1767,7 +1775,9 @@ def check(u: Unit) -> list[Finding]:
             # [assets] alignment_sides_only: only a complete move from one side to the other (left <-> right)
             side = lambda a: a.split()[0] if a.split() and a.split()[0] in ("left", "right") else None
             sides_ok = not acfg.get("alignment_sides_only", True) or (side(al_x) and side(al_y) and side(al_x) != side(al_y))
-            if (max(rel_x, rel_y) >= icon_w and al_x != al_y and sides_ok and
+            # no icon_w floor here (unlike size/blur/distortion below): an icon's alignment (e.g. centred in
+            # prod, left-aligned in stage) is exactly the kind of difference a reader notices on the page
+            if (al_x != al_y and sides_ok and
                 not (al_x.startswith("indented") and al_y.startswith("indented")) and
                 not skip_center and shift >= acfg.get("align_min_shift", 0.15)):
                 problems.append(f"alignment {al_x} → {al_y}")

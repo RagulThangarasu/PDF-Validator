@@ -117,9 +117,14 @@ def _stroke_ratio(A, wa, B, wb) -> float | None:
 def _emphasis(u: Unit, scfg: dict, rcfg: dict) -> list[Finding]:
     """Bold vs plain and italic vs upright of the same words, prod vs stage - also when fonts, sizes
     and colours are checked against the design spec only: emphasis marks what the reader must
-    notice (a button name, a warning), so it is part of the text. Font-weight steps within
-    plain (400 vs 500) or within bold (600 vs 800) are the spec's business."""
-    bold = lambda st: st.weight >= 600
+    notice (a button name, a warning), so it is part of the text.
+
+    What counts as bold is [style] emphasis_bold_over: a word heavier than that weight is bold, the
+    rest is plain, and only a word that crosses the line is reported. At the default 400 that means
+    anything above normal - Medium (500) and Semibold (600) included - reads as bold against plain
+    text, which is what a reader sees; steps on the same side of the line (Light 300 vs Regular 400,
+    Semibold 600 vs Bold 700) are the design spec's business and are not reported here."""
+    bold = lambda st: st.weight > scfg.get("emphasis_bold_over", 400)
     # running text only - about the body size, not a heading: headings and titles are set by the
     # template (a display font regular in one PDF, bold in the other: the spec's business), tiny
     # figure numbers are part of the artwork
@@ -166,7 +171,7 @@ def _emphasis(u: Unit, scfg: dict, rcfg: dict) -> list[Finding]:
             groups[(wa.role, 700 if ba else 400, 700 if bb else 400, sa.italic, sb.italic)].append((i, j))
     wname = lambda w: _WEIGHT_NAME.get(w, str(w))
     name = lambda w, it: f"{wname(w)} ({w})" + (" italic" if it else "")
-    plain = lambda w, it: ("bold" if w >= 600 else "plain") + (" italic" if it else "")
+    plain = lambda w, it: ("bold" if w > scfg.get("emphasis_bold_over", 400) else "plain") + (" italic" if it else "")
     findings = []
     for (role, wa_, wb_, ia, ib), pairs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         if len(pairs) < scfg.get("min_words", 1):

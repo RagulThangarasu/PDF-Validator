@@ -1,0 +1,399 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Link check &amp; Guide A ⇄ B</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #fff; --ink: #1b2130; --muted: #667085; --line: #e4e7ec; --soft: #f9fafb;
+    --accent: #0f766e; --accent-ink: #fff; --accent-soft: color-mix(in srgb, var(--accent) 12%, var(--bg));
+    --fail: #d92d20; --warn: #b54708; --pass: #067647;
+    --radius: 10px; --shadow: 0 1px 2px rgb(16 24 40 / .06), 0 1px 3px rgb(16 24 40 / .08);
+  }
+  :root[data-theme="dark"] { --bg:#0f1218; --panel:#171b23; --ink:#e6e8ec; --muted:#98a2b3; --line:#2a303b; --soft:#1d222c;
+    --accent:#2dd4bf; --accent-ink:#042f2e; --fail:#f97066; --warn:#fdb022; --pass:#47cd89; --shadow:none; }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme="system"] { --bg:#0f1218; --panel:#171b23; --ink:#e6e8ec; --muted:#98a2b3; --line:#2a303b; --soft:#1d222c;
+      --accent:#2dd4bf; --accent-ink:#042f2e; --fail:#f97066; --warn:#fdb022; --pass:#47cd89; --shadow:none; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  header.top { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:24px; padding:0 24px; height:56px;
+               background:var(--panel); border-bottom:1px solid var(--line); }
+  .brand { font-weight:700; display:flex; align-items:center; gap:8px; }
+  .brand .logo { width:26px; height:26px; border-radius:7px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:13px; }
+  nav a { color:var(--muted); padding:17px 2px; margin-right:18px; border-bottom:2px solid transparent; }
+  nav a.on { color:var(--ink); border-bottom-color:var(--accent); }
+  main { max-width:1320px; margin:0 auto; padding:24px; }
+  h1 { font-size:22px; margin:0 0 4px; } h2 { font-size:16px; margin:0 0 12px; }
+  .muted { color:var(--muted); } .small { font-size:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:18px; margin-bottom:16px; }
+  .btn { border:1px solid var(--line); background:var(--panel); padding:8px 14px; border-radius:8px; cursor:pointer;
+         display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
+  .btn.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+  .btn[disabled] { opacity:.5; cursor:not-allowed; }
+  .btn.sm { padding:5px 10px; font-size:13px; }
+  textarea { width:100%; min-height:160px; padding:10px 12px; border:1px solid var(--line); border-radius:8px;
+             background:var(--soft); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; resize:vertical; }
+  input[type=text], input[type=password], input[type=number] { padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--soft); }
+  .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .spacer { flex:1 1 auto; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; font-size:13px; }
+  th { background:var(--soft); font-weight:600; position:sticky; top:0; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; }
+  .tile { border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--soft); }
+  .tile b { display:block; font-size:22px; line-height:1.2; }
+  .pill { font-size:11.5px; padding:1px 7px; border-radius:999px; border:1px solid var(--line); white-space:nowrap; }
+  .f { color:var(--fail); border-color:color-mix(in srgb, var(--fail) 40%, var(--line)); }
+  .p { color:var(--pass); border-color:color-mix(in srgb, var(--pass) 40%, var(--line)); }
+  .s { color:var(--muted); }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; word-break:break-all; }
+  .topic { border:1px solid var(--line); border-radius:8px; margin-bottom:10px; overflow:hidden; }
+  .topic > summary { padding:10px 12px; cursor:pointer; background:var(--soft); }
+  .topic > div { padding:0 12px 10px; }
+  .bar { height:6px; background:var(--line); border-radius:999px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--accent); width:0; transition:width .3s; }
+</style>
+
+<header class="top">
+  <div class="brand"><span class="logo">PV</span> pdfval</div>
+  <nav><a href="/">Runs</a><a href="/links" class="on">Link check &amp; Guide A ⇄ B</a><a href="/pdfdiff">PDF A ⇄ B</a></nav>
+</header>
+
+<main>
+  <h1>Link check &amp; Guide A ⇄ B</h1>
+  <p class="muted">Paste the guide URLs, one per line. Each guide is crawled through its own left navigation, and every
+    link in a topic's body is <b>captured</b> - its text and its address. The link's own page is never opened or crawled:
+    the address is only asked what it answers. There is no prod PDF and no comparison. A link fails when its address
+    carries a DITA GUID (in the address or in the label), when it redirects onto a GUID address, or when it does not
+    answer (HTTP 4xx / 5xx, no response, a dead <code>#anchor</code>). Each topic is reported with its own GUID, read
+    from the page.</p>
+  <p class="muted small">The guides on the AEM author server need an AEM login: AEM answers a request without a session
+    with its own sign-in page, so without it every topic would come back as “AEM Sign In”. Leave the two fields empty to
+    use the login saved on the Runs page.</p>
+  <p class="muted small"><b>Validating one guide tree against another (A ⇄ B)?</b> List the publications under the
+    “AEM Sites folder — A” and “AEM Sites folder — B” boxes below - once both are listed, a <b>Validate A ⇄ B</b>
+    button appears for the products both trees share. It crawls every topic of each product's left navigation on both
+    sides (not just the one page you may have pasted above) and compares every rendering: text, tables, images, layout
+    measures, and a side-by-side screenshot of each difference - a combined PDF/CSV report is built when it finishes.</p>
+
+  <div class="card">
+    <textarea id="urls" placeholder="http://server:4502/content/guide/consumer/monitor/gr10/en/introduction.html&#10;http://server:4502/content/guide/consumer/projector/w5800/en/overview.html"></textarea>
+    <div class="row" style="margin-top:10px;gap:8px;align-items:center">
+      <label class="small muted" style="flex:1;min-width:280px">AEM Sites folder — A
+        <input type="text" id="root" style="width:100%" placeholder="http://139.59.13.139:4502/sites.html/content/guide/rs-joshi/en"></label>
+      <button class="btn sm" id="list-pubs" type="button" title="List every publication under this folder — the map-level parent page of each one — and add the ones you pick to the list above">List publications</button>
+    </div>
+    <div id="pubs" class="small" style="margin-top:8px"></div>
+    <!-- a second tree, listed and crawled exactly like the first: both sets of start URLs go into the
+         one list above, so one run covers them -->
+    <div class="row" style="margin-top:10px;gap:8px;align-items:center">
+      <label class="small muted" style="flex:1;min-width:280px">AEM Sites folder — B <span class="small">(optional)</span>
+        <input type="text" id="rootB" style="width:100%" placeholder="http://139.59.13.139:4502/sites.html/content/guide/rs-joshi/post-script/en"></label>
+      <button class="btn sm" id="list-pubs-b" type="button" title="The same for the second folder — its publications are added to the same list">List publications</button>
+    </div>
+    <div id="pubsB" class="small" style="margin-top:8px"></div>
+    <!-- once both sides are listed: the products they share, paired by name -->
+    <div id="match" class="small" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:10px">
+      <label class="small muted">AEM user <input type="text" id="user" size="12" placeholder="from settings"></label>
+      <label class="small muted">password <input type="password" id="password" size="12" placeholder="from settings"></label>
+      <label class="small muted">max topics per guide <input type="number" id="maxp" min="0" value="0" style="width:70px"> <span class="small">0 = all</span></label>
+      <label class="small muted" title="How many guides are crawled at the same time, each in its own browser. Higher is faster; too high and the AEM server becomes the bottleneck.">guides at a time <input type="number" id="conc" min="1" max="12" value="6" style="width:60px"></label>
+      <label class="small muted" title="Report only whether the words match: text that differs, is missing or was added. Formatting, CSS, layout, links, tables and pictures are all left out."><input type="checkbox" id="contentonly"> content only</label>
+      <span class="spacer"></span>
+      <button class="btn primary" id="run">Check links</button>
+    </div>
+    <div id="progress" style="margin-top:12px; display:none">
+      <div class="bar"><i id="barfill"></i></div>
+      <div class="small muted" id="msg" style="margin-top:6px"></div>
+    </div>
+    <div id="err" class="small" style="color:var(--fail); margin-top:10px; display:none"></div>
+  </div>
+
+  <div id="cmp"></div>
+  <div id="out"></div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let timer = null;
+
+// the URL list survives a reload: a long list is tedious to retype
+try { $('#urls').value = localStorage.getItem('linkcheck.urls') || ''; } catch (e) {}
+$('#urls').addEventListener('input', () => { try { localStorage.setItem('linkcheck.urls', $('#urls').value); } catch (e) {} });
+
+// ---- publications under a folder of AEM Sites: the map-level parent page of each one. The listing is
+// AEM's own: every published topic records the publication it belongs to, and they are grouped by it.
+
+const LISTED = {};            // "pubs" -> A's publications, "pubsB" -> B's
+
+const productOf = p => ((p.site || '').replace(/\/+$/, '').split('/').pop() || '');
+
+// A and B publish the same manual under different roots, so the product name - the last segment of the
+// index path - is what pairs them. Not the position in the list, and not the page title: the two sides
+// may word a title differently, and a product missing from one side would shift every pair after it.
+function drawMatch() {
+  const A = LISTED['pubs'] || [], B = LISTED['pubsB'] || [];
+  if (!A.length || !B.length) { $('#match').innerHTML = ''; return; }
+  const a = new Map(A.map(p => [productOf(p), p])), b = new Map(B.map(p => [productOf(p), p]));
+  const both = [...a.keys()].filter(k => b.has(k)).sort();
+  const onlyA = [...a.keys()].filter(k => !b.has(k)).sort();
+  const onlyB = [...b.keys()].filter(k => !a.has(k)).sort();
+  MATCH = both.map(k => ({ product: k, a: a.get(k).start || a.get(k).url, b: b.get(k).start || b.get(k).url,
+                           a_pages: a.get(k).pages, b_pages: b.get(k).pages }));
+  $('#match').innerHTML = `<div class="card" style="padding:12px">
+    <div class="row" style="margin-bottom:8px"><b>${both.length} product(s) in both trees</b>
+      <span class="muted">· only in A: ${onlyA.length} · only in B: ${onlyB.length}</span>
+      <span class="spacer"></span>
+      <button class="btn sm primary" id="cmp-run" type="button"
+        title="Crawl each product's left navigation on both sides and compare the two renderings topic by topic">Validate A ⇄ B</button></div>
+    <div id="cmperr" class="small" style="color:var(--fail); margin-top:8px; display:none"></div>
+    <table><tr><th>Product</th><th>A — starts at</th><th class="n">topics</th><th>B — starts at</th><th class="n">topics</th></tr>
+    ${MATCH.map(m => `<tr><td><b>${esc(m.product)}</b></td>
+      <td class="muted"><code>${esc((m.a || '').split('/').pop())}</code></td><td class="n">${m.a_pages}</td>
+      <td class="muted"><code>${esc((m.b || '').split('/').pop())}</code></td><td class="n">${m.b_pages}</td></tr>`).join('')}
+    </table>
+    ${onlyA.length ? `<div class="small muted" style="margin-top:6px">Only in A (not compared): ${esc(onlyA.join(', '))}</div>` : ''}
+    ${onlyB.length ? `<div class="small muted" style="margin-top:4px">Only in B (not compared): ${esc(onlyB.join(', '))}</div>` : ''}
+    </div>`;
+  $('#cmp-run').onclick = startCompare;
+}
+let MATCH = [];
+
+function listPublications(rootSel, outSel, label) {
+  return async () => {
+  const root = $(rootSel).value.trim();
+  const OUT = outSel, PUBSKEY = label;
+  $('#err').style.display = 'none';
+  if (!root) { $(OUT).innerHTML = '<span class="muted">Paste the Sites folder first.</span>'; return; }
+  $(OUT).innerHTML = '<span class="muted">Asking AEM…</span>';
+  const r = await fetch(`/api/aem/publications?root=${encodeURIComponent(root)}&lang=${encodeURIComponent($('#lang')?.value || '')}`);
+  const j = await r.json();
+  if (!r.ok) {
+    $(OUT).innerHTML = '';
+    $('#err').textContent = (j.error || 'Could not list the publications')
+      + ' — the AEM login is needed for this: enter it below, or sign in on the Runs page.';
+    $('#err').style.display = 'block';
+    return;
+  }
+  const PUBS = j.publications || [];
+  LISTED[PUBSKEY] = PUBS;      // kept so A and B can be paired once both are listed
+  if (!PUBS.length) { $(OUT).innerHTML = `<span class="muted">No publication found under <code>${esc(j.root)}</code>.</span>`; return; }
+  $(OUT).innerHTML = `<div class="card" style="padding:12px">
+    <div class="row" style="margin-bottom:8px"><b>${PUBS.length} publication(s) under <code>${esc(j.root)}</code></b>
+      <span class="spacer"></span>
+      <button class="btn sm" id="${PUBSKEY}-all" type="button">Select all</button>
+      <button class="btn sm" id="${PUBSKEY}-none" type="button">Select none</button>
+      <button class="btn sm primary" id="${PUBSKEY}-add" type="button">Add to the list above</button></div>
+    <table><tr><th></th><th>Publication (map-level parent)</th><th>Map</th><th>Topics</th></tr>
+    ${PUBS.map((p, i) => `<tr>
+      <td><input type="checkbox" class="${PUBSKEY}-pub" data-i="${i}" checked></td>
+      <td><b>${esc(p.title || '')}</b><div class="muted"><code>${esc(p.site)}</code></div>
+          <div class="muted">crawl starts at <code>${esc((p.start || '').split('/').pop())}</code></div></td>
+      <td class="muted"><code>${esc((p.map || '').split('/').pop())}</code>${(p.maps || []).length > 1 ? ` <span class="muted">+${p.maps.length - 1} more</span>` : ''}</td>
+      <td>${p.pages}</td></tr>`).join('')}
+    </table></div>`;
+  drawMatch();
+  $('#' + PUBSKEY + '-all').onclick = () => document.querySelectorAll('.' + PUBSKEY + '-pub').forEach(c => c.checked = true);
+  $('#' + PUBSKEY + '-none').onclick = () => document.querySelectorAll('.' + PUBSKEY + '-pub').forEach(c => c.checked = false);
+  $('#' + PUBSKEY + '-add').onclick = () => {
+    const picked = [...document.querySelectorAll('.' + PUBSKEY + '-pub:checked')].map(c => PUBS[+c.dataset.i].start);
+    const have = new Set($('#urls').value.split(/\s+/).filter(Boolean));
+    const add = picked.filter(u => !have.has(u));
+    $('#urls').value = [...$('#urls').value.split(/\s+/).filter(Boolean), ...add].join('\n');
+    try { localStorage.setItem('linkcheck.urls', $('#urls').value); } catch (e) {}
+    $(OUT).insertAdjacentHTML('beforeend',
+      `<div class="small muted" style="margin-top:6px">${add.length} URL(s) added${picked.length - add.length ? `, ${picked.length - add.length} were already in the list` : ''}.</div>`);
+  };
+  };
+}
+
+// ---- A ⇄ B: every topic of each matched product, both renderings compared
+// the compare and the link check are two independent runs on this page, so each shows its own error
+// by its own button: a message left over from one must never sit under the other's.
+function cmpErr(text) {
+  const box = $('#cmperr');
+  if (!box) return;
+  box.textContent = text || '';
+  box.style.display = text ? 'block' : 'none';
+}
+
+async function startCompare() {
+  cmpErr('');
+  const body = { pairs: MATCH, user: $('#user').value, password: $('#password').value,
+                 max_topics: +$('#maxp').value || 0, concurrency: +$('#conc').value || 6,
+                 content_only: $('#contentonly').checked };
+  const r = await fetch('/api/sitediff', { method: 'POST', body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) { cmpErr(j.error || 'Could not start'); return; }
+  pollCompare();
+}
+
+async function pollCompare() {
+  const j = await (await fetch('/api/sitediff')).json();
+  const box = $('#cmp');
+  cmpErr(j.error || '');   // cleared as soon as the run reports none, so nothing stale is left behind
+  if (j.running || j.summary) {
+    const rows = (j.summary || []).map(p => `<tr><td>${esc(p.product)}</td><td class="n">${p.topics}</td>
+      <td class="n" style="color:${p.differences ? 'var(--fail)' : 'var(--pass)'}"><b>${p.differences || '—'}</b></td>
+      <td class="n">${p.only_a || '—'}</td><td class="n">${p.only_b || '—'}</td>
+      <td class="small" style="color:var(--fail)">${esc((p.error || '').slice(0, 60))}</td></tr>`).join('');
+    box.innerHTML = `<div class="card" style="padding:12px;margin-top:10px">
+      <div class="row"><b>A ⇄ B validation</b><span class="muted">${esc(j.message || '')}</span>
+        <span class="spacer"></span>
+        ${j.summary ? `<a class="btn sm" href="/api/sitediff/pdf">⬇ Combined PDF</a>
+                       <a class="btn sm" href="/api/sitediff/csv">CSV</a>` : ''}</div>
+      ${rows ? `<table style="margin-top:8px"><tr><th>Product</th><th class="n">Topics</th>
+        <th class="n">Differences</th><th class="n">Only A</th><th class="n">Only B</th><th></th></tr>${rows}</table>` : ''}
+    </div>`;
+  }
+  clearTimeout(CMPTIMER);
+  if (j.running) CMPTIMER = setTimeout(pollCompare, 1500);
+}
+let CMPTIMER = null;
+
+$('#list-pubs').onclick = listPublications('#root', '#pubs', 'pubs');
+$('#list-pubs-b').onclick = listPublications('#rootB', '#pubsB', 'pubsB');
+
+$('#run').onclick = async () => {
+  $('#err').style.display = 'none';
+  // Listing publications only fills the table; the URLs reach the box through "Add to the list above".
+  // Pressing Check links straight after a listing used to fail with "No http(s) URL in the list", which
+  // said nothing about the button that was missed - so the ticked publications are taken as the list.
+  let urls = $('#urls').value.trim();
+  if (!urls) {
+    const picked = [].concat(...Object.keys(LISTED).map(k =>
+      [...document.querySelectorAll('.' + k + '-pub:checked')].map(c => (LISTED[k][+c.dataset.i] || {}).start)));
+    urls = picked.filter(Boolean).join('\n');
+    if (urls) {
+      $('#urls').value = urls;
+      try { localStorage.setItem('linkcheck.urls', urls); } catch (e) {}
+    }
+  }
+  if (!urls) {
+    $('#err').textContent = 'Nothing to check yet: paste the guide URLs above, or list the publications '
+      + 'of a Sites folder and press "Add to the list above".';
+    $('#err').style.display = 'block';
+    return;
+  }
+  const body = { urls, user: $('#user').value, password: $('#password').value, max_pages: +$('#maxp').value || 0, concurrency: +$('#conc').value || 6 };
+  const r = await fetch('/api/linkcheck', { method: 'POST', body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) { $('#err').textContent = j.error || 'Could not start'; $('#err').style.display = 'block'; return; }
+  poll();
+};
+
+async function poll() {
+  const j = await (await fetch('/api/linkcheck')).json();
+  if (!j.error) { $('#err').textContent = ''; $('#err').style.display = 'none'; }
+  else { $('#err').textContent = j.error; $('#err').style.display = 'block'; }
+  render(j);
+  clearTimeout(timer);
+  if (j.running) timer = setTimeout(poll, 1200);
+}
+
+// the reports kept aside: “before” is the baseline (the state the guides were in before the fixes),
+// “after” the run to read against it. Each lives in runs/_linkcheck/<label>/ and is not touched by the
+// next check, so the comparison is still there tomorrow.
+function saved(j) {
+  const rows = Object.entries(j.saved || {});
+  if (!rows.length) return '';
+  const link = (label, name, text) => `<a class="btn sm" href="/api/linkcheck/saved/${label}/${name}">${text}</a>`;
+  return `<div style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+    <b class="small">Saved reports</b>
+    ${rows.map(([label, m]) => {
+      const t = m.totals || {};
+      return `<div class="row" style="margin-top:8px;gap:8px;align-items:center">
+        <span class="pill p" style="text-transform:capitalize">${esc(label)}</span>
+        <span class="small muted">saved ${esc((m.saved || '').replace('T', ' '))} · from run ${esc(m.run || '')}
+          ${t.failed != null ? ` · <b style="color:var(--${t.failed ? 'fail' : 'pass'})">${t.failed} failing</b> of ${t.links} link(s) in ${t.topics} topic(s)` : ''}</span>
+        <span class="spacer"></span>
+        ${(m.files || []).includes('link-check-failures.pdf') ? link(label, 'link-check-failures.pdf', '⬇ Failures (PDF)') : ''}
+        ${(m.files || []).includes('link-check.pdf') ? link(label, 'link-check.pdf', '⬇ Full (PDF)') : ''}
+        ${(m.files || []).includes('link-check.csv') ? link(label, 'link-check.csv', '⬇ CSV') : ''}
+      </div>`;
+    }).join('')}</div>`;
+}
+
+async function saveAs(label) {
+  $('#err').style.display = 'none';
+  const r = await fetch('/api/linkcheck/save', { method: 'POST', body: JSON.stringify({ label }) });
+  const j = await r.json();
+  if (!r.ok) { $('#err').textContent = j.error || 'Could not save the report'; $('#err').style.display = 'block'; return; }
+  poll();
+}
+
+function render(j) {
+  $('#run').disabled = !!j.running;
+  $('#progress').style.display = j.running || j.message === 'Done' ? 'block' : 'none';
+  $('#msg').textContent = j.message || '';
+  $('#barfill').style.width = j.running ? '60%' : (j.totals ? '100%' : '0');
+  if (j.error) { $('#err').textContent = j.error; $('#err').style.display = 'block'; }
+  if (!j.totals) { if (!j.running) $('#out').innerHTML = ''; return; }
+  const t = j.totals;
+  const tile = (n, label, cls) => `<div class="tile"><b class="${cls || ''}" style="${cls ? 'color:var(--' + cls + ')' : ''}">${n}</b><span class="small muted">${label}</span></div>`;
+  let html = `<div class="card">
+    <div class="row" style="margin-bottom:12px"><h2 style="margin:0">Result</h2><span class="spacer"></span>
+      <a class="btn sm" href="/api/linkcheck/failures_pdf">⬇ Failures only (PDF)</a>
+      <a class="btn sm" href="/api/linkcheck/pdf">⬇ Full report (PDF)</a>
+      <a class="btn sm" href="/api/linkcheck/csv">⬇ CSV</a>
+      <button class="btn sm" data-save="before" title="Keep this run's reports as the “before” report — the state the guides are in now, to read a later run against. It is copied into runs/_linkcheck/before/ and survives the next check.">Save as “before”</button>
+      <button class="btn sm" data-save="after" title="Keep this run's reports as the “after” report, in runs/_linkcheck/after/">Save as “after”</button></div>
+    <div class="small muted" style="margin:-4px 0 10px">${t.not_crawled
+      ? `<b style="color:var(--warn)">${t.topics} of ${t.nav_topics} topics crawled — ${t.not_crawled} left out by the “max topics per guide” limit.</b> Set it to 0 to crawl every topic of every left navigation.`
+      : `Every topic of every guide's left navigation was crawled (${t.topics} topic(s)), and every link in their bodies captured.`}</div>
+    <div class="tiles">
+      ${tile(t.guides, 'guides')}${tile(t.nav_topics ?? t.topics, 'topics in the nav')}
+      ${tile(t.topics, 'topics crawled', t.not_crawled ? 'warn' : '')}${tile(t.links, 'links checked')}
+      ${tile(t.failed, 'failing', t.failed ? 'fail' : 'pass')}${tile(t.broken, 'do not open')}
+      ${tile(t.guid_links, 'GUID links')}${tile(t.skipped, 'not checked')}
+      ${tile(t.topics_without_guid, 'topics with no GUID')}${tile(t.page_errors, 'pages that did not open', t.page_errors ? 'fail' : '')}
+    </div>${saved(j)}</div>`;
+
+  for (const g of j.guides) {
+    const inNav = g.nav_items || (g.pages || []).length, missed = g.not_crawled || 0;
+    html += `<div class="card"><h2>${esc(g.title || g.start)}</h2><div class="small muted" style="margin-bottom:10px"><code>${esc(g.start)}</code>
+      <div style="margin-top:3px">${(g.pages || []).length} of ${inNav} topic(s) in the left navigation crawled${
+        missed ? ` · <span style="color:var(--warn)">${missed} not crawled</span>` : ''} · ${
+        (g.pages || []).reduce((n, p) => n + (p.links || []).length, 0)} link(s) in their bodies</div></div>`;
+    if (g.error) html += `<p style="color:var(--fail)"><b>${esc(g.error)}</b></p>`;
+    for (const p of g.pages) {
+      const bad = (p.links || []).filter(l => l.status === 'fail');
+      const open = bad.length || p.error ? ' open' : '';
+      html += `<details class="topic"${open}><summary>
+        <b>${esc(p.title || p.nav_text || p.url)}</b>
+        <span class="pill ${bad.length ? 'f' : 'p'}" style="margin-left:8px">${bad.length} failing</span>
+        <span class="small muted" style="margin-left:8px">${(p.links || []).length} link(s)</span>
+        <div class="small muted" style="margin-top:3px">GUID: ${p.guid ? '<code>' + esc(p.guid) + '</code>' : '<span style="color:var(--warn)">not on the page</span>'}
+          · <a href="${esc(p.url)}" target="_blank" rel="noopener">open the topic</a></div></summary><div>`;
+      if (p.error) html += `<p style="color:var(--fail)"><b>${esc(p.error)}</b></p>`;
+      if (!(p.links || []).length) html += '<p class="small muted">No links in this topic.</p>';
+      else {
+        html += '<table><tr><th>Link text</th><th>Address</th><th>Status</th><th>What is wrong</th></tr>';
+        for (const l of p.links) {
+          const cls = l.status === 'fail' ? 'f' : l.status === 'skip' ? 's' : 'p';
+          html += `<tr><td>${esc(l.text || '(no text)')}</td>
+            <td><code><a href="${esc(l.href)}" target="_blank" rel="noopener">${esc((l.href || '').slice(0, 110))}</a></code></td>
+            <td><span class="pill ${cls}">${esc(l.kind || '')}</span></td>
+            <td class="small muted">${esc(l.note || '')}</td></tr>`;
+        }
+        html += '</table>';
+      }
+      html += '</div></details>';
+    }
+    html += '</div>';
+  }
+  $('#out').innerHTML = html;
+}
+
+// the result is re-rendered on every poll, so the save buttons are handled once, here, by delegation
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-save]');
+  if (b) saveAs(b.dataset.save);
+});
+poll();
+</script>
