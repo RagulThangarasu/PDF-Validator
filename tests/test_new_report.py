@@ -50,16 +50,7 @@ def test_everything_else_is_out(typ):
     assert new_report.issue_ids(_result([_f("1", [typ])])) == []
 
 
-def test_report_types_covers_everything_the_report_lists():
-    """report/shots.py renders a screenshot for each of these: if the report can list a type that
-    REPORT_TYPES leaves out, that finding reaches the report with no picture to show."""
-    for typ in sorted(new_report.REPORT_TYPES):
-        f = _f("1", [typ])
-        if typ in new_report.SIZE_TYPES:
-            f["detail"] = {"baseline_width": 100, "candidate_width": 50}
-        if typ in new_report.TOC_TYPES:
-            f["check"] = "toc"
-        assert new_report.issue_ids(_result([f])) == ["1"], typ
+
 
 
 # --- 2. a picture 40 % smaller or bigger ------------------------------------------------------------
@@ -231,3 +222,17 @@ def test_the_run_says_whether_it_has_one(tmp_path):
     same = engine.compare(_pdf(tmp_path / "c.pdf", letters=False), _pdf(tmp_path / "d.pdf", letters=False), cfg)
     writer.write_new_report(same, out)
     assert same["summary"]["new_report"] == {"issues": 0} and not (out / "new.pdf").exists()
+
+
+def test_report_types_covers_everything_the_report_lists():
+    """report/shots.py renders a screenshot for each of these: if the report can list a type that
+    REPORT_TYPES leaves out, that finding reaches the report with no picture to show."""
+    for typ in sorted(new_report.REPORT_TYPES):
+        if typ in new_report.TOC_TYPES:
+            res = _toc_result(1, typ)
+        elif typ in new_report.SIZE_TYPES:
+            res = _result([_f("1", [typ], "assets",
+                               {"kind": "size", "baseline_width": 1.0, "candidate_width": 0.5})])
+        else:
+            res = _result([_f("1", [typ])])
+        assert new_report.issue_ids(res) == ["1"], typ
