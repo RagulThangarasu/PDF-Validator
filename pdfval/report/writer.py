@@ -403,6 +403,13 @@ def write_content_report(result: dict, out_dir: str | Path) -> Path | None:
         from . import docx_report, pdf_report
     except ImportError:
         return None
+    # This report is scoped by its TYPE list, not by issue group. The reports drop the "formatting"
+    # group by default, and a table finding is in it - so a row, a cell or a whole table missing from
+    # stage was filtered out before the type list was ever consulted, and content missing inside a
+    # table reached no report at all. Clearing the group list here leaves CONTENT_TYPES to decide.
+    meta = {**(result.get("meta") or {})}
+    meta["report"] = {**(meta.get("report") or {}), "exclude_groups": []}
+    result = {**result, "meta": meta}
     if not pdf_report.select_issues(result, pdf_report.CONTENT_REPORT["filter"], None):
         path.unlink(missing_ok=True)
         return None

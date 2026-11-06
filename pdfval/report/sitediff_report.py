@@ -45,7 +45,7 @@ _CASE = {"case"}
 _TABLE_LAYOUT = {"table split", "tables merged", "table border"}
 _GRID = {"picture row", "picture text row", "caption row"}
 
-_KEPT_TYPES = (_NUMBERING_TYPES | {"bullet marker"} | _IMAGE_BREAKING | _ALIGNMENT
+_KEPT_TYPES = (_NUMBERING_TYPES | {"bullet marker", "bullet"} | _IMAGE_BREAKING | _ALIGNMENT
                | _CASE | _TABLE_LAYOUT | _GRID)
 # "spec image alignment" and "table header padding" are judged on B ALONE against the design spec, not
 # against A. They dominated the report - 707 and 95 of 849 findings on the last batch, 83% of it - and

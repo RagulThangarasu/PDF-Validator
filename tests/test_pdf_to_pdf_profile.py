@@ -40,7 +40,9 @@ def test_the_checks_behind_them_are_on(cfg):
     assert cfg["style"]["check_emphasis"] and not cfg["style"]["compare_with_prod"]   # bold only
     assert cfg["layout"]["compare_with_prod"]                                         # alignment A vs B
     assert cfg["tables"]["check_table_margin"] and cfg["tables"]["enabled"]
-    assert cfg["assets"]["check_alignment"] and cfg["assets"]["smaller_report_under"] == 0.5
+    # the half-size floor is off: [assets] smaller_ratio_tolerance (0.10) decides how small is too
+    # small, and a floor above it would have swallowed every shrink between 10 % and 50 %
+    assert cfg["assets"]["check_alignment"] and cfg["assets"]["smaller_report_under"] == 0.0
     assert cfg["content"]["check_wide_gap"] and cfg["content"]["gap_min_chars"] == 3
     assert not cfg["content"]["check_spacing"]        # a single space is never an issue
     assert cfg["content"]["check_callout_icon_label"]
@@ -145,9 +147,15 @@ def _image_pdf(path, width: float, x: float = 72) -> str:
     return str(path)
 
 
-def test_an_image_at_70_percent_is_not_reported(tmp_path, cfg):
-    """Smaller, but not the half-size-or-less the profile asks for."""
+def test_an_image_at_70_percent_is_reported(tmp_path, cfg):
+    """30 % under the original: past the 10 % that counts as too small, so it is reported."""
     a, b = _image_pdf(tmp_path / "a.pdf", 300), _image_pdf(tmp_path / "b.pdf", 210)
+    assert _findings(engine.compare(a, b, cfg), "image smaller")
+
+
+def test_an_image_a_few_per_cent_smaller_is_still_left_alone(tmp_path, cfg):
+    """-5 %: a rendering-level difference, under the 10 % threshold."""
+    a, b = _image_pdf(tmp_path / "a.pdf", 300), _image_pdf(tmp_path / "b.pdf", 285)
     assert not _findings(engine.compare(a, b, cfg), "image smaller")
 
 

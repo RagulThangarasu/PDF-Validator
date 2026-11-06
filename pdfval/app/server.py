@@ -947,6 +947,10 @@ def make_handler(jobs: Jobs, root: Path):
                             found = writer.write_new_report(res, base)
                         if found is not None:
                             target = found
+                    if target.name.endswith("new.pdf") and target.exists():
+                        # the file on disk is "<publication> new.pdf"; hand it over under that name
+                        # rather than whatever the page asked for (which falls back to the run id)
+                        dl = target.name
                     if target.name in writer.DEFERRED and not target.exists() and (base / "results.json").exists():
                         writer.build_deferred(base, target.name)  # a batch run: built on first open
                     if target.name == "side-by-side.pdf" and not target.exists() and (base / "results.json").exists():

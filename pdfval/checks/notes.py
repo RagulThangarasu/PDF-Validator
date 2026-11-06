@@ -248,6 +248,56 @@ def _in_order(na: list[dict], nb: list[dict]) -> list[tuple[dict, dict]]:
     return out
 
 
+_ICON_NAME = {"pencil": "a pencil", "exclamation": "an exclamation mark", "triangle": "a warning triangle",
+              "lightbulb": "a lightbulb", "info": "an info circle"}
+
+
+def _icon_kinds(doc: Doc, notes_: list[dict]) -> dict:
+    """{id(note): the kind of icon drawn left of it} for the notes whose icon is recognised."""
+    from . import callout_icons
+    out = {}
+    for n in notes_:
+        try:
+            box = callout_icons.icon_left_of(doc, Loc(n["page"], n["bbox"]))
+            k = callout_icons.kind(doc, n["page"], box) if box else None
+        except Exception:
+            k = None
+        if k:
+            out[id(n)] = k
+    return out
+
+
+def _compare_icons(A: Doc, B: Doc, na: list[dict], nb: list[dict], typ: str, name: str, ncfg: dict):
+    """The icon beside a callout, prod against stage. Both sides label the note the same ("Note"), so
+    nothing in the text says they differ - but prod draws an info circle where stage draws a pencil,
+    and that is the first thing the reader sees.
+
+    Only a pair where BOTH icons are recognised is reported: an icon the detector cannot name is left
+    alone rather than guessed at. Prod's icon with stage's same icon plus the label beside it is the
+    same kind, so it never fires - that is house style, not a difference."""
+    ka, kb = _icon_kinds(A, na), _icon_kinds(B, nb)
+    if not ka or not kb:
+        return []
+    pairs, seen = [], []
+    for a_note, b_note in _pair_by_position(na, nb):
+        x, y = ka.get(id(a_note)), kb.get(id(b_note))
+        if not x or not y or x == y:
+            continue
+        pairs.append([a_note["page"], a_note["bbox"], b_note["page"], b_note["bbox"]])
+        seen.append((x, y))
+    if not pairs:
+        return []
+    x, y = Counter(seen).most_common(1)[0][0]
+    return [Finding(
+        "style", ncfg.get("icon_severity", "warning"),
+        f"{name} icon differs: prod draws {_ICON_NAME.get(x, x)}, stage {_ICON_NAME.get(y, y)} "
+        f"({len(pairs)} of {len(na)} {'notes' if typ == 'note' else name + ' notes'})",
+        [Loc(p_, tuple(b_)) for p_, b_, _, _ in pairs][:3],
+        [Loc(p_, tuple(b_)) for _, _, p_, b_ in pairs][:3],
+        {"kind": "note-icon", "note": typ, "baseline_icon": x, "candidate_icon": y, "pairs": pairs},
+        types=["callout icon differs"])]
+
+
 def _pair_by_position(na: list[dict], nb: list[dict]) -> list[tuple[dict, dict]]:
     """Pair each prod note with its nearest stage note of the same type (by page, then vertical
     position), not by raw list position: an extra/missing note on one side shifts every zip() pair
@@ -335,6 +385,8 @@ def compare(A: Doc, B: Doc, cfg: dict) -> list[Finding]:
                     {"kind": "note-style-outlier", "note": typ, "baseline_look": a_note["look"],
                      "candidate_look": b_note["look"]},
                     types=["callout style"]))
+        if ncfg.get("check_icon", True):
+            out += _compare_icons(A, B, na, nb, typ, name, ncfg)
     if ncfg.get("compare_panels", True):
         out += compare_panels(A, B, cfg)
     return out

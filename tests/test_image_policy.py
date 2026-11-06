@@ -48,10 +48,10 @@ def test_missing_artwork_is_reported(tmp_path, cfg):
 
 
 def test_size_difference_is_reported_either_direction(tmp_path, cfg):
-    """A size change is reported, smaller or bigger, on the same threshold: [assets]
-    size_ratio_tolerance (0.05) - the stage picture at 95 % of prod's width or less, or at 105 % or
-    more. Only a difference inside that band (a rendering-level nudge, not a real size change) is left
-    alone."""
+    """A size change is reported in both directions, but each has its own threshold: [assets]
+    smaller_ratio_tolerance (0.10) - the stage picture MORE than 10 % under prod's width - and
+    bigger_ratio_tolerance (0.30) - 30 % or more over it. A difference inside those bands is a
+    rendering-level nudge, not a real size change, and is left alone."""
     a = g.make(tmp_path / "a.pdf", g.base())
     assert [f["types"] for f in _pictures(compare(a, _resized(tmp_path, 0.4), cfg))] == [["image smaller"]]
     big = [t for f in _pictures(compare(a, _resized(tmp_path, 1.8), cfg)) for t in f["types"]]
@@ -63,14 +63,16 @@ def test_size_difference_is_reported_either_direction(tmp_path, cfg):
     assert _pictures(compare(a, _resized(tmp_path, 0.97), cfg)) == []    # -3 %: a rendering-level nudge
 
 
-def test_a_small_size_change_past_5_percent_is_now_reported(tmp_path, cfg):
-    """A picture a few per cent off is a rendering difference, not a defect; past 5 % it is one the
-    reader notices - see tests/test_image_size_threshold.py for the exact boundary."""
+def test_a_size_change_past_each_threshold_is_reported(tmp_path, cfg):
+    """A picture a little off is a rendering difference, not a defect. Shrinking crosses into a defect
+    sooner than growing does - see tests/test_image_size_threshold.py for the exact boundaries."""
     a = g.make(tmp_path / "a.pdf", g.base())
-    for scale, kind in ((0.92, "image smaller"), (0.75, "image smaller"), (1.25, "image bigger")):
+    for scale, kind in ((0.85, "image smaller"), (0.75, "image smaller"), (1.40, "image bigger")):
         types = [t for f in _pictures(compare(a, _resized(tmp_path, scale), cfg)) for t in f["types"]]
         assert kind in types, (scale, types)
     assert _pictures(compare(a, _resized(tmp_path, 0.98), cfg)) == []     # -2 %: within tolerance
+    assert _pictures(compare(a, _resized(tmp_path, 0.95), cfg)) == []     # -5 %: under the 10 % asked for
+    assert _pictures(compare(a, _resized(tmp_path, 1.20), cfg)) == []     # +20 %: under the 30 % asked for
 
 
 def test_size_note_flags_a_web_page_whose_wider_column_disagrees_with_the_percent():

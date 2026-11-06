@@ -117,10 +117,11 @@ GENUINE = {"include": {"summary": True, "categories": False, "genuine": "counts"
 CONSOLIDATED_TYPES = (
     # the text itself: missing, added, changed, moved, repeated, or emphasised differently
     "missing text", "extra text", "changed text", "punctuation character", "diacritic",
+    "case", "case + punctuation",                 # a word cased differently in the language copy
     "superscript character", "spacing", "wide gap", "paragraph break", "reordered",
     "duplicate content", "content in wrong section", "emphasis", "label joined", "text highlight",
     # content at section level: a heading reworded, a whole section gone, added or repeated
-    "heading text", "missing section", "extra section", "duplicate section",
+    "heading text", "outline level", "missing section", "extra section", "duplicate section",
     # ... and every way a PICTURE can be aligned differently in stage. Prod centres the board
     # illustration and stage sets it left; a caption row that stood level under its pictures is
     # stacked; an icon that sat beside its word is pushed onto the next line. All of these are
@@ -128,6 +129,8 @@ CONSOLIDATED_TYPES = (
     "image alignment", "image vertical alignment", "spec image alignment",
     "icon alignment", "icon wraps to next line",
     "caption row", "picture row", "picture text row",
+    # a bullet point missing from stage, or set with another marker
+    "bullet", "bullet marker",
 )
 
 # METRICS_ONLY - the stage PDF's report cut down to the numbers.
@@ -165,10 +168,29 @@ CONSOLIDATED_BODY = {"include": {**GENUINE["include"], "typescale": False, "toc"
 # pictures, tables, TOC, fonts, colours, sizes, spacing, wrapping or page layout.
 CONTENT_TYPES = {
     "missing text", "extra text", "missing section", "extra section",   # content missing from / added to stage
+    "changed text", "heading text",                                     # the words themselves reworded
+    "outline level",                                                    # an H1 in prod set as an H2 in stage
+    # A LANGUAGE COPY says the same thing in another script, so its differences are these: the wrong
+    # character for the script, a mark above or below a letter on one side, a raised character written
+    # flat, and the case of a word. Without them a translated manual reads as having no content issues.
+    "case", "case + punctuation", "punctuation character", "diacritic", "superscript character",
     "emphasis",                                                         # bold / italic on one side only
     "broken link", "missing link",                                      # a hyperlink that does not work
     "link target differs", "link lands elsewhere",                      # ... or that goes somewhere else
     "spec text-align", "list alignment", "row alignment",               # how the text itself is aligned
+    # content missing INSIDE a table: a row, a whole table, or what a cell says
+    "missing row", "missing table", "cell differs", "table to text",
+    # a picture gone from a section, or kept but drawn tiny against prod's
+    "missing image", "broken image", "image smaller",
+    # a note / callout the reader is meant to read, and the labels on a picture
+    # "callout type differs" is NOT here: it fires when stage labels the note ("NOTE:") where prod
+    # shows only the icon. Same pencil icon, with the word beside it - house style, not a defect.
+    "callout style", "callout icon differs",
+    "callout numbers missing", "image label missing", "missing image label",
+    # an icon that no longer sits on the same line as its word, or sits off that line
+    "icon wraps to next line", "icon alignment", "icon missing inline",
+    # a bullet point prod sets that stage does not, or sets with another marker
+    "bullet", "bullet marker",
 }
 CONTENT_REPORT = {"include": {**GENUINE["include"]},
                   "filter": {"genuine_only": True, "types": sorted(CONTENT_TYPES)}}
@@ -1252,11 +1274,14 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
           filename: str = "report.pdf") -> Path:
     """options = {"include": {summary, critical, sections, toc, stylemap, issues, screenshots: bool},
                   "filter": {categories, types, severities, critical_only, sections, q},
-                  "status_label": (text, colour) for the badge on a section that does not pass}"""
+                  "status_label": (text, colour) for the badge on a section that does not pass,
+                  "severity_label": (text, colour) to badge every finding with one wording instead
+                                    of its own HIGH / WARNING / INFO severity}"""
     out = Path(out_dir)
     opts = options or {}
     inc = {**INCLUDE_ALL, **(opts.get("include") or {})}
     status_label = opts.get("status_label")
+    severity_label = opts.get("severity_label")
     issues = select_issues(result, opts.get("filter"), severities) if inc["issues"] else []
     note = describe(opts.get("filter"), len(issues)) if options else ""
     toc = result.get("toc") if inc.get("toc_compare") else None
@@ -1383,9 +1408,14 @@ def build(result: dict, out_dir: str | Path, *, severities: set[str] | None = No
             _section_header(c, s, cont=True, status_label=status_label)
         pa = f"p.{f['baseline'][0]['page'] + 1}" if f["baseline"] else "—"
         pc = f"p.{f['candidate'][0]['page'] + 1}" if f["candidate"] else "—"
+        # a scoped report can badge every finding with one wording instead of its severity
+        # (options["severity_label"]): report/new_report.py lists checks to look at by eye, so each
+        # one reads REVIEW rather than HIGH / WARNING / INFO, and CRITICAL is left off there too.
+        sev = ([severity_label] if severity_label else
+               [(SEV_LABEL.get(f["severity"], f["severity"].upper()), SEV_COLOR[f["severity"]])])
         c.runs(([(f["bug"] + "  ·  ", "#1d2330", True)] if f.get("bug") else [])
-               + ([("CRITICAL  ", "#b42318", True)] if f.get("critical") else [])
-               + [(SEV_LABEL.get(f["severity"], f["severity"].upper()), SEV_COLOR[f["severity"]], True), ("  ·  ", "#6a7282", False),
+               + ([("CRITICAL  ", "#b42318", True)] if f.get("critical") and not severity_label else [])
+               + [(sev[0][0], sev[0][1], True), ("  ·  ", "#6a7282", False),
                 (f.get("issue") if f.get("genuine") else f"{CAT_LABEL.get(f.get('category'), f['check'])} · {', '.join(f.get('types', []))}",
                  f.get("color") or CAT_COLOR.get(f.get("category"), "#333333"), True),
                 (f"  ·  #{f['id']}  ·  prod {pa} ↔ stage {pc}", "#6a7282", False)], 8)

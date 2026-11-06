@@ -910,6 +910,16 @@ def pair_picture_text(a: Doc, b: Doc, cfg: dict, reach: float = 60.0) -> int:
     return n
 
 
+
+def _markers_only(text: str) -> bool:
+    """True when the text holds no word to read - only callout markers: digits, single letters,
+    roman numerals and the brackets or dots around them ("1 2 3", "(a) (b)", "i. ii. iii.")."""
+    toks = [t for t in re.split(r"[\s,;:·•]+", str(text or "")) if t.strip()]
+    if not toks:
+        return False
+    return all(re.fullmatch(r"[(\[]?(?:\d{1,3}|[a-zA-Z]|[ivxIVX]{1,4})[.)\]]?", t) for t in toks)
+
+
 def skip_picture_text(doc: Doc, cfg: dict) -> int:
     """Text that belongs to a picture is artwork, not content: the words on a picture (an embedded image or a
     vector illustration - callout letters “a b c d”, “Computer / gaming console”, port names) and short labels
@@ -2102,6 +2112,7 @@ _WHY = {
     "moved text": ("Text on another line / in another order", "The same words are in stage, on another line or in another order."),
     "reordered": ("Text in another order", "The same words are in stage, in another order."),
     "label only": ("Callout label on one side only", "A note / caution label (e.g. “NOTE:”) is printed on one side only."),
+    "callout icon differs": ("Callout icon differs", "Stage draws another icon beside the callout than prod does (e.g. prod an info circle, stage a pencil)."),
     "callout type differs": ("Callout type differs", "Stage labels the note as another type than prod's icon shows (e.g. IMPORTANT where prod has the warning icon)."),
     "repeated header": ("Repeated table header", "A table header is repeated at a page break on one side only."),
     "continued header": ("“(continued)” header", "A “(continued)” heading is repeated at a page break on one side only."),
@@ -2193,6 +2204,13 @@ def tag(f: dict, genuine_types: set[str], data_min_words: int = 3, exclude_check
     if not everything and gt == ["missing text"] and f["check"] == "content" and not f.get("critical") \
             and f["detail"].get("absent_words", 0) < data_min_words:
         gt = []
+    # ... and bare callout markers are artwork, not data. A picture whose numbers prod sets as text
+    # ("1 2 3 1 2 3 1 3" under three drawings) and stage draws into the image itself was reported as
+    # a missing content block: the numbers are there on the page, just not as text to read back.
+    if not everything and "missing text" in gt and f["check"] == "content" \
+            and _markers_only(f["detail"].get("baseline_text", "")):
+        gt = [t for t in gt if t != "missing text"]
+        f["critical"] = False
     # bullet indent / gap / list level is layout (CSS), not a missing or changed marker
     if not everything and "indent" in types:
         gt = [t for t in gt if t != "bullet"]

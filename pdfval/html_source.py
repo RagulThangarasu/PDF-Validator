@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import math
+import os
 import re
 from pathlib import Path
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -19,6 +20,7 @@ import pymupdf
 from PIL import Image as PILImage
 
 from . import normalize, site_nav
+from .hostgate import host_slot
 from .extract import _measure
 from .model import Doc, Image, Line, PageInfo, Style, Word
 
@@ -331,12 +333,48 @@ def _filter_request(route, own: str) -> None:
         route.continue_()
 
 
+# How many pages this tool asks one web server for at the same time, counted across every run in a batch
+# (see hostgate). 0 turns the throttle off.
+HOST_CONCURRENCY = int(os.environ.get("PDFVAL_HOST_CONCURRENCY") or 0) or 12
+
+# Page-reading browsers running at once on this machine, across every run (see _visit_many).
+BROWSERS_PER_MACHINE = int(os.environ.get("PDFVAL_MAX_BROWSERS") or 0) or max(4, 2 * (os.cpu_count() or 4))
+
+
 def _goto(page, url: str, timeout: int):
     """Open a page: wait for its HTML, then a bounded time for the rest (_settle). Waiting for the "load"
-    event can last forever on an AEM author page (a request that never finishes)."""
-    resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+    event can last forever on an AEM author page (a request that never finishes). The navigation itself
+    waits its turn among every run's pages against this host, so a batch cannot overload one server."""
+    with host_slot(urlsplit(url).netloc, HOST_CONCURRENCY):
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout)
     _settle(page)
     return resp
+
+
+def _nav_reason(e: Exception) -> str:
+    """Why a page could not be opened, short enough for the "skipped pages" list in the report."""
+    msg = str(e).splitlines()[0] if str(e) else e.__class__.__name__
+    if "Timeout" in msg:
+        return "timed out - the site did not answer in time"
+    return msg[:120]
+
+
+def _goto_retry(page, url: str, timeout: int, tries: int = 3):
+    """_goto, retrying a navigation that timed out or was refused. An overloaded server (and AEM under a
+    batch is exactly that) drops or stalls requests that succeed moments later, so one slow page must not
+    be allowed to end a run that has already read seventy others."""
+    for attempt in range(tries):
+        try:
+            resp = _goto(page, url, timeout)
+        except Exception:
+            if attempt == tries - 1:
+                raise
+            page.wait_for_timeout(1_500 * (attempt + 1))  # give the server room before asking again
+            continue
+        if resp is not None and resp.status >= 500 and attempt < tries - 1:
+            page.wait_for_timeout(2_000)  # gateway hiccups are often transient: once more
+            continue
+        return resp
 
 
 def _launch_hint(e: Exception) -> str:
@@ -358,7 +396,8 @@ def _launch_hint(e: Exception) -> str:
 def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEFAULT_EXCLUDE,
             width: int = 1440, wait_ms: int = 500, slice_h: int = 1800, progress=None,
             user: str = "", password: str = "", crawl: bool = False, max_pages: int = 0,
-            site: dict | None = None, toc_l1: list[str] | None = None, concurrency: int = 1) -> tuple[Doc, dict]:
+            site: dict | None = None, toc_l1: list[str] | None = None, concurrency: int = 1,
+            timeout_ms: int = 0, host_concurrency: int = 0) -> tuple[Doc, dict]:
     """Render `url`, extract its structure and write <out_dir>/candidate_source.pdf. Returns (Doc, info).
     user/password (or a login in the URL): sent as HTTP basic auth and, when the site
     shows a sign-in form instead of the page, typed into that form.
@@ -381,7 +420,10 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
     user, password = user or url_user, password or url_password
     # "always": servers like AEM redirect to a login page instead of answering 401
     creds = {"username": user, "password": password, "send": "always"} if user else None
-    timeout = 90_000
+    timeout = timeout_ms or 45_000
+    if host_concurrency:
+        global HOST_CONCURRENCY
+        HOST_CONCURRENCY = host_concurrency
     import time as _time
     t_start = _time.monotonic()
     timing = {"open_s": 0.0, "load_s": 0.0, "read_s": 0.0, "parallel_s": 0.0, "site_s": 0.0, "build_s": 0.0}
@@ -419,16 +461,19 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
                 if _page_key(page.url) != _page_key(u):
                     report(frac, f"Page {k + 1}/{len(queue)}: {titles.get(_page_key(u)) or u}")
                     t0 = _time.monotonic()
-                    resp = _goto(page, u, timeout)
+                    try:
+                        resp = _goto_retry(page, u, timeout)
+                    except Exception as e:
+                        resp, nav_failed = None, _nav_reason(e)
+                    else:
+                        nav_failed = ""
                     timing["load_s"] += _time.monotonic() - t0
-                    if resp is not None and resp.status >= 500:  # gateway hiccups are often transient: once more
-                        page.wait_for_timeout(2_000)
-                        resp = _goto(page, u, timeout)
-                    if (resp is not None and resp.status >= 400) or _login_form(page):
-                        bad = f"HTTP {resp.status}" if resp is not None and resp.status >= 400 else "login form"
+                    if nav_failed or (resp is not None and resp.status >= 400) or _login_form(page):
+                        bad = nav_failed or (f"HTTP {resp.status}" if resp is not None and resp.status >= 400 else "login form")
                         skipped.append({"url": u, "title": titles.get(_page_key(u), ""), "reason": bad})
                         visited[site_nav.key(u)] = {"status": resp.status if resp is not None else 0, "url": page.url,
                                                     "error": "" if resp is not None and resp.status >= 400 else bad, "crawled": True}
+                        report(frac, f"Page {k + 1}/{len(queue)} could not be read ({bad}) - skipped")
                         k += 1
                         continue
                 if crawl and not ordered:  # first page: decide which pages make up the guide, in which order
@@ -574,7 +619,7 @@ def capture(url: str, out_dir: str | Path, *, root: str = "", exclude: str = DEF
 
 def _open(page, url: str, user: str, password: str, timeout: int, wait_ms: int, report) -> None:
     """Load the first page, signing in if the site asks for it; raise a clear error if it cannot be read."""
-    resp = _goto(page, url, timeout)
+    resp = _goto_retry(page, url, timeout)
     if _login_form(page) and user:
         report(0.04, f"Signing in as {user} (up to {_SIGN_IN_MS // 1000} s)")
         _sign_in(page, user, password, timeout, wait_ms)
@@ -582,11 +627,18 @@ def _open(page, url: str, user: str, password: str, timeout: int, wait_ms: int, 
             raise RuntimeError(f"Sign-in failed for user “{user}”: the site still shows its login form "
                                "- check the user name and password")
         report(0.05, "Signed in - opening the page")
-        resp = _goto(page, url, timeout)  # back to the page itself
+        resp = _goto_retry(page, url, timeout)  # back to the page itself
     if resp is not None and resp.status >= 400:
+        # Which URL failed, and whose fault it is. A 5xx is the site's own server failing to build the
+        # page (AEM/Sling answers "500 Metaspace" when its JVM is out of metaspace memory): nothing in
+        # the run form changes that, and saying so saves hunting for a setting that is not wrong.
         hint = (" - the page needs a login: enter the user name and password under “Login” in the run form"
-                if resp.status in (401, 403) else "")
-        raise RuntimeError(f"Web page returned HTTP {resp.status} {resp.status_text}{hint}")
+                if resp.status in (401, 403) else
+                " - the SITE failed to serve this page, so there is nothing to capture. It is not a problem "
+                "with this run or its settings: the page has to come back before it can be validated "
+                "(an AEM instance answering “500 Metaspace” has run out of memory and needs restarting)"
+                if resp.status >= 500 else "")
+        raise RuntimeError(f"Web page returned HTTP {resp.status} {resp.status_text} for {url}{hint}")
     if _login_form(page):  # redirected to a sign-in form
         raise RuntimeError(f"The web page needs a login (it shows a sign-in form: {page.url}). "
                            "Enter the user name and password under “Login” in the run form")
@@ -690,10 +742,10 @@ def _visit_in_tab(page, u: str, root: str, exclude: str, wait_ms: int, slice_h: 
     """Load and read one page in an already-open tab: the same per-page work the serial crawl does (retry a
     gateway hiccup once, skip a login wall or an HTTP error), returned instead of appended straight to the
     document so a parallel worker's tab can run this with no other state to share."""
-    resp = _goto(page, u, timeout)
-    if resp is not None and resp.status >= 500:
-        page.wait_for_timeout(2_000)
-        resp = _goto(page, u, timeout)
+    try:
+        resp = _goto_retry(page, u, timeout)
+    except Exception as e:  # an unreachable page is one skipped page, never the end of the whole run
+        return {"skipped": _nav_reason(e), "status": 0, "url": u}
     if (resp is not None and resp.status >= 400) or _login_form(page):
         bad = f"HTTP {resp.status}" if resp is not None and resp.status >= 400 else "login form"
         return {"skipped": bad, "status": resp.status if resp is not None else 0, "url": page.url}
@@ -758,14 +810,20 @@ def _visit_many(urls: list[tuple[str, str]], *, width: int, creds, session_state
     per worker when its last page completes."""
     from playwright.sync_api import sync_playwright
     out = []
-    with sync_playwright() as p:
+    # Every worker of every run starts a Chromium of its own, so a batch of ten runs would start sixty on one
+    # machine and they would then compete for the cores that render their pages. Capped across all runs: a
+    # worker over the cap waits here and starts once another has finished its chunk.
+    with host_slot("__browsers__", BROWSERS_PER_MACHINE), sync_playwright() as p:
         browser = p.chromium.launch()
         try:
             page = browser.new_page(viewport={"width": width, "height": 1000}, device_scale_factor=1,
                                     http_credentials=creds, storage_state=session_state or None)
             page.route("**/*", lambda route: _filter_request(route, own))
             for u, t in urls:
-                r = _visit_in_tab(page, u, root, exclude, wait_ms, slice_h, timeout, site, out_dir=out_dir)
+                try:
+                    r = _visit_in_tab(page, u, root, exclude, wait_ms, slice_h, timeout, site, out_dir=out_dir)
+                except Exception as e:  # this worker still owes every other page in its chunk
+                    r = {"skipped": _nav_reason(e), "status": 0, "url": u}
                 out.append((u, t, r))
                 on_page(u, t, r)
         finally:
@@ -810,12 +868,20 @@ def _dispatch_parallel(queue: list[str], titles: dict[str, str], k: int, max_pag
                               width=width, creds=creds, session_state=session_state, own=own, root=root,
                               exclude=exclude, wait_ms=wait_ms, slice_h=slice_h, timeout=timeout, site=site,
                               on_page=on_page, out_dir=out_dir) for chunk in chunks if chunk]
+            worker_errors = []
             for fut in as_completed(futs):
-                fut.result()  # surfaces a worker's exception here rather than losing it silently
+                try:
+                    fut.result()
+                except Exception as e:  # a whole worker lost (its browser died): its pages are reported as skipped
+                    worker_errors.append(_nav_reason(e))
+            if worker_errors and not results:  # every worker failed: nothing was read, so this is the run's error
+                raise RuntimeError(f"No page could be read: {worker_errors[0]}")
         for u in rest:
             t, r = results.get(_page_key(u), ("", None))
-            if r is None:
-                continue  # scheduled but a worker never got to it (should not happen; nothing lost, just not in this run)
+            if r is None:  # its worker died before reaching this page: a skipped page, not a missing one
+                skipped.append({"url": u, "title": t, "reason": "the browser reading this page stopped"})
+                visited[site_nav.key(u)] = {"status": 0, "url": u, "error": "browser stopped", "crawled": True}
+                continue
             if r.get("skipped"):
                 skipped.append({"url": u, "title": t, "reason": r["skipped"]})
                 visited[site_nav.key(u)] = {"status": r.get("status", 0), "url": r.get("url", u),
@@ -845,10 +911,44 @@ def _read_page(page, root: str, exclude: str, wait_ms: int, slice_h: int, report
     data = page.evaluate(_EXTRACT_JS, [root, exclude])
     W, H = int(data["width"]), int(math.ceil(data["height"]))
     cuts = _cuts(data, H, slice_h)
-    slices = [page.screenshot(clip={"x": 0, "y": y0, "width": W, "height": y1 - y0}, full_page=True)
-              for y0, y1 in zip(cuts, cuts[1:])]
+    cuts, slices = _shoot_slices(page, W, H, cuts)
     data["cuts"] = cuts
     return data, slices
+
+
+def _shoot_slices(page, W: int, H: int, cuts: list[int]) -> tuple[list[int], list[bytes]]:
+    """One screenshot per slice, clipped to it.
+
+    The cuts are measured from the DOM, but Playwright clips against the image it has just rendered,
+    and the two can disagree: a page that shrinks between the measuring and the shot (lazy content
+    unloaded, a banner collapsed, an animation settling) leaves a cut past the end of the image, and
+    every clip from there on fails with "Clipped area is either empty or outside the resulting image" -
+    losing the whole page over its last few hundred pixels.
+
+    So the fallback does not clip at all: one full-page shot, measured for real, cut up here. The cuts
+    come back with it, clamped to that height, because the caller pairs them with the slices.
+    """
+    if W <= 0 or H <= 0 or len(cuts) < 2:
+        return [0, max(H, 1)], [page.screenshot(full_page=True, timeout=30_000)]
+    try:
+        return cuts, [page.screenshot(clip={"x": 0, "y": y0, "width": W, "height": y1 - y0}, full_page=True)
+                      for y0, y1 in zip(cuts, cuts[1:])]
+    except Exception as e:
+        if "Clipped area" not in str(e):
+            raise
+    whole = PILImage.open(io.BytesIO(page.screenshot(full_page=True, timeout=30_000)))
+    # the shot can be rendered at a device pixel ratio: work in ITS pixels, and give the caller back
+    # the cuts in CSS pixels, which is what the words and boxes it pairs them with are measured in
+    scale = whole.height / H if H else 1.0
+    kept = [c for c in cuts if c < H] or [0]
+    kept = sorted({0, *kept, H})
+    out = []
+    for y0, y1 in zip(kept, kept[1:]):
+        buf = io.BytesIO()
+        whole.crop((0, min(int(y0 * scale), whole.height - 1), whole.width,
+                    min(max(int(y1 * scale), int(y0 * scale) + 1), whole.height))).save(buf, "PNG")
+        out.append(buf.getvalue())
+    return kept, out
 
 
 _NON_PAGE = re.compile(r"\.(pdf|zip|png|jpe?g|gif|svg|webp|mp4|docx?|xlsx?|pptx?|txt|xml|json|js|css)$", re.I)

@@ -366,12 +366,10 @@ def render(result: dict, out_dir: str | Path, mode: str = "all", zoom: float = 2
     from .pdf_report import PDF_IMAGE_TYPES, is_image_issue
     # ... and so do the picture issues that report shows whether genuine or not (size, pixelated)
     # new.pdf lists a fixed set of types whatever their severity and whether or not they are
-    # genuine (text alignment and spacing among them). Without this they reached that report with
-    # no screenshot to show, because nothing else had asked for one to be rendered.
-    from .new_report import (LISTS_AND_EMPHASIS, PICTURE_POSITION, ICON_WRAP, TABLE_MARGIN,
-                             TEXT_ALIGNMENT, TEXT_SPACING, SIZE_TYPES)
-    new_report_types = set(LISTS_AND_EMPHASIS + PICTURE_POSITION + ICON_WRAP + TABLE_MARGIN
-                           + TEXT_ALIGNMENT + TEXT_SPACING + SIZE_TYPES)
+    # genuine. Without this they reached that report with no screenshot to show, because nothing
+    # else had asked for one to be rendered. REPORT_TYPES is that report's own list, so narrowing
+    # it there narrows this too.
+    from .new_report import REPORT_TYPES as new_report_types
     todo = [(s, f) for s in result["sections"] for f in s["findings"]
             if f["severity"] in want or (mode != "none" and f.get("genuine"))
             or (mode != "none" and PDF_IMAGE_TYPES & set(f.get("types") or []))

@@ -123,6 +123,17 @@ spacing_severity = "warning"
 reorder_severity = "info"     # identical text that only moved (e.g. table reading order)
 reorder_min_words = 3         # a move is reported only from N words with letters: a lone callout number ("1"),
                               # symbol or short word read at another point is matched, not reported
+confirm_nearby_pages = true   # before a block is reported missing / extra, it is looked for once more in the
+                              # other PDF on the page it should have landed on and the pages either side:
+                              # stage repaginates, and text the reader can see on the facing page is not missing
+confirm_page_span = 1         # how many pages either side of that page are searched
+confirm_min_words = 2         # blocks of fewer words are left to the checks above: a single word is on too
+                              # many pages for its presence nearby to mean anything
+confirm_duplicate_words = 6   # from this many words, the block has to appear in the other PDF as often as
+                              # on its own side: a sentence stage prints twice and prod once is duplicated
+                              # content, not text that is present
+confirm_skip_footer = 0.08    # the strip at the foot of a page left out of that search: a page number or
+                              # a product name under every page confirms nothing (0 = search the whole page)
 ocr_images = true             # missing prod text is looked for inside the stage pictures (OCR, tesseract):
                               # figure labels / dimension callouts baked into the image are not missing
 ocr_max_words = 60            # only for missing blocks up to this many words
@@ -328,12 +339,15 @@ aspect_tolerance = 0.05       # 5 %
 distorted_tolerance = 0.25    # stage draws a picture >= 25 % out of its own pixel proportions (prod does not)
                               # = stretched / squashed (genuine)
 # A picture's size is reported whenever it is noticeably different, not only when it is grossly so:
-# the stage picture at 95 % of the prod picture's width or less, or at 105 % or more. The two settings
+# the stage picture MORE than 10 % under the prod picture's width, or 30 % or more over it. The settings
 # are OR-ed, so width_tolerance has to stay out of the way (1.0 = a share of the content box that cannot
-# be exceeded) or it would fire first and the ratio below would never decide anything.
+# be exceeded) or it would fire first and the ratios below would never decide anything.
 width_tolerance = 1.0         # off: the ratio decides (0.10 = also report a 10 %-of-content-width shift)
-size_ratio_tolerance = 0.05   # stage picture <= 95 % or >= 105 % of prod's width (image size differs) - either
-                              # direction, smaller or bigger - every size change this size or over is reported
+size_ratio_tolerance = 0.05   # the fallback when the two below are not set (old symmetric behaviour)
+# The two directions are not equally wrong, so they have their own thresholds. A picture drawn small
+# enough that the reader cannot make out what is on it is a defect long before one drawn a little large is.
+smaller_ratio_tolerance = 0.10  # report a stage picture MORE than 10 % smaller than prod's (under 90 % of its width)
+bigger_ratio_tolerance = 0.30   # ... and one 30 % or more BIGGER (130 % of its width or over)
 # The picture issues reported (every report): missing (or not loading), a different picture (not the same picture
 # with / without a red overlay or re-captured: "image marks" / "image version" are not reported), blacked out,
 # pixelated, distorted, duplicated, alignment (a complete move left <-> right only), a picture in the wrong section,
@@ -441,6 +455,13 @@ exclude_groups = ["formatting"]
 crawl = true                  # validate every page of the guide: follow the start page's links to the other
                               # pages under the same folder, in reading order, joined into one document
 max_pages = 0                 # stop after this many pages (0 = no limit)
+timeout_ms = 45000            # how long one page has to answer before it is retried (3 tries, then that page
+                              # is listed as skipped and the rest of the guide carries on - one unreachable
+                              # page no longer ends the whole run)
+host_concurrency = 12         # pages asked of ONE web server at the same time, counted across every run of a
+                              # batch (a batch of ten runs x `concurrency` below would otherwise put sixty
+                              # requests on a single AEM instance, which answers them all slowly until pages
+                              # start timing out). 0 = no limit
 concurrency = 6               # pages fetched at once (separate browser tabs) once the whole guide's page list is
                               # known from its left navigation (one page, one browser each - a tab is its own
                               # OS thread, so pages do not wait on each other's network round trip); 1 = one at a
@@ -556,6 +577,9 @@ types = [
   "missing section", "duplicate section", "extra section",
   # ("repeated section" - a heading repeated as often in stage as in prod - stays out: it is prod's own repetition)
   "heading text",                           # the same section under a heading with other words / another number
+  # an H1 in prod set as an H2 (or the reverse) in stage: the reader sees the chapter demoted in the
+  # heading and in the table of contents, so a heading at another level is a content difference, not styling
+  "outline level",
   "emphasis",                                                        # bold / italic missing (or added)
   "text highlight",                 # a phrase published with an editing highlight still on it (web guide only)
   "label joined",                                                    # bold label + its plain text on one line (prod: 2 lines)
@@ -588,6 +612,9 @@ types = [
   # style, not a defect: see [ignore] types)
   "icon missing", "icon extra", "icon order", "icon above text",   # icons in table rows (missing, swapped, placed above the text)   # a NOTE: label vs an icon only is house style (info, full report only)
   "callout type differs",   # stage labels a note as another type than prod's icon shows (WARNING icon, IMPORTANT label)
+  # a DIFFERENT icon beside the same callout - prod an info circle, stage a pencil. (The same icon with
+  # the label added beside it is house style and never fires: the comparison is icon against icon.)
+  "callout icon differs",
   "row alignment",   # side-by-side items of a prod row at different heights in stage
   "stacked to columns",   # a list broken into columns: text stacked in prod, side by side in stage
   "list alignment",       # the numbers of one numbered list at one left edge in prod, at different indents in stage
@@ -606,6 +633,10 @@ types = [
   "icon missing inline", "icon differs", "icon pixelated",   # icons inside a sentence: missing, another icon, low resolution
   "icon wraps to next line",                # the icon sits beside its word in prod, pushed onto the next line in stage
   "caption row",                            # captions of one row of pictures: level in prod, not in stage
+  "callout style",                          # a Note / Warning box the reader is meant to read, set
+                                             # differently in stage (another icon, another kind of box)
+  "callout numbers missing",                # a picture's callout numbers ("1" "2" "3") gone in stage
+  "image label missing",                    # ... and the labels those numbers point at
   "image alignment",                        # a picture set left / centred / right differently from prod
   "image vertical alignment",               # ... or sitting higher / lower against the text beside it
   "picture row", "picture text row",        # a row of pictures (2 x 2 grid), or a picture and its step

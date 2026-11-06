@@ -178,20 +178,27 @@ def _drawn_pair_geometry(u, x: "Image", y: "Image", acfg: dict, icon_w: float) -
 
 
 def size_reported(rel_x: float, rel_y: float, acfg: dict) -> bool:
-    """A size difference worth reporting: the stage picture grew or shrank by more than [assets]
-    size_ratio_tolerance (relative, default 5 %) or width_tolerance (as a fraction of the content box) -
-    either direction, not only a big shrink, so every real size change is captured with its exact numbers.
+    """A size difference worth reporting. The two directions have their own thresholds, because they are
+    not equally wrong: a picture the reader can no longer make out is a defect at a far smaller change
+    than one drawn a little large. [assets] smaller_ratio_tolerance (default 0.10) reports a picture
+    MORE than 10 % under prod's; bigger_ratio_tolerance (default 0.30) reports one 30 % or more over it.
+    Either falls back to size_ratio_tolerance when it is not set, which keeps an old config symmetric.
+    width_tolerance (as a fraction of the content box) still reports a shift on its own.
 
-    [assets] smaller_report_under narrows that for shrinking alone: set to 0.6 only a picture drawn at
-    under 60 % of the original is reported, and every smaller change is left alone. 0 = report them all
-    (the default), and it never affects a picture that grew."""
+    [assets] smaller_report_under narrows shrinking further: set to 0.6 only a picture drawn at
+    under 60 % of the original is reported. 0 = report them all (the default), and it never affects
+    a picture that grew."""
     if rel_x <= 0:
         return False
     floor = acfg.get("smaller_report_under", 0.0)
     if floor and rel_y < rel_x and rel_y / rel_x >= floor:
         return False
-    return abs(rel_x - rel_y) > acfg.get("width_tolerance", 0.10) or \
-        abs(rel_y / rel_x - 1) > acfg.get("size_ratio_tolerance", 0.05)
+    both = acfg.get("size_ratio_tolerance", 0.05)
+    grow = rel_y / rel_x - 1
+    eps = 1e-9  # a picture at exactly the threshold must not be decided by float rounding
+    over = -grow > acfg.get("smaller_ratio_tolerance", both) + eps if grow < 0 else \
+        grow >= acfg.get("bigger_ratio_tolerance", both) - eps
+    return abs(rel_x - rel_y) > acfg.get("width_tolerance", 0.10) or over
 
 
 def _size_note(wx: float, wy: float, grow: float, web: bool) -> str:

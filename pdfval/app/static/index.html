@@ -978,7 +978,7 @@ async function viewRuns() {
               return `<a class="btn sm" data-dl href="/runs/${r.id}/genuine-issues.pdf?download=pdf-report-${nm}.pdf" title="Download this run's PDF report">⬇ PDF</a>
             ${s && s.new_report && !s.new_report.issues ? '' :
               `<a class="btn sm" data-dl href="/runs/${r.id}/new.pdf?download=${encodeURIComponent((r.name || r.id) + ' new.pdf')}"
-               title="Lists and bold, picture size and position, a wrapped icon, a table past the margin, level 1 TOC entries">⬇ new.pdf${s && s.new_report ? ` (${s.new_report.issues})` : ''}</a>`}
+               title="Content and images only, for review by eye: lists and bold, picture size and position, level 1 TOC entries">⬇ new.pdf${s && s.new_report ? ` (${s.new_report.issues})` : ''}</a>`}
             ${s && s.images && s.images.result === 'pass'
                 ? `<span class="small" style="color:#16a34a" title="No image issue: no image report for this publication">Images ✓ PASS</span>`
                 : `<a class="btn sm" data-dl href="/runs/${r.id}/image-issues.pdf?download=image-report-${nm}.pdf" title="Download this run's image report (picture issues only)">⬇ Images${s && s.images ? ` — FAIL (${s.images.issues})` : ''}</a>`}`; })() : ''}
@@ -1096,7 +1096,7 @@ async function viewRun(id, qs) {
             title="Every issue, each with a description and prod/stage screenshots">⬇ PDF report (${s.genuine.total})</a>
         ${s.new_report && !s.new_report.issues ? '' :
           `<a class="btn" href="${base}new.pdf?download=${encodeURIComponent(id + ' new.pdf')}"
-            title="Lists and bold, a picture 40% smaller or bigger, picture position, an icon wrapped onto the next line, a table past the margin, and level 1 TOC entries">⬇ new.pdf${s.new_report ? ` (${s.new_report.issues})` : ''}</a>`}
+            title="Content and images only, for review by eye: lists and bold, a picture 40% smaller or bigger, picture position, and level 1 TOC entries">⬇ new.pdf${s.new_report ? ` (${s.new_report.issues})` : ''}</a>`}
         <a class="btn" href="${base}genuine-issues.docx?download=${encodeURIComponent('pdf-report-' + id + '.docx')}"
             title="The same issues as a Word document: issues only, with prod/stage screenshots">⬇ PDF report (Word / Docs)</a>
         <a class="btn" href="${base}genuine-issues.csv?download=${encodeURIComponent('pdf-report-' + id + '.csv')}"

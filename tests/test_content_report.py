@@ -1,8 +1,14 @@
 """content.docx - the content review on its own.
 
-It reports only: text missing from or added to stage, bold / italic on one side only, hyperlinks that
-do not work or that arrive somewhere else, and how the text is aligned. Nothing about pictures, tables,
-the TOC, fonts, colours, sizes, spacing or wrapping - see pdf_report.CONTENT_TYPES.
+It answers one question: does stage SAY what prod says, wherever the saying happens - in the running
+text, inside a table, in a callout, on a picture, or in the words of a language copy. So it reports
+text missing or added, a heading reworded or set at another level, the language-copy differences
+(case, script punctuation, diacritics, raised characters), bold / italic on one side only, hyperlinks
+that do not work or arrive elsewhere, a table or a row gone, a picture or its label gone, a picture
+drawn tiny against prod's, a callout drawn with another icon, bullets, and how the text is aligned.
+
+Not reported: fonts, colours, sizes, spacing, wrapping, borders, backgrounds, column widths, the TOC
+and the design spec - see pdf_report.CONTENT_TYPES.
 
 Every issue states Expected (prod) and Actual (stage), and the manuals' own text goes through verbatim,
 whatever script it is written in.
@@ -43,10 +49,27 @@ def _heads(path):
 
 def test_the_types_it_covers_are_exactly_the_ones_asked_for():
     assert pdf_report.CONTENT_TYPES == {
+        # the text itself, and the sections it sits in
         "missing text", "extra text", "missing section", "extra section",
+        "changed text", "heading text", "outline level",
+        # a language copy says the same thing in another script: these are its differences
+        "case", "case + punctuation", "punctuation character", "diacritic", "superscript character",
         "emphasis",
+        # hyperlinks that do not work, or that arrive somewhere else than prod's
         "broken link", "missing link", "link target differs", "link lands elsewhere",
+        # how the text is aligned
         "spec text-align", "list alignment", "row alignment",
+        # content missing INSIDE a table: a row, a whole table, or what a cell says
+        "missing row", "missing table", "cell differs", "table to text",
+        # a picture gone from a section, or kept but drawn tiny against prod's
+        "missing image", "broken image", "image smaller",
+        # a callout the reader is meant to read, and the labels on a picture
+        "callout style", "callout icon differs",
+        "callout numbers missing", "image label missing", "missing image label",
+        # an icon that no longer sits on the same line as its word, or sits off that line
+        "icon wraps to next line", "icon alignment", "icon missing inline",
+        # a bullet point prod sets that stage does not, or sets with another marker
+        "bullet", "bullet marker",
     }
 
 
@@ -89,22 +112,36 @@ def test_it_is_written_with_its_own_parts(tmp_path):
 
 
 def test_it_leaves_out_everything_that_is_not_content(tmp_path):
+    """How a thing is DRAWN is not what it says: fonts, colours, borders and column widths stay out,
+    while a row or a picture missing is content gone and stays in."""
     out = writer.write_content_report(_result(
         _finding("001", ["missing text"], "Missing text", "“Press OK”", "Not in stage"),
-        _finding("002", ["image smaller"], "Image smaller in stage", category="images", check="assets"),
-        _finding("003", ["missing row"], "Table row missing", category="tables", check="tables"),
-        _finding("004", ["spec font-size"], "Font size differs", category="css", check="style"),
+        _finding("002", ["spec font-size"], "Font size differs", category="css", check="style"),
+        _finding("003", ["column width"], "Column width differs", category="tables", check="tables"),
+        _finding("004", ["cell background"], "Cell background differs", category="tables", check="tables"),
     ), tmp_path)
     text = _text(out)
     assert "missing text" in text and "Press OK" in text
-    for gone in ("image smaller", "missing row", "spec font-size"):
+    for gone in ("spec font-size", "column width", "cell background"):
         assert gone not in text, gone
+
+
+def test_content_missing_inside_a_table_or_a_picture_is_kept(tmp_path):
+    """Content is content wherever it is said: in a table row, on a picture, or beside a callout."""
+    out = writer.write_content_report(_result(
+        _finding("001", ["missing row"], "Table row missing", category="tables", check="tables"),
+        _finding("002", ["missing image"], "Image missing in stage", category="images", check="assets"),
+        _finding("003", ["callout icon differs"], "Note icon differs", category="css", check="style"),
+    ), tmp_path)
+    text = _text(out)
+    for kept in ("missing row", "missing image", "callout icon differs"):
+        assert kept in text, kept
 
 
 def test_a_run_with_no_content_issue_writes_no_file(tmp_path):
     (tmp_path / "content.docx").write_bytes(b"stale")      # one left from an earlier run
     out = writer.write_content_report(_result(
-        _finding("001", ["image smaller"], "Image smaller in stage", category="images", check="assets")), tmp_path)
+        _finding("001", ["spec font-size"], "Font size differs", category="css", check="style")), tmp_path)
     assert out is None and not (tmp_path / "content.docx").exists()
 
 

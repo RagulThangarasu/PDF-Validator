@@ -1080,6 +1080,13 @@ def check(u: Unit) -> list[Finding]:
         reordered += found_m
         matched += found_m
         missing, extra = max(0, missing - found_m), max(0, extra - found_e)
+    if ccfg.get("confirm_nearby_pages", True):
+        # last gate before a block is reported missing / extra: is it on the facing page?
+        findings, near_m, near_e = _present_nearby(u, findings, words_of, ccfg.get("confirm_page_span", 1))
+        if near_m or near_e:
+            reordered += near_m
+            matched += near_m
+            missing, extra = max(0, missing - near_m), max(0, extra - near_e)
     findings, swapped = _swapped_blocks(u, findings)
     if swapped:  # those words are on both sides: matched, not missing / extra
         reordered += swapped
@@ -1139,6 +1146,110 @@ def _present_unmatched(u: Unit, findings: list[Finding]) -> tuple[list[Finding],
             got_m += n
         else:
             got_e += n
+    return [f for f in findings if id(f) not in drop], got_m, got_e
+
+
+def _present_nearby(u: Unit, findings: list[Finding], words_of: dict, span: int = 1) -> tuple[list[Finding], int, int]:
+    """Confirm a missing / extra block really is absent before it is reported.
+
+    Stage repaginates: the same sentence sits a page earlier or later, and a block the section-wide
+    comparison could not pair (its words already spent on another occurrence, a figure label read as
+    body text) was reported although the reader can see it on the facing page. So each surviving
+    block is looked for again in the other PDF, on the page it should have landed on and the pages
+    either side of it - this time in the page's whole text, paired words included. Found there, the
+    finding is dropped and its words count as matched. Returns (findings, prod words found, stage
+    words found)."""
+    # a word is cut into its runs of letters and digits, not just stripped of punctuation: the stage
+    # page runs two figure labels together ("bezel)(On"), and as one token that matches nothing
+    toks = lambda t: re.findall(r"[\w°%+]+", t.lower())
+    by_a = sorted(u.pairs)
+
+    pages: dict[int, dict[int, str]] = {}
+
+    def _page_window(text_of: dict[int, str], pno: int, span: int) -> str:
+        return "".join(text_of.get(q, "") for q in range(pno - span, pno + span + 1))
+
+    # the footer is not the section's text: a page number and the product name sit under every page,
+    # so finding them again a page away confirms nothing. Extraction has already dropped the running
+    # furniture it could recognise; this is the narrow strip at the foot for what it could not. Only
+    # the foot - the header band holds a figure's own labels on a page whose artwork starts high.
+    foot = u.cfg["content"].get("confirm_skip_footer", 0.08)
+
+    def page_text(doc, which: int) -> dict[int, str]:
+        """page -> its words, normalised and joined, so a block is one substring search."""
+        if which not in pages:
+            out: dict[int, list[str]] = {}
+            for w in doc.words:
+                h = doc.pages[w.page].height if w.page < len(doc.pages) else 0.0
+                if h and foot and w.bbox[1] >= (1 - foot) * h:
+                    continue          # in the footer strip
+                out.setdefault(w.page, []).extend(toks(w.text))
+            pages[which] = {pno: " " + " ".join(ws) + " " for pno, ws in out.items()}
+        return pages[which]
+
+    def anchor_page(idx: list[int], mine: int) -> int | None:
+        """The page this block should have landed on: the page, read on the other side, of the
+        nearest word of the section that the comparison did pair."""
+        if not idx or not by_a:
+            return None
+        here, there = (0, 1) if mine == 0 else (1, 0)
+        best, dist = None, None
+        for pair in by_a:
+            d = min(abs(pair[here] - idx[0]), abs(pair[here] - idx[-1]))
+            if dist is None or d < dist:
+                best, dist = pair[there], d
+        other = u.b if mine == 0 else u.a
+        return other.words[best].page if best is not None and best < len(other.words) else None
+
+    got_m, got_e = 0, 0
+    drop = set()
+    for f in findings:
+        types = f.types or []
+        if types == ["missing text"]:
+            mine, text, other, at = 0, f.detail.get("baseline_text") or "", u.b, f.candidate_at
+        elif types == ["extra text"]:
+            mine, text, other, at = 1, f.detail.get("candidate_text") or "", u.a, f.baseline_at
+        else:
+            continue
+        block = toks(text)
+        if len(block) < u.cfg["content"].get("confirm_min_words", 2):
+            continue
+        a_idx, b_idx = words_of.get(id(f), ([], []))
+        pno = anchor_page((a_idx if mine == 0 else b_idx), mine)
+        if pno is None:   # nothing paired in this section: the insertion point the finding carries
+            pno = at.page if at else None
+        if pno is None:
+            continue
+        joined = " ".join(block)
+        window = _page_window(page_text(other, mine ^ 1), pno, span)
+        if not window:
+            continue
+        # ... and the same pages of my own side, to tell "it is over there" from "stage says it
+        # twice": text prod has once and stage repeats is duplicated content, not text present
+        mine_doc = u.a if mine == 0 else u.b
+        here_pno = (f.baseline if mine == 0 else f.candidate)
+        here = _page_window(page_text(mine_doc, mine), here_pno[0].page if here_pno else pno, span)
+        count = lambda w, needle: len(re.findall("(?=" + re.escape(needle) + ")", w))
+        # counting copies only means something for a passage long enough to be repeated on purpose:
+        # a sentence stage says twice and prod once is duplicated content, and must stay reported.
+        # For a fragment of a few words - two figure labels run together - the counts swing with the
+        # page break alone, so there it is enough that the words are there at all.
+        dup = len(block) >= u.cfg["content"].get("confirm_duplicate_words", 6)
+        found = count(window, f" {joined} ") >= (max(1, count(here, f" {joined} ")) if dup else 1)
+        if not found:
+            # the same words, broken up on the other side - two figure labels the stage page reads as
+            # one sentence ("bezel)(On the"). At least one word has to carry meaning: a block of
+            # "of the on" is on every page and proves nothing.
+            solid = [k for k in block if len(k) >= 4 or any(ch.isdigit() for ch in k)]
+            found = bool(solid) and all(count(window, f" {k} ") >= (max(1, count(here, f" {k} ")) if dup else 1)
+                                        for k in block)
+        if not found:
+            continue
+        drop.add(id(f))
+        if mine == 0:
+            got_m += len(block)
+        else:
+            got_e += len(block)
     return [f for f in findings if id(f) not in drop], got_m, got_e
 
 

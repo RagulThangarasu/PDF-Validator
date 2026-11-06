@@ -28,10 +28,19 @@ def _result(findings, toc_rows=None):
 
 @pytest.mark.parametrize("typ", ["numbering style", "numbering format", "numbering sequence",
                                  "bullet", "bullet marker", "marker glued", "emphasis",
-                                 "image alignment", "placement",
-                                 "icon wraps to next line", "icon alignment", "table past margin"])
+                                 "image alignment", "placement"])
 def test_the_listed_kinds_are_in(typ):
     assert new_report.issue_ids(_result([_f("1", [typ])])) == ["1"]
+
+
+# the report holds content and pictures only. Icon wrapping, the table margin, text alignment and
+# text spacing are page-setting, not content, and are listed by the run's own reports instead.
+@pytest.mark.parametrize("typ", ["icon wraps to next line", "icon alignment", "table past margin",
+                                 "spec text-align", "list alignment", "row alignment",
+                                 "single column alignment", "table header alignment",
+                                 "wide gap", "word gap", "line height", "paragraph break"])
+def test_the_layout_kinds_are_out(typ):
+    assert new_report.issue_ids(_result([_f("1", [typ])])) == []
 
 
 @pytest.mark.parametrize("typ", ["missing text", "extra text", "changed text", "spacing",
@@ -39,6 +48,18 @@ def test_the_listed_kinds_are_in(typ):
                                  "indent", "line-height", "text-align"])
 def test_everything_else_is_out(typ):
     assert new_report.issue_ids(_result([_f("1", [typ])])) == []
+
+
+def test_report_types_covers_everything_the_report_lists():
+    """report/shots.py renders a screenshot for each of these: if the report can list a type that
+    REPORT_TYPES leaves out, that finding reaches the report with no picture to show."""
+    for typ in sorted(new_report.REPORT_TYPES):
+        f = _f("1", [typ])
+        if typ in new_report.SIZE_TYPES:
+            f["detail"] = {"baseline_width": 100, "candidate_width": 50}
+        if typ in new_report.TOC_TYPES:
+            f["check"] = "toc"
+        assert new_report.issue_ids(_result([f])) == ["1"], typ
 
 
 # --- 2. a picture 40 % smaller or bigger ------------------------------------------------------------

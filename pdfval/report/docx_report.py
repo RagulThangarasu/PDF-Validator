@@ -660,7 +660,11 @@ def _message_lines(f: dict) -> list[tuple[str, str, str]]:
     description, then the "Figma: … / Prod: … / Stage: …" lines its message carries. Several differences
     at one spot ("  ·  " or a blank line apart) are listed one per line, as the PDF report lists them -
     the two reports state the same issue the same way (pdf_report._issue)."""
-    from ..genuine import one_line
+    from ..genuine import one_line as _one_line
+    # The content review is read instead of the document, so a quoted block is printed in full:
+    # "… (+6 more words)" leaves the reviewer unable to tell WHAT is missing, which is the whole
+    # point of this report. The other reports keep the 130-character cut.
+    one_line = lambda t, limit=100000: _one_line(t, limit)
     text = (f.get("description") if f.get("genuine") else None) or concise_message(f)
     parts = [p.strip() for block in (text or "").split("\n\n") for p in block.split("  ·  ") if p.strip()]
     out: list[tuple[str, str, str]] = []

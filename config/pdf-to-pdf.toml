@@ -93,7 +93,9 @@ check_alignment = true        # 5. image position: left / centre / right
 alignment_sides_only = false  # centre -> left counts too, not only left -> right
 ignore_center_alignment = false
 align_min_shift = 0.10
-smaller_report_under = 0.5    # 6. only a picture under 50 % of the original - half size or less
+smaller_report_under = 0.0    # 6. off: [assets] smaller_ratio_tolerance decides - a picture MORE than
+                              # 10 % under the original. A half-size floor sat above that and would have
+                              # swallowed every shrink between 10 % and 50 %, which is the range asked for.
 check_vertical_alignment = false
 picture_text = false
 pixelated_vs_vector = false

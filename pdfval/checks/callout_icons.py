@@ -12,6 +12,8 @@ split into connected parts -
                where the disc is an Important - the two carry the same mark and differ only in outline)
   pencil       its marks (body, point, eraser) along one line slanted 25-65 degrees
   lightbulb    a large round bulb on the vertical axis with flat base stripes below it (a Tip)
+  info         the same two marks as an exclamation the other way up - the dot on top, the bar under
+               it: an "i" on a disc, which prod sets where stage (AEM Guides) draws a pencil
 anything else is not recognised (None): the finding stays as it was.
 """
 from __future__ import annotations
@@ -37,7 +39,11 @@ def icon_left_of(doc: Doc, at: Loc) -> tuple | None:
     x0, y0 = at.bbox[0], at.bbox[1]
     h = max(at.bbox[3] - at.bbox[1], 6)
     boxes = [pymupdf.Rect(i["bbox"]) for i in page.get_image_info()]
-    boxes += [d["rect"] for d in page.get_drawings() if d.get("fill") is not None]
+    # a filled badge (the pencil on its tile) OR an outline drawn with no fill at all: prod sets the
+    # info circle as a stroked ring, which a fill-only test does not see, so the icon was never found
+    # and never compared
+    boxes += [d["rect"] for d in page.get_drawings()
+              if d.get("fill") is not None or d.get("color") is not None]
     cands = [r for r in boxes if 10 <= r.width <= 32 and 10 <= r.height <= 32 and 0.7 <= r.width / r.height <= 1.4
              and r.x1 <= x0 + 2 and x0 - r.x1 <= 50 and r.y0 <= y0 + 3 * h and r.y1 >= y0 - 2 * h]
     if not cands:
@@ -116,10 +122,16 @@ def kind(doc: Doc, page: int, box: tuple) -> str | None:
     # Important; in a triangle it is a Warning, which the two are told apart by here - the icon's own
     # outline, narrow at the top and wide at the foot, against a disc that is as wide at both ends
     if len(geo) == 2:
-        bar, dot = sorted(geo, key=lambda q: q["cy"])
-        if all(abs(q["cx"] - W / 2) <= 0.15 * W for q in (bar, dot)) and bar["h"] >= 2.2 * bar["w"] \
-                and dot["h"] <= 0.6 * bar["h"] and dot["cy"] > bar["cy"] + bar["h"] / 2:
-            return "triangle" if _triangular(g) else "exclamation"
+        top, bottom = sorted(geo, key=lambda q: q["cy"])
+        # an "i" is the same two marks the other way up: the dot on top, the bar under it. Which of the
+        # two is the bar decides which icon this is - an Important/Warning or an info circle - so the
+        # pair is read in whichever order it comes, not assumed to be bar-then-dot.
+        for bar, dot, name in ((top, bottom, "exclamation"), (bottom, top, "info")):
+            if all(abs(q["cx"] - W / 2) <= 0.15 * W for q in (bar, dot)) and bar["h"] >= 2.2 * bar["w"] \
+                    and dot["h"] <= 0.6 * bar["h"] and abs(dot["cy"] - bar["cy"]) > bar["h"] / 2:
+                if name == "exclamation":
+                    return "triangle" if _triangular(g) else "exclamation"
+                return "info"
     # lightbulb: a centred bulb (its body and base stripes may be one mark) that is taller than it is wide,
     # with light rays above and beside it
     big = geo[0]

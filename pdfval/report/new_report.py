@@ -2,19 +2,21 @@
 
 The run's own reports stay as they are. This one is written beside them as `new.pdf`, and is handed
 over under the publication's name: the page downloads it as “<publication> new.pdf” and the batch zip
-stores it under that name. It lists only:
+stores it under that name. It holds CONTENT and IMAGE issues only - what a reader sees in the words and the pictures. Layout
+checks (icon wrapping, the table margin, text alignment and text spacing) are deliberately left out:
+they are page-setting, not content, and the ones that matter here are expected anyway (a wide timing
+table past the margin is fine, and left alignment on a single column or a table header is fine).
+
+It lists only:
 
   1. Lists and emphasis   a number or letter that changed (1,2,3 → a,b,c), a numbering sequence out of
                           order, a bullet point missing or changed, and bold / italic that differs
   2. Picture size         the same picture at 40 % less or 40 % more than its size in prod
   3. Picture position     the same picture moved left / centre / right
-  4. Icon wrapping        an inline icon pushed onto the next line (and one off its line's alignment)
-  5. Table margin         a table wider than the text column, breaking the page margin
-  6. Table of contents     any mismatch on a level 1 entry - missing, extra, renamed, relevelled, wrong page
-  7. Text alignment       text set to another alignment than prod (left / centred / right / justified),
-                          a list or table row out of line, a single column moved
-  8. Text spacing         a gap opened up between words, lines set further apart, a paragraph break
-                          stage has that prod does not
+  4. Table of contents    any mismatch on a level 1 entry - missing, extra, renamed, relevelled, wrong page
+
+Nothing in it is a verdict: every section and every finding is badged REVIEW, for a person to look at
+by eye. The report carries no PASS / FAIL / HIGH / WARNING wording.
 
 The size rule is applied here, on the finding's own numbers, so the report holds what it says whatever
 threshold the run was configured with ([assets] smaller_report_under and friends only decide what the
@@ -24,6 +26,7 @@ Built by report.writer alongside genuine-issues.pdf; [report] new_report = false
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from . import pdf_report
@@ -36,29 +39,37 @@ LISTS_AND_EMPHASIS = ("numbering style", "numbering format", "numbering sequence
 # line the genuine report draws (genuine.tag drops "bullet" from a finding tagged "indent")
 BULLET_LAYOUT = ("indent", "list level", "wrap under number")
 PICTURE_POSITION = ("image alignment", "placement")
-ICON_WRAP = ("icon wraps to next line", "icon alignment")
-TABLE_MARGIN = ("table past margin",)
-# 7 - how the TEXT itself is set: aligned differently from prod (left / centred / right / justified,
-#     a list or table row out of line, a single column moved) ...
-TEXT_ALIGNMENT = ("spec text-align", "list alignment", "row alignment", "single column alignment",
-                  "vertical alignment", "table cell alignment", "table header alignment")
-# 8 - ... and the space in and around it: a gap opened up between words, lines set further apart,
-#     a paragraph break that is not in prod
-TEXT_SPACING = ("spacing", "wide gap", "word gap", "line height", "paragraph break")
+# Icon wrapping, the table margin, text alignment and text spacing used to be listed here. They are
+# page-setting rather than content, so this report no longer carries them; the run's own reports still
+# do. Removing them also drops the two findings that are expected on these publications anyway -
+# "table past margin" and single-column / table-header alignment.
 # the badge beside a section title in this report (pdf_report's own FAIL / WARN wording is a verdict;
 # this report is a list of things to check by eye)
-MANUAL_REVIEW = ("MANUAL REVIEW", "#b45309")
-# 6 - a TOC finding is kept only when the entry it is about is a level 1 one
+MANUAL_REVIEW = ("REVIEW", "#b45309")
+# the same wording on every finding, in place of HIGH / WARNING / INFO
+REVIEW_SEVERITY = ("REVIEW", "#b45309")
+# 4 - a TOC finding is kept only when the entry it is about is a level 1 one
 TOC_TYPES = ("missing entry", "extra entry", "title differs", "level differs", "wrong page", "heading differs")
 # 2 - these carry the two widths; the 40 % is applied to them below
 SIZE_TYPES = ("image smaller", "image bigger")
 
+# every type this report can list, in one place: report/shots.py reads it to make sure a finding that
+# reaches this report has a screenshot rendered for it. Keeping it here is what stops the two drifting
+# apart when the report's scope changes.
+REPORT_TYPES = frozenset(LISTS_AND_EMPHASIS + PICTURE_POSITION + SIZE_TYPES + TOC_TYPES)
+
 # The run's metrics header and issue-count tiles belong to the main report; this one is the list and
 # the screenshots. Leaving them out also keeps the report from depending on result["summary"] /
 # result["toc"] being there at all, so it is built from whatever a run folder holds.
+# The live-site checklist sections are off too: "nav" is the Left navigation / TOC comparison and
+# "typescale" + "site_fontsize" are the Figma design-spec font-size table, neither of which is a
+# content or picture issue; the margin break and the hyperlink listing go with them. They are still
+# written in full to the run's own reports. "site_images" stays on - pictures are in scope here.
 INCLUDE = {"summary": False, "categories": False, "genuine": False, "css": False,
            "critical": False, "coverage": False, "truncated": False, "sections": False,
-           "toc": False, "toc_compare": False, "stylemap": False, "issues": True, "screenshots": True}
+           "toc": False, "toc_compare": False, "stylemap": False, "issues": True, "screenshots": True,
+           "nav": False, "typescale": False, "site_fontsize": False, "site_margin": False,
+           "site_links": False}
 
 
 def _size_change(f: dict) -> float | None:
@@ -100,8 +111,7 @@ def issue_ids(result: dict, size_change: float = 0.40) -> list[str]:
                 # order and bold are reported whatever else the same finding is tagged with: they are
                 # the point of the report and must never fall out of it with the indent.
                 listed = listed - {"bullet"}
-            if listed or types & set(PICTURE_POSITION + ICON_WRAP + TABLE_MARGIN
-                                     + TEXT_ALIGNMENT + TEXT_SPACING):
+            if listed or types & set(PICTURE_POSITION):
                 keep.append(f["id"])
             elif types & set(SIZE_TYPES):
                 change = _size_change(f)
@@ -119,15 +129,18 @@ def build(result: dict, out_dir: str | Path, size_change: float = 0.40) -> Path 
     """Write the run's `new.pdf`. None when this run has none of these issues - and any copy left from
     an earlier run is removed, so a clean run never leaves a stale report.
 
-    The file is `new.pdf`, like every other report in a run folder (`genuine-issues.pdf`,
-    `image-issues.pdf`): one fixed name the page and the batch zip can both reach without knowing what
-    the publication is called. The publication's name goes on the way out - the UI downloads it as
-    “<publication> new.pdf” and the zip stores it under that name.
+    The file carries the publication's name on disk: “<publication> new.pdf”. The page and the batch
+    zip both reach it through the `* new.pdf` glob they already fall back to, so nothing has to know
+    the name in advance; a run whose publication is unknown keeps the plain `new.pdf`.
     """
     out = Path(out_dir)
-    path = out / "new.pdf"
-    for old in out.glob("* new.pdf"):     # the publication-named file this report used to write
-        old.unlink(missing_ok=True)
+    name = str(((result.get("meta") or {}).get("name") or "")).strip()
+    name = re.sub(r"[^\w .()&+-]+", "_", name).strip()
+    path = out / (f"{name} new.pdf" if name else "new.pdf")
+    for old in out.glob("* new.pdf"):     # a copy under an earlier publication name
+        if old != path:
+            old.unlink(missing_ok=True)
+    (out / "new.pdf").unlink(missing_ok=True) if path.name != "new.pdf" else None
     ids = issue_ids(result, size_change)
     if not ids:
         path.unlink(missing_ok=True)
@@ -148,5 +161,6 @@ def build(result: dict, out_dir: str | Path, size_change: float = 0.40) -> Path 
               "summary": {"result": "fail", "fail": 0, "warn": 0, "pass": 0, **(result.get("summary") or {})}}
     # these checks are flagged for a person to look at, not judged: the section badge says so
     return pdf_report.build(scoped, out, options={"include": INCLUDE, "filter": {"ids": ids},
-                                                  "status_label": MANUAL_REVIEW},
+                                                  "status_label": MANUAL_REVIEW,
+                                                  "severity_label": REVIEW_SEVERITY},
                             filename=path.name)

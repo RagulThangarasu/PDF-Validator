@@ -1216,6 +1216,8 @@ def compare_url(baseline: str, url: str, out_dir: str, cfg: dict | None = None, 
         user=h.get("user", ""), password=h.get("password", ""), crawl=crawl, max_pages=max_pages,
         site=cfg.get("site", {}) if cfg.get("site", {}).get("enabled", True) else None, toc_l1=toc_l1,
         concurrency=int(h.get("concurrency") or hcfg.get("concurrency", 1) or 1),
+        timeout_ms=int(h.get("timeout_ms") or hcfg.get("timeout_ms", 0) or 0),
+        host_concurrency=int(h.get("host_concurrency") or hcfg.get("host_concurrency", 0) or 0),
         progress=lambda f, m: report(0.3 * f, m))
     site = info.pop("site", None)
     if site is not None:
